@@ -3,17 +3,20 @@ import logging
 import requests
 
 import settings
-from .base import BaseConnector
 
 logger = logging.getLogger(__name__)
 
 
-class BetfairConnector(BaseConnector):
+class BetfairConnector:
     def __init__(self):
         super().__init__("betfair")
         self.app_key = settings.BETFAIR_CONFIG["APP_KEY"]
         self.session_token = settings.BETFAIR_CONFIG["SESSION_TOKEN"]
         self.rpc_url = "https://api.betfair.com/exchange/betting/json-rpc/v1"
+
+        if not self.app_key or not self.session_token:
+            logger.error("Betfair API key or session token not found")
+            raise RuntimeError("Betfair API key or session token not found")
 
     def _get_headers(self) -> dict:
         """Get headers for Betfair requests."""
@@ -38,23 +41,6 @@ class BetfairConnector(BaseConnector):
     def _build_market_filter(self, eventTypeId: int, marketType: str) -> dict:
         """Build a market filter for Betfair."""
         return {"eventTypeIds": [str(eventTypeId)], "marketTypeCodes": [marketType]}
-
-    def connect(self) -> bool:
-        """Connect to Betfair."""
-        try:
-            self._rpc_call("SportsAPING/v1.0/listEventTypes", {"filter": {}})
-            self.is_connected = True
-            logger.debug("Betfair connector connected successfully.")
-            return True
-        except Exception:
-            logger.error("Betfair connector failed to connect.")
-            self.is_connected = False
-            return False
-
-    def disconnect(self) -> bool:
-        """Disconnect from Betfair."""
-        self.is_connected = False
-        return True
 
     def get_markets(self) -> list:
         """Return all markets."""

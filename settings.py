@@ -10,8 +10,10 @@ BETFAIR_CONFIG = {
 }
 
 POLYMARKET_CONFIG = {
-    "API_KEY": os.environ.get("POLYMARKET_API_KEY"),
-    "SECRET": os.environ.get("POLYMARKET_SECRET"),
-    "PASSPHRASE": os.environ.get("POLYMARKET_PASSPHRASE"),
     "ADDRESS": os.environ.get("POLYMARKET_ADDRESS"),
+    "PRIVATE_KEY": os.environ.get("POLYMARKET_PRIVATE_KEY"),
+    "SIGNATURE_TYPE": int(os.environ.get("POLYMARKET_SIGNATURE_TYPE", "1")),
 }
+
+
+ODDSAPI_CONFIG = {"API_KEY": os.environ.get("ODDSAPI_API_KEY")}
