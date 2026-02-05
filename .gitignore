@@ -13,3 +13,8 @@ build/
 .env
 *.log
 .idea/
+
+logs/
+data/
+!logs/.gitkeep
+!data/.gitkeep

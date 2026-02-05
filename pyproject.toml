@@ -1,8 +1,11 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "totem-mm"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
@@ -10,3 +13,9 @@ dependencies = [
     "py-clob-client>=0.34.0",
     "pydantic>=2.0",
 ]
+
+[tool.setuptools]
+packages = ["connectors", "models", "utils"]
+
+[tool.setuptools.package-data]
+"*" = ["*.py"]

@@ -7,6 +7,7 @@ dotenv.load_dotenv()
 BETFAIR_CONFIG = {
     "APP_KEY": os.environ.get("BETFAIR_APP_KEY"),
     "SESSION_TOKEN": os.environ.get("BETFAIR_SESSION_TOKEN"),
+    "RPC_URL": os.environ.get("BETFAIR_RPC_URL"),
 }
 
 POLYMARKET_CONFIG = {
