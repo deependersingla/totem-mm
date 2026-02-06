@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["connectors", "models", "utils"]
+packages = ["connectors", "connectors.betfair", "connectors.polymarket", "models", "utils", "pricing"]
 
 [tool.setuptools.package-data]
 "*" = ["*.py"]

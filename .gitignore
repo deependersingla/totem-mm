@@ -18,3 +18,5 @@ logs/
 data/
 !logs/.gitkeep
 !data/.gitkeep
+
+test.py
