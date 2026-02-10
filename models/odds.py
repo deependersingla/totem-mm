@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-OddsProvider = Literal["betfair", "oddsapi"]
+OddsProvider = Literal["betfair", "oddsapi", "polymarket"]
 OddsSide = Literal["back", "lay"]
 
 

@@ -7,6 +7,7 @@ from models.odds import (
     OddsSide,
     Outcome,
 )
+from models.rfq import PriceQuote, QuoteSubmission
 
 __all__ = [
     "Event",
@@ -16,4 +17,6 @@ __all__ = [
     "OddsQuote",
     "OddsSide",
     "Outcome",
+    "PriceQuote",
+    "QuoteSubmission",
 ]
