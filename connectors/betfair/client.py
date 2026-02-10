@@ -24,6 +24,7 @@ class BetfairClient:
     DEFAULT_TIMEOUT = 10
     DEFAULT_MAX_RETRIES = 3
     DEFAULT_RETRY_DELAY = 1
+    KEEP_ALIVE_URL = "https://identitysso.betfair.com/api/keepAlive"
 
     def __init__(
         self, 
@@ -70,8 +71,8 @@ class BetfairClient:
 
     # PUBLIC API METHODS
     def call(
-        self, 
-        method: str, 
+        self,
+        method: str,
         params: Dict[str, Any],
         request_id: int = 1
     ) -> Dict[str, Any]:
@@ -87,6 +88,45 @@ class BetfairClient:
         self._validate_response(response)
 
         return response
+
+    def keep_alive(self) -> Dict[str, Any]:
+        """Keep the Betfair session token alive.
+
+        Calls the Betfair Identity SSO keep-alive endpoint to prevent
+        the session token from expiring.
+
+        Returns:
+            dict: Response containing 'status' ('SUCCESS' or 'FAIL'),
+                  'token' (current session token), and 'error' (if any).
+        """
+        headers = {
+            "Accept": "application/json",
+            "X-Application": self.app_key,
+            "X-Authentication": self.session_token,
+        }
+
+        try:
+            response = requests.get(
+                self.KEEP_ALIVE_URL,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if result.get("status") == "SUCCESS":
+                logger.info("Betfair session keep-alive successful")
+            else:
+                logger.warning(
+                    "Betfair session keep-alive failed: %s",
+                    result.get("error", "Unknown error"),
+                )
+
+            return result
+
+        except requests.RequestException as exc:
+            logger.error("Betfair keep-alive request failed: %s", exc)
+            raise BetfairTransportError(f"Keep-alive failed: {exc}") from exc
 
 
 
