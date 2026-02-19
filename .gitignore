@@ -12,6 +12,7 @@ dist/
 build/
 .env
 *.log
+certs/
 .idea/
 
 logs/
