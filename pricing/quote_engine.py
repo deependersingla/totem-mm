@@ -180,13 +180,33 @@ class QuoteEngine:
     def _parse_request_size(rfq_request: dict[str, Any], requester_side: str) -> float:
         """Extract the token quantity from the RFQ request.
 
-        Polymarket returns sizes in smallest units (6 decimal places).
+        Polymarket sizes may arrive in either:
+        - base units (6 decimals, e.g. "50000000" for 50.0 tokens), or
+        - human token units (e.g. 50 or 50.0), depending on the API surface.
+
         BUY  → requester receives tokens → ``size_out`` is the token amount.
         SELL → requester sends tokens    → ``size_in``  is the token amount.
         """
         field = "size_out" if requester_side == "BUY" else "size_in"
-        raw = rfq_request.get(field) or "0"
-        return float(raw) / (10**_TOKEN_DECIMALS)
+        raw = rfq_request.get(field) or 0
+
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+        # Heuristic: values in base units are typically large integers (>= 1e6).
+        # If the value looks like a small number, treat it as already being in tokens.
+        is_base_units = False
+        if isinstance(raw, (int, float)):
+            is_base_units = value >= 10**_TOKEN_DECIMALS
+        elif isinstance(raw, str):
+            if "." in raw:
+                is_base_units = False
+            else:
+                is_base_units = value >= 10**_TOKEN_DECIMALS
+
+        return value / (10**_TOKEN_DECIMALS) if is_base_units else value
 
     def _cap_size(self, request_tokens: float, price: float) -> float:
         """Return the largest quote size (in tokens) that fits within per-quote and portfolio limits."""
