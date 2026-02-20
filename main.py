@@ -1,3 +1,13 @@
+"""
+totem-mm Main Application
+
+Market maker for Betfair/Polymarket with support for both polling and streaming modes.
+
+To switch between modes:
+- For Betfair: Comment/uncomment the STREAMING or POLLING sections below
+- For Polymarket: Comment/uncomment the STREAMING or POLLING sections below
+"""
+
 import asyncio
 import logging
 import os
@@ -9,9 +19,12 @@ from fastapi import FastAPI, HTTPException
 
 import settings
 from connectors.betfair.client import BetfairClient
-from connectors.betfair.prices import AsyncBetfairPriceFeed
+from connectors.betfair.poll import AsyncBetfairPollFeed
+# Streaming imports are conditional - only imported when needed
+# from connectors.betfair.stream import AsyncBetfairStreamFeed
+# from connectors.polymarket.stream import AsyncPolymarketStreamListener
 from connectors.polymarket.client import PolymarketClient
-from connectors.polymarket.rfq_listener import AsyncRFQListener
+from connectors.polymarket.poll import AsyncPolymarketPollListener
 from pricing.quote_engine import QuoteEngine
 from utils.logging_config import setup_logging
 
@@ -20,6 +33,7 @@ setup_logging(log_level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Betfair session keep-alive interval (default: 20 minutes)
+# Only used in polling mode
 KEEP_ALIVE_INTERVAL = float(os.environ.get("BETFAIR_KEEP_ALIVE_INTERVAL", "1200"))
 
 # Betfair market IDs (comma-separated)
@@ -29,6 +43,15 @@ BETFAIR_MARKET_IDS = [
     if mid.strip()
 ]
 
+# =============================================================================
+# Configuration: Choose your mode
+# =============================================================================
+# Set these to True to enable streaming, False for polling
+USE_BETFAIR_STREAMING = False    # Set to True for streaming mode
+USE_POLYMARKET_STREAMING = False  # Set to True for streaming mode
+# USE_BETFAIR_STREAMING = True    # Set to False for polling mode
+# USE_POLYMARKET_STREAMING = True  # Set to False for polling mode
+
 
 # =============================================================================
 # Global State
@@ -36,10 +59,17 @@ BETFAIR_MARKET_IDS = [
 
 class AppState:
     def __init__(self):
+        # Betfair components
         self.betfair_client: Optional[BetfairClient] = None
-        self.price_feed: Optional[AsyncBetfairPriceFeed] = None
-        self.rfq_listener: Optional[AsyncRFQListener] = None
+        self.price_feed: Optional[AsyncBetfairPollFeed | AsyncBetfairStreamFeed] = None
         self.keep_alive_task: Optional[asyncio.Task] = None
+
+        # Polymarket components
+        self.rfq_listener: Optional[
+            AsyncPolymarketPollListener | AsyncPolymarketStreamListener
+        ] = None
+
+        # Common
         self.stop_event: Optional[asyncio.Event] = None
         self.started_at: Optional[datetime] = None
 
@@ -52,7 +82,7 @@ state = AppState()
 # =============================================================================
 
 async def betfair_keep_alive_loop(client: BetfairClient, stop_event: asyncio.Event) -> None:
-    """Periodically call Betfair keep-alive to prevent session expiry."""
+    """Periodically call Betfair keep-alive to prevent session expiry (polling mode only)."""
     logger.info(
         "Starting Betfair session keep-alive (interval=%.0fs)",
         KEEP_ALIVE_INTERVAL,
@@ -83,29 +113,71 @@ async def lifespan(_app: FastAPI):
     """Startup and shutdown lifecycle."""
     logger.info("Starting totem-mm")
 
-    # ── Betfair client and price feed ──────────────────────────────
+    # ── Betfair Price Feed ──────────────────────────────────────────────
     if not BETFAIR_MARKET_IDS:
         logger.error("BETFAIR_MARKET_IDS not configured. Set it in .env (comma-separated market IDs)")
     else:
-        state.betfair_client = BetfairClient()
         logger.info("Configured Betfair market IDs: %s", BETFAIR_MARKET_IDS)
 
-        state.price_feed = AsyncBetfairPriceFeed(
-            client=state.betfair_client,
-            market_ids=BETFAIR_MARKET_IDS,
-            poll_interval=10,
-        )
-        await state.price_feed.start()
+        # =====================================================================
+        # BETFAIR: STREAMING MODE (Real-time WebSocket updates)
+        # =====================================================================
+        if USE_BETFAIR_STREAMING:
+            logger.info("=" * 80)
+            logger.info("BETFAIR: Using STREAMING mode (WebSocket)")
+            logger.info("=" * 80)
 
-        # ── graceful shutdown setup ────────────────────────────────────
-        state.stop_event = asyncio.Event()
+            # Lazy import - only load when streaming is enabled
+            try:
+                from connectors.betfair.stream import AsyncBetfairStreamFeed
+            except ImportError as e:
+                logger.error(
+                    "Failed to import Betfair streaming module. "
+                    "Install with: pip install betfairlightweight>=2.20.0"
+                )
+                raise
 
-        # ── Betfair session keep-alive ─────────────────────────────────
-        state.keep_alive_task = asyncio.create_task(
-            betfair_keep_alive_loop(state.betfair_client, state.stop_event)
-        )
+            state.price_feed = AsyncBetfairStreamFeed(
+                username=settings.BETFAIR_CONFIG["USERNAME"],
+                password=settings.BETFAIR_CONFIG["PASSWORD"],
+                app_key=settings.BETFAIR_CONFIG["APP_KEY"],
+                market_ids=BETFAIR_MARKET_IDS,
+                certs=settings.BETFAIR_CONFIG.get("CERTS"),
+                cert_file=settings.BETFAIR_CONFIG.get("CERT_FILE"),
+            )
+            await state.price_feed.start()
+            state.stop_event = asyncio.Event()
+            # No keep-alive needed for streaming (handled by betfairlightweight)
 
-        # ── Polymarket RFQ system ─────────────────────────────────────
+        # =====================================================================
+        # BETFAIR: POLLING MODE (HTTP polling every N seconds)
+        # =====================================================================
+        else:
+            logger.info("=" * 80)
+            logger.info("BETFAIR: Using POLLING mode (HTTP)")
+            logger.info("=" * 80)
+            logger.warning(
+                "For better latency, enable streaming by setting BETFAIR_USERNAME, BETFAIR_PASSWORD, "
+                "BETFAIR_APP_KEY, and SSL certificates (BETFAIR_CERTS or BETFAIR_CERT_FILE) in .env"
+            )
+
+            state.betfair_client = BetfairClient()
+            state.price_feed = AsyncBetfairPollFeed(
+                client=state.betfair_client,
+                market_ids=BETFAIR_MARKET_IDS,
+                poll_interval=10,
+            )
+            await state.price_feed.start()
+
+            # Graceful shutdown setup
+            state.stop_event = asyncio.Event()
+
+            # Betfair session keep-alive (only needed for polling)
+            state.keep_alive_task = asyncio.create_task(
+                betfair_keep_alive_loop(state.betfair_client, state.stop_event)
+            )
+
+        # ── Polymarket RFQ System ─────────────────────────────────────
         if settings.TOKEN_MAP:
             polymarket_client = PolymarketClient()
             quote_engine = QuoteEngine(
@@ -114,14 +186,52 @@ async def lifespan(_app: FastAPI):
                 max_quote_size_usdc=settings.RFQ_CONFIG["MAX_QUOTE_SIZE_USDC"],
                 max_exposure_usdc=settings.RFQ_CONFIG["MAX_EXPOSURE_USDC"],
             )
-            state.rfq_listener = AsyncRFQListener(
-                client=polymarket_client,
-                quote_engine=quote_engine,
-                snapshot_fn=state.price_feed.get_snapshot,
-                poll_interval=settings.RFQ_CONFIG["POLL_INTERVAL"],
-                quote_ttl=settings.RFQ_CONFIG["QUOTE_TTL"],
-            )
-            await state.rfq_listener.start()
+
+            # =================================================================
+            # POLYMARKET: STREAMING MODE (WebSocket)
+            # =================================================================
+            if USE_POLYMARKET_STREAMING:
+                logger.info("=" * 80)
+                logger.info("POLYMARKET: Using STREAMING mode (WebSocket)")
+                logger.info("=" * 80)
+
+                # Lazy import - only load when streaming is enabled
+                try:
+                    from connectors.polymarket.stream import AsyncPolymarketStreamListener
+                except ImportError as e:
+                    logger.error(
+                        "Failed to import Polymarket streaming module. "
+                        "Install with: pip install websockets>=12.0"
+                    )
+                    raise
+
+                state.rfq_listener = AsyncPolymarketStreamListener(
+                    client=polymarket_client,
+                    quote_engine=quote_engine,
+                    snapshot_fn=state.price_feed.get_snapshot,
+                    markets=None,  # Optional: filter by market IDs
+                    quote_ttl=settings.RFQ_CONFIG["QUOTE_TTL"],
+                )
+                await state.rfq_listener.start()
+
+            # =================================================================
+            # POLYMARKET: POLLING MODE (HTTP polling every N seconds)
+            # =================================================================
+            else:
+                logger.info("=" * 80)
+                logger.info("POLYMARKET: Using POLLING mode (HTTP)")
+                logger.info("=" * 80)
+
+                state.rfq_listener = AsyncPolymarketPollListener(
+                    client=polymarket_client,
+                    quote_engine=quote_engine,
+                    snapshot_fn=state.price_feed.get_snapshot,
+                    markets=None,  # Optional: filter by market IDs
+                    poll_interval=settings.RFQ_CONFIG["POLL_INTERVAL"],
+                    quote_ttl=settings.RFQ_CONFIG["QUOTE_TTL"],
+                )
+                await state.rfq_listener.start()
+
         else:
             logger.warning(
                 "TOKEN_MAP not configured — RFQ system disabled. Set TOKEN_MAP env var to enable."
@@ -143,7 +253,7 @@ async def lifespan(_app: FastAPI):
     if state.price_feed:
         await state.price_feed.stop()
 
-    # Wait for keep-alive task to finish
+    # Wait for keep-alive task to finish (only exists for polling mode)
     if state.keep_alive_task:
         try:
             await asyncio.wait_for(state.keep_alive_task, timeout=5)
@@ -185,11 +295,16 @@ async def get_status():
     if state.started_at:
         uptime = (datetime.now() - state.started_at).total_seconds()
 
+    betfair_mode = "streaming" if USE_BETFAIR_STREAMING else "polling"
+    polymarket_mode = "streaming" if USE_POLYMARKET_STREAMING else "polling"
+
     return {
         "status": "running" if state.price_feed else "stopped",
         "started_at": state.started_at.isoformat() if state.started_at else None,
         "uptime_seconds": uptime,
         "betfair_market_ids": BETFAIR_MARKET_IDS,
+        "betfair_mode": betfair_mode,
+        "polymarket_mode": polymarket_mode,
         "rfq_enabled": state.rfq_listener is not None,
         "token_map_configured": bool(settings.TOKEN_MAP),
     }
@@ -240,8 +355,13 @@ async def get_active_quotes():
 @app.get("/config")
 async def get_config():
     """Get current configuration."""
+    betfair_mode = "streaming" if USE_BETFAIR_STREAMING else "polling"
+    polymarket_mode = "streaming" if USE_POLYMARKET_STREAMING else "polling"
+
     return {
         "betfair_market_ids": BETFAIR_MARKET_IDS,
+        "betfair_mode": betfair_mode,
+        "polymarket_mode": polymarket_mode,
         "keep_alive_interval": KEEP_ALIVE_INTERVAL,
         "rfq_config": {
             "poll_interval": settings.RFQ_CONFIG["POLL_INTERVAL"],
@@ -249,6 +369,16 @@ async def get_config():
             "spread": settings.RFQ_CONFIG["SPREAD"],
             "max_quote_size_usdc": settings.RFQ_CONFIG["MAX_QUOTE_SIZE_USDC"],
             "max_exposure_usdc": settings.RFQ_CONFIG["MAX_EXPOSURE_USDC"],
+        },
+        "polymarket_rtds": {
+            "ws_url": settings.POLYMARKET_RTDS_CONFIG["WS_URL"],
+            "ping_interval_seconds": settings.POLYMARKET_RTDS_CONFIG["PING_INTERVAL_SECONDS"],
+            "reconnect_delay_seconds": settings.POLYMARKET_RTDS_CONFIG["RECONNECT_DELAY_SECONDS"],
+            "log_raw_messages": settings.POLYMARKET_RTDS_CONFIG["LOG_RAW_MESSAGES"],
+        },
+        "rfq_execution": {
+            "dry_run": settings.RFQ_EXECUTION_CONFIG["DRY_RUN"],
+            "approve_orders": settings.RFQ_EXECUTION_CONFIG["APPROVE_ORDERS"],
         },
         "token_map_entries": len(settings.TOKEN_MAP),
     }
