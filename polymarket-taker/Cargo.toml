@@ -1,0 +1,30 @@
+[package]
+name = "polymarket-taker"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra low-latency Polymarket CLOB taker — oracle-driven FAK order placement"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+ethers = { version = "2", features = ["rustls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "2"
+chrono = "0.4"
+url = "2"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-util = "0.7"
