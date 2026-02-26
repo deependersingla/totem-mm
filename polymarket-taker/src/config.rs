@@ -21,10 +21,10 @@ pub struct Config {
     pub team_b_name: String,
     pub team_a_token_id: String,
     pub team_b_token_id: String,
+    pub condition_id: String,
     pub first_batting: Team,
 
     pub total_budget_usdc: Decimal,
-    pub initial_buy_usdc: Decimal,
     pub max_trade_usdc: Decimal,
     pub revert_delay_ms: u64,
     pub tick_size: String,
@@ -62,10 +62,10 @@ impl Config {
             team_b_name: env_or("TEAM_B_NAME", "TEAM_B"),
             team_a_token_id: env_or("TEAM_A_TOKEN_ID", ""),
             team_b_token_id: env_or("TEAM_B_TOKEN_ID", ""),
+            condition_id: env_or("CONDITION_ID", ""),
             first_batting,
 
             total_budget_usdc: decimal_env("TOTAL_BUDGET_USDC", "100")?,
-            initial_buy_usdc: decimal_env("INITIAL_BUY_USDC", "20")?,
             max_trade_usdc: decimal_env("MAX_TRADE_USDC", "10")?,
             revert_delay_ms: env_or("REVERT_DELAY_MS", "3000").parse()?,
             tick_size: env_or("TICK_SIZE", "0.01"),

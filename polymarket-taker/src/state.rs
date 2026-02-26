@@ -27,6 +27,13 @@ pub struct EventEntry {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct InventorySnapshot {
+    pub ts: String,
+    pub team_a: Decimal,
+    pub team_b: Decimal,
+}
+
 pub struct AppState {
     pub config: RwLock<Config>,
     pub auth: RwLock<Option<ClobAuth>>,
@@ -37,6 +44,7 @@ pub struct AppState {
     pub book_rx: RwLock<Option<watch::Receiver<(OrderBook, OrderBook)>>>,
     pub book_tx: RwLock<Option<watch::Sender<(OrderBook, OrderBook)>>>,
     pub events: Mutex<VecDeque<EventEntry>>,
+    pub inventory_history: Mutex<Vec<InventorySnapshot>>,
     pub live_order_ids: Mutex<Vec<String>>,
     pub ws_cancel: RwLock<Option<CancellationToken>>,
 }
@@ -57,6 +65,7 @@ impl AppState {
             book_rx: RwLock::new(None),
             book_tx: RwLock::new(None),
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
+            inventory_history: Mutex::new(Vec::new()),
             live_order_ids: Mutex::new(Vec::new()),
             ws_cancel: RwLock::new(None),
         })
@@ -73,6 +82,15 @@ impl AppState {
             events.pop_front();
         }
         events.push_back(entry);
+    }
+
+    pub fn snapshot_inventory(&self) {
+        let pos = self.position.lock().unwrap();
+        self.inventory_history.lock().unwrap().push(InventorySnapshot {
+            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            team_a: pos.team_a_tokens,
+            team_b: pos.team_b_tokens,
+        });
     }
 
     pub fn track_order(&self, order_id: String) {
@@ -105,5 +123,6 @@ impl AppState {
         pos.total_budget = config.total_budget_usdc;
         self.clear_orders();
         self.events.lock().unwrap().clear();
+        self.inventory_history.lock().unwrap().clear();
     }
 }

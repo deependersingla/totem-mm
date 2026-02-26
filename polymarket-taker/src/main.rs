@@ -1,5 +1,6 @@
 mod clob_auth;
 mod config;
+mod ctf;
 mod market_ws;
 mod orders;
 mod position;
