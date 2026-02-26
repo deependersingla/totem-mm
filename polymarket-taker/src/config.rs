@@ -22,9 +22,10 @@ pub struct SavedSettings {
     pub first_batting: Option<String>,
     pub total_budget_usdc: Option<String>,
     pub max_trade_usdc: Option<String>,
-    pub min_trade_price: Option<String>,
-    pub max_trade_price: Option<String>,
+    pub safe_percentage: Option<u64>,
     pub revert_delay_ms: Option<u64>,
+    pub fill_poll_interval_ms: Option<u64>,
+    pub fill_poll_timeout_ms: Option<u64>,
     pub dry_run: Option<bool>,
 }
 
@@ -74,9 +75,10 @@ impl SavedSettings {
             first_batting: Some(format!("{}", config.first_batting)),
             total_budget_usdc: Some(config.total_budget_usdc.to_string()),
             max_trade_usdc: Some(config.max_trade_usdc.to_string()),
-            min_trade_price: Some(config.min_trade_price.to_string()),
-            max_trade_price: Some(config.max_trade_price.to_string()),
+            safe_percentage: Some(config.safe_percentage),
             revert_delay_ms: Some(config.revert_delay_ms),
+            fill_poll_interval_ms: Some(config.fill_poll_interval_ms),
+            fill_poll_timeout_ms: Some(config.fill_poll_timeout_ms),
             dry_run: Some(config.dry_run),
         }
     }
@@ -104,9 +106,10 @@ pub struct Config {
 
     pub total_budget_usdc: Decimal,
     pub max_trade_usdc: Decimal,
-    pub min_trade_price: Decimal,
-    pub max_trade_price: Decimal,
+    pub safe_percentage: u64,
     pub revert_delay_ms: u64,
+    pub fill_poll_interval_ms: u64,
+    pub fill_poll_timeout_ms: u64,
     pub tick_size: String,
 
     pub ws_ping_interval_secs: u64,
@@ -163,12 +166,14 @@ impl Config {
                 "TOTAL_BUDGET_USDC", "100", saved.total_budget_usdc.as_deref())?,
             max_trade_usdc: decimal_env_or_saved(
                 "MAX_TRADE_USDC", "10", saved.max_trade_usdc.as_deref())?,
-            min_trade_price: decimal_env_or_saved(
-                "MIN_TRADE_PRICE", "0.02", saved.min_trade_price.as_deref())?,
-            max_trade_price: decimal_env_or_saved(
-                "MAX_TRADE_PRICE", "0.98", saved.max_trade_price.as_deref())?,
+            safe_percentage: saved.safe_percentage
+                .unwrap_or_else(|| env_or("SAFE_PERCENTAGE", "2").parse().unwrap_or(2)),
             revert_delay_ms: saved.revert_delay_ms
                 .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "3000").parse().unwrap_or(3000)),
+            fill_poll_interval_ms: saved.fill_poll_interval_ms
+                .unwrap_or_else(|| env_or("FILL_POLL_INTERVAL_MS", "500").parse().unwrap_or(500)),
+            fill_poll_timeout_ms: saved.fill_poll_timeout_ms
+                .unwrap_or_else(|| env_or("FILL_POLL_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
             tick_size: env_or("TICK_SIZE", "0.01"),
 
             ws_ping_interval_secs: env_or("WS_PING_INTERVAL_SECS", "10").parse()?,
@@ -210,6 +215,12 @@ impl Config {
                 _ => "0xdFE02Eb6733538f8Ea35D585af8DE5958AD99E40",
             }
         }
+    }
+
+    pub fn safe_price_range(&self) -> (Decimal, Decimal) {
+        let min = Decimal::new(self.safe_percentage as i64, 2);
+        let max = Decimal::ONE - min;
+        (min, max)
     }
 
     pub fn has_wallet(&self) -> bool {

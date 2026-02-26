@@ -161,16 +161,19 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
   </div>
   <div class="row">
-    <div><label>Min Price</label><input id="lMinPrice" type="number" value="0.02" step="0.01" min="0" max="1"></div>
-    <div><label>Max Price</label><input id="lMaxPrice" type="number" value="0.98" step="0.01" min="0" max="1"></div>
+    <div><label>Safe % (cents)</label><input id="lSafePct" type="number" value="2" min="1" max="49"></div>
+    <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
   </div>
   <div class="row">
-    <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
+    <div><label>Fill Poll (ms)</label><input id="lPollInterval" type="number" value="500" min="100"></div>
+    <div><label>Poll Timeout (ms)</label><input id="lPollTimeout" type="number" value="5000" min="1000"></div>
+  </div>
+  <div class="row">
     <div><label>Dry Run</label>
       <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
     </div>
   </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:4px">Only trades when both team prices are within min-max range</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
   <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
 </div>
 
@@ -369,9 +372,10 @@ async function loadConfig() {
     document.getElementById('sNegRisk').value = String(c.neg_risk);
     document.getElementById('lBudget').value = c.total_budget_usdc;
     document.getElementById('lMaxTrade').value = c.max_trade_usdc;
-    document.getElementById('lMinPrice').value = c.min_trade_price;
-    document.getElementById('lMaxPrice').value = c.max_trade_price;
+    document.getElementById('lSafePct').value = c.safe_percentage;
     document.getElementById('lDelay').value = c.revert_delay_ms;
+    document.getElementById('lPollInterval').value = c.fill_poll_interval_ms;
+    document.getElementById('lPollTimeout').value = c.fill_poll_timeout_ms;
     document.getElementById('lDryRun').value = String(c.dry_run);
     document.getElementById('wSigType').value = c.signature_type;
     if (c.polymarket_address) document.getElementById('wAddr').value = c.polymarket_address;
@@ -409,9 +413,10 @@ async function saveLimits() {
   await api('/api/limits', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
     total_budget_usdc: document.getElementById('lBudget').value,
     max_trade_usdc: document.getElementById('lMaxTrade').value,
-    min_trade_price: document.getElementById('lMinPrice').value,
-    max_trade_price: document.getElementById('lMaxPrice').value,
+    safe_percentage: parseInt(document.getElementById('lSafePct').value),
     revert_delay_ms: parseInt(document.getElementById('lDelay').value),
+    fill_poll_interval_ms: parseInt(document.getElementById('lPollInterval').value),
+    fill_poll_timeout_ms: parseInt(document.getElementById('lPollTimeout').value),
     dry_run: document.getElementById('lDryRun').value === 'true',
   })});
 }

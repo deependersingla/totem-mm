@@ -4,6 +4,7 @@ use ethers::utils::keccak256;
 use rand::Rng;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
 use crate::types::{FakOrder, Side};
@@ -243,10 +244,10 @@ pub async fn post_fak_order(
     tag: &str,
 ) -> Result<PostOrderResponse> {
     tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
-        price = %order.price, size = %order.size, "posting FOK order");
+        price = %order.price, size = %order.size, "posting FAK order");
 
     let signed = build_signed_order(config, auth, order)?;
-    post_order(config, auth, &signed, "FOK", tag).await
+    post_order(config, auth, &signed, "FAK", tag).await
 }
 
 pub async fn post_limit_order(
@@ -260,6 +261,61 @@ pub async fn post_limit_order(
 
     let signed = build_signed_order(config, auth, order)?;
     post_order(config, auth, &signed, "GTC", tag).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenOrder {
+    pub id: Option<String>,
+    pub status: Option<String>,
+    pub original_size: Option<String>,
+    pub size_matched: Option<String>,
+    pub price: Option<String>,
+}
+
+impl OpenOrder {
+    pub fn filled_size(&self) -> Decimal {
+        self.size_matched.as_deref()
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn fill_price(&self) -> Decimal {
+        self.price.as_deref()
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_deref(),
+            Some("matched") | Some("cancelled") | Some("expired")
+        )
+    }
+}
+
+pub async fn get_order(
+    auth: &ClobAuth,
+    order_id: &str,
+) -> Result<OpenOrder> {
+    let path = format!("/order/{order_id}");
+    let headers = auth.l2_headers("GET", &path, None)?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth.http_client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("get_order failed: {status} {body}");
+    }
+
+    let order: OpenOrder = serde_json::from_str(&body)?;
+    Ok(order)
 }
 
 pub async fn cancel_order(

@@ -134,9 +134,10 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "first_batting": format!("{}", config.first_batting),
         "total_budget_usdc": config.total_budget_usdc.to_string(),
         "max_trade_usdc": config.max_trade_usdc.to_string(),
-        "min_trade_price": config.min_trade_price.to_string(),
-        "max_trade_price": config.max_trade_price.to_string(),
+        "safe_percentage": config.safe_percentage,
         "revert_delay_ms": config.revert_delay_ms,
+        "fill_poll_interval_ms": config.fill_poll_interval_ms,
+        "fill_poll_timeout_ms": config.fill_poll_timeout_ms,
         "dry_run": config.dry_run,
         "signature_type": config.signature_type,
         "neg_risk": config.neg_risk,
@@ -248,9 +249,10 @@ async fn post_wallet(
 struct LimitsRequest {
     total_budget_usdc: Option<String>,
     max_trade_usdc: Option<String>,
-    min_trade_price: Option<String>,
-    max_trade_price: Option<String>,
+    safe_percentage: Option<u64>,
     revert_delay_ms: Option<u64>,
+    fill_poll_interval_ms: Option<u64>,
+    fill_poll_timeout_ms: Option<u64>,
     dry_run: Option<bool>,
 }
 
@@ -267,13 +269,10 @@ async fn post_limits(
     if let Some(v) = &body.max_trade_usdc {
         config.max_trade_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_trade".into()))?;
     }
-    if let Some(v) = &body.min_trade_price {
-        config.min_trade_price = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid min_price".into()))?;
-    }
-    if let Some(v) = &body.max_trade_price {
-        config.max_trade_price = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_price".into()))?;
-    }
+    if let Some(v) = body.safe_percentage { config.safe_percentage = v; }
     if let Some(v) = body.revert_delay_ms { config.revert_delay_ms = v; }
+    if let Some(v) = body.fill_poll_interval_ms { config.fill_poll_interval_ms = v; }
+    if let Some(v) = body.fill_poll_timeout_ms { config.fill_poll_timeout_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
     config.persist();
 
