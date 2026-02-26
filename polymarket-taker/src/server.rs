@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
 use crate::clob_auth::ClobAuth;
+use crate::ctf;
 use crate::market_ws;
 use crate::orders;
 use crate::state::{AppState, MatchPhase};
@@ -26,6 +27,7 @@ pub fn build_router(state: S) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/config", get(get_config))
         .route("/api/events", get(get_events))
+        .route("/api/inventory", get(get_inventory))
         .route("/api/setup", post(post_setup))
         .route("/api/wallet", post(post_wallet))
         .route("/api/limits", post(post_limits))
@@ -35,6 +37,9 @@ pub fn build_router(state: S) -> Router {
         .route("/api/match-over", post(post_match_over))
         .route("/api/cancel-all", post(post_cancel_all))
         .route("/api/reset", post(post_reset))
+        .route("/api/ctf-split", post(post_ctf_split))
+        .route("/api/ctf-merge", post(post_ctf_merge))
+        .route("/api/ctf-redeem", post(post_ctf_redeem))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -123,9 +128,9 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "team_b_name": config.team_b_name,
         "team_a_token_id": config.team_a_token_id,
         "team_b_token_id": config.team_b_token_id,
+        "condition_id": config.condition_id,
         "first_batting": format!("{}", config.first_batting),
         "total_budget_usdc": config.total_budget_usdc.to_string(),
-        "initial_buy_usdc": config.initial_buy_usdc.to_string(),
         "max_trade_usdc": config.max_trade_usdc.to_string(),
         "revert_delay_ms": config.revert_delay_ms,
         "dry_run": config.dry_run,
@@ -141,6 +146,11 @@ async fn get_events(State(state): State<S>) -> Json<Vec<crate::state::EventEntry
     Json(events.iter().cloned().collect())
 }
 
+async fn get_inventory(State(state): State<S>) -> Json<Vec<crate::state::InventorySnapshot>> {
+    let history = state.inventory_history.lock().unwrap();
+    Json(history.clone())
+}
+
 // ── Setup (teams + tokens) ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -149,6 +159,7 @@ struct SetupRequest {
     team_b_name: Option<String>,
     team_a_token_id: Option<String>,
     team_b_token_id: Option<String>,
+    condition_id: Option<String>,
     first_batting: Option<String>,
     neg_risk: Option<bool>,
 }
@@ -167,6 +178,7 @@ async fn post_setup(
     if let Some(v) = body.team_b_name { config.team_b_name = v; }
     if let Some(v) = body.team_a_token_id { config.team_a_token_id = v; }
     if let Some(v) = body.team_b_token_id { config.team_b_token_id = v; }
+    if let Some(v) = body.condition_id { config.condition_id = v; }
     if let Some(v) = body.neg_risk { config.neg_risk = v; }
     if let Some(v) = &body.first_batting {
         config.first_batting = if v.to_uppercase() == "B" { Team::TeamB } else { Team::TeamA };
@@ -227,7 +239,6 @@ async fn post_wallet(
 #[derive(Deserialize)]
 struct LimitsRequest {
     total_budget_usdc: Option<String>,
-    initial_buy_usdc: Option<String>,
     max_trade_usdc: Option<String>,
     revert_delay_ms: Option<u64>,
     dry_run: Option<bool>,
@@ -242,9 +253,6 @@ async fn post_limits(
     if let Some(v) = &body.total_budget_usdc {
         config.total_budget_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget".into()))?;
         state.position.lock().unwrap().total_budget = config.total_budget_usdc;
-    }
-    if let Some(v) = &body.initial_buy_usdc {
-        config.initial_buy_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid initial_buy".into()))?;
     }
     if let Some(v) = &body.max_trade_usdc {
         config.max_trade_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_trade".into()))?;
@@ -311,15 +319,13 @@ async fn post_start_innings(
         }
     });
 
-    // wait for book to populate, then buy initial tokens + start strategy
+    // wait for book to populate, then start strategy (no initial buy from CLOB)
     let st = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         let config = st.config.read().unwrap().clone();
         let auth = st.auth.read().unwrap().clone().unwrap();
-
-        strategy::buy_initial_tokens(&config, &auth, &book_rx, &st.position, &st).await;
 
         strategy::run(&config, &auth, signal_rx, book_rx, st.position.clone(), st.clone()).await;
 
@@ -472,4 +478,117 @@ async fn post_reset(
     state.reset_for_new_match();
     state.push_event("reset", "state reset for new match");
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── CTF Split (USDC → YES + NO tokens on-chain) ────────────────────────────
+
+#[derive(Deserialize)]
+struct CtfSplitRequest {
+    amount_usdc: u64,
+}
+
+async fn post_ctf_split(
+    State(state): State<S>,
+    Json(body): Json<CtfSplitRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if config.condition_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "condition_id not set — fill it in Setup".into()));
+    }
+    if body.amount_usdc == 0 {
+        return Err((StatusCode::BAD_REQUEST, "amount must be > 0".into()));
+    }
+
+    state.push_event("ctf", &format!("splitting {} USDC → YES + NO tokens…", body.amount_usdc));
+
+    match ctf::split(&config, &config.condition_id, body.amount_usdc).await {
+        Ok(tx_hash) => {
+            let mut pos = state.position.lock().unwrap();
+            let added = rust_decimal::Decimal::from(body.amount_usdc);
+            pos.team_a_tokens += added;
+            pos.team_b_tokens += added;
+            drop(pos);
+            state.snapshot_inventory();
+
+            state.push_event("ctf", &format!("split OK — tx: {tx_hash}"));
+            Ok(Json(serde_json::json!({"ok": true, "tx": tx_hash})))
+        }
+        Err(e) => {
+            state.push_event("ctf", &format!("split FAILED: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("split failed: {e}")))
+        }
+    }
+}
+
+// ── CTF Merge (YES + NO tokens → USDC on-chain) ────────────────────────────
+
+#[derive(Deserialize)]
+struct CtfMergeRequest {
+    amount_tokens: u64,
+}
+
+async fn post_ctf_merge(
+    State(state): State<S>,
+    Json(body): Json<CtfMergeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if config.condition_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "condition_id not set".into()));
+    }
+    if body.amount_tokens == 0 {
+        return Err((StatusCode::BAD_REQUEST, "amount must be > 0".into()));
+    }
+
+    state.push_event("ctf", &format!("merging {} YES + NO tokens → USDC…", body.amount_tokens));
+
+    match ctf::merge(&config, &config.condition_id, body.amount_tokens).await {
+        Ok(tx_hash) => {
+            let mut pos = state.position.lock().unwrap();
+            let removed = rust_decimal::Decimal::from(body.amount_tokens);
+            pos.team_a_tokens = (pos.team_a_tokens - removed).max(rust_decimal::Decimal::ZERO);
+            pos.team_b_tokens = (pos.team_b_tokens - removed).max(rust_decimal::Decimal::ZERO);
+            drop(pos);
+            state.snapshot_inventory();
+
+            state.push_event("ctf", &format!("merge OK — tx: {tx_hash}"));
+            Ok(Json(serde_json::json!({"ok": true, "tx": tx_hash})))
+        }
+        Err(e) => {
+            state.push_event("ctf", &format!("merge FAILED: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("merge failed: {e}")))
+        }
+    }
+}
+
+// ── CTF Redeem (winning tokens → USDC after resolution) ─────────────────────
+
+async fn post_ctf_redeem(
+    State(state): State<S>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if config.condition_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "condition_id not set".into()));
+    }
+
+    state.push_event("ctf", "redeeming winning tokens for USDC…");
+
+    match ctf::redeem(&config, &config.condition_id).await {
+        Ok(tx_hash) => {
+            state.push_event("ctf", &format!("redeem OK — tx: {tx_hash}"));
+            Ok(Json(serde_json::json!({"ok": true, "tx": tx_hash})))
+        }
+        Err(e) => {
+            state.push_event("ctf", &format!("redeem FAILED: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("redeem failed: {e}")))
+        }
+    }
 }

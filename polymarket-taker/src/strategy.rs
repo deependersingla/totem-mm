@@ -131,51 +131,6 @@ pub async fn run(
     tracing::info!("strategy engine stopped");
 }
 
-pub async fn buy_initial_tokens(
-    config: &Config,
-    auth: &ClobAuth,
-    book_rx: &watch::Receiver<(OrderBook, OrderBook)>,
-    position: &Position,
-    app: &Arc<AppState>,
-) {
-    if config.initial_buy_usdc <= Decimal::ZERO {
-        tracing::info!("initial_buy_usdc=0, skipping initial token purchase");
-        return;
-    }
-
-    let per_team = config.initial_buy_usdc / Decimal::TWO;
-    tracing::info!(per_team = %per_team, "buying initial tokens for both teams");
-
-    let books = book_rx.borrow().clone();
-
-    if let Some(ask) = books.0.best_ask() {
-        let size = (per_team / ask.price).min(ask.size);
-        if size > Decimal::ZERO {
-            let order = FakOrder { team: Team::TeamA, side: Side::Buy, price: ask.price, size };
-            execute_fak(config, auth, &order, position, "INITIAL_BUY_A", app).await;
-        }
-    } else {
-        tracing::warn!("no ask for team A — can't buy initial tokens");
-        app.push_event("warn", "no ask for team A");
-    }
-
-    if let Some(ask) = books.1.best_ask() {
-        let size = (per_team / ask.price).min(ask.size);
-        if size > Decimal::ZERO {
-            let order = FakOrder { team: Team::TeamB, side: Side::Buy, price: ask.price, size };
-            execute_fak(config, auth, &order, position, "INITIAL_BUY_B", app).await;
-        }
-    } else {
-        tracing::warn!("no ask for team B — can't buy initial tokens");
-        app.push_event("warn", "no ask for team B");
-    }
-
-    let pos = position.lock().unwrap();
-    let summary = pos.summary(config);
-    tracing::info!(position = %summary, "initial tokens purchased");
-    app.push_event("trade", &format!("initial buy done: {summary}"));
-}
-
 fn team_books(books: &(OrderBook, OrderBook), team: Team) -> (OrderBook, OrderBook) {
     match team {
         Team::TeamA => (books.0.clone(), books.1.clone()),
@@ -229,6 +184,7 @@ async fn execute_fak(
             price = %order.price, size = %order.size, notional = %notional,
             "[DRY RUN] would place FOK order");
         position.lock().unwrap().on_fill(order);
+        app.snapshot_inventory();
         app.push_event("trade", &format!("[DRY] {tag}: {} {} @ {} sz={}", order.side, config.team_name(order.team), order.price, order.size));
         return;
     }
@@ -236,6 +192,7 @@ async fn execute_fak(
     match orders::post_fak_order(config, auth, order, tag).await {
         Ok(resp) if resp.order_id.is_some() => {
             position.lock().unwrap().on_fill(order);
+            app.snapshot_inventory();
             let oid = resp.order_id.unwrap();
             app.push_event("trade", &format!("{tag}: {} {} @ {} sz={} ({})", order.side, config.team_name(order.team), order.price, order.size, oid));
         }
