@@ -14,6 +14,7 @@ pub struct Config {
     pub neg_risk: bool,
     pub chain_id: u64,
 
+    pub polygon_rpc: String,
     pub clob_http: String,
     pub clob_ws: String,
 
@@ -52,6 +53,7 @@ impl Config {
             neg_risk: env_or("NEG_RISK", "false").parse()?,
             chain_id: env_or("CHAIN_ID", "137").parse()?,
 
+            polygon_rpc: env_or("POLYGON_RPC", "https://polygon.llamarpc.com"),
             clob_http: env_or("POLYMARKET_CLOB_HTTP", "https://clob.polymarket.com"),
             clob_ws: env_or(
                 "POLYMARKET_CLOB_WS",

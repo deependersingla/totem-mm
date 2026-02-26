@@ -12,12 +12,11 @@ use crate::config::Config;
 
 const CTF_CONTRACT: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 const USDC_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
-const POLYGON_RPC: &str = "https://polygon-rpc.com";
 
 type SignedClient = SignerMiddleware<Provider<Http>, LocalWallet>;
 
 fn build_client(config: &Config) -> Result<Arc<SignedClient>> {
-    let provider = Provider::<Http>::try_from(POLYGON_RPC)?;
+    let provider = Provider::<Http>::try_from(config.polygon_rpc.as_str())?;
     let key = config.polymarket_private_key.strip_prefix("0x")
         .unwrap_or(&config.polymarket_private_key);
     let key_bytes = hex::decode(key)?;
