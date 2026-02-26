@@ -23,3 +23,8 @@ data/
 test.py
 
 extras
+
+# polymarket-taker (Rust)
+polymarket-taker/target/
+polymarket-taker/.env
+polymarket-taker/settings.json
