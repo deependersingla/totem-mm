@@ -134,7 +134,7 @@ impl Config {
                 .unwrap_or_else(|| env_or("NEG_RISK", "false").parse().unwrap_or(false)),
             chain_id: env_or("CHAIN_ID", "137").parse()?,
 
-            polygon_rpc: env_or("POLYGON_RPC", "https://polygon.llamarpc.com"),
+            polygon_rpc: env_or("POLYGON_RPC", "https://polygon-bor-rpc.publicnode.com"),
             clob_http: env_or("POLYMARKET_CLOB_HTTP", "https://clob.polymarket.com"),
             clob_ws: env_or(
                 "POLYMARKET_CLOB_WS",
