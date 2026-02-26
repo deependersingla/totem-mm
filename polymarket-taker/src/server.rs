@@ -37,6 +37,7 @@ pub fn build_router(state: S) -> Router {
         .route("/api/match-over", post(post_match_over))
         .route("/api/cancel-all", post(post_cancel_all))
         .route("/api/reset", post(post_reset))
+        .route("/api/fetch-market", post(post_fetch_market))
         .route("/api/ctf-balance", post(post_ctf_balance))
         .route("/api/ctf-split", post(post_ctf_split))
         .route("/api/ctf-merge", post(post_ctf_merge))
@@ -133,6 +134,8 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "first_batting": format!("{}", config.first_batting),
         "total_budget_usdc": config.total_budget_usdc.to_string(),
         "max_trade_usdc": config.max_trade_usdc.to_string(),
+        "min_trade_price": config.min_trade_price.to_string(),
+        "max_trade_price": config.max_trade_price.to_string(),
         "revert_delay_ms": config.revert_delay_ms,
         "dry_run": config.dry_run,
         "signature_type": config.signature_type,
@@ -245,6 +248,8 @@ async fn post_wallet(
 struct LimitsRequest {
     total_budget_usdc: Option<String>,
     max_trade_usdc: Option<String>,
+    min_trade_price: Option<String>,
+    max_trade_price: Option<String>,
     revert_delay_ms: Option<u64>,
     dry_run: Option<bool>,
 }
@@ -261,6 +266,12 @@ async fn post_limits(
     }
     if let Some(v) = &body.max_trade_usdc {
         config.max_trade_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_trade".into()))?;
+    }
+    if let Some(v) = &body.min_trade_price {
+        config.min_trade_price = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid min_price".into()))?;
+    }
+    if let Some(v) = &body.max_trade_price {
+        config.max_trade_price = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_price".into()))?;
     }
     if let Some(v) = body.revert_delay_ms { config.revert_delay_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
@@ -484,6 +495,69 @@ async fn post_reset(
     state.reset_for_new_match();
     state.push_event("reset", "state reset for new match");
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Fetch Market from Gamma API ──────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct FetchMarketRequest {
+    slug: String,
+}
+
+async fn post_fetch_market(
+    State(state): State<S>,
+    Json(body): Json<FetchMarketRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.is_match_running() {
+        return Err((StatusCode::CONFLICT, "cannot change setup while match is running".into()));
+    }
+
+    let url = format!("https://gamma-api.polymarket.com/markets?slug={}", body.slug);
+    let resp = reqwest::get(&url).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")))?;
+    let markets: Vec<serde_json::Value> = resp.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse failed: {e}")))?;
+
+    let market = markets.first()
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "no market found for this slug".into()))?;
+
+    let condition_id = market["conditionId"].as_str().unwrap_or("").to_string();
+    let neg_risk = market["negRisk"].as_bool().unwrap_or(false);
+
+    let outcomes: Vec<String> = serde_json::from_str(
+        market["outcomes"].as_str().unwrap_or("[]")
+    ).unwrap_or_default();
+    let token_ids: Vec<String> = serde_json::from_str(
+        market["clobTokenIds"].as_str().unwrap_or("[]")
+    ).unwrap_or_default();
+
+    let team_a_name = outcomes.first().cloned().unwrap_or_default();
+    let team_b_name = outcomes.get(1).cloned().unwrap_or_default();
+    let team_a_token = token_ids.first().cloned().unwrap_or_default();
+    let team_b_token = token_ids.get(1).cloned().unwrap_or_default();
+
+    {
+        let mut config = state.config.write().unwrap();
+        config.team_a_name = team_a_name.clone();
+        config.team_b_name = team_b_name.clone();
+        config.team_a_token_id = team_a_token.clone();
+        config.team_b_token_id = team_b_token.clone();
+        config.condition_id = condition_id.clone();
+        config.neg_risk = neg_risk;
+        config.persist();
+    }
+
+    state.push_event("setup", &format!("fetched market: {} vs {}", team_a_name, team_b_name));
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "team_a_name": team_a_name,
+        "team_b_name": team_b_name,
+        "team_a_token_id": team_a_token,
+        "team_b_token_id": team_b_token,
+        "condition_id": condition_id,
+        "neg_risk": neg_risk,
+    })))
 }
 
 // ── CTF Balance (fetch on-chain token balances) ─────────────────────────────

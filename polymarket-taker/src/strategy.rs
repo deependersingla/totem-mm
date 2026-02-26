@@ -49,15 +49,27 @@ pub async fn run(
                 app.push_event("innings", &msg);
             }
 
-            CricketSignal::Wicket => {
+            CricketSignal::Wicket(extra_runs) => {
                 let batting = state.batting;
                 let bowling = state.bowling();
+                if extra_runs > 0 {
+                    app.push_event("ball", &format!("{extra_runs} runs on wicket ball"));
+                }
 
                 let msg = format!("WICKET — sell {} buy {}", config.team_name(batting), config.team_name(bowling));
                 tracing::info!("{msg}");
                 app.push_event("wicket", &msg);
 
                 let books = book_rx.borrow().clone();
+
+                if !price_in_range(&config, &books) {
+                    let msg = format!("price outside {}-{} range — skipping trade",
+                        config.min_trade_price, config.max_trade_price);
+                    tracing::info!("{msg}");
+                    app.push_event("skip", &msg);
+                    continue;
+                }
+
                 let (batting_book, bowling_book) = team_books(&books, batting);
 
                 let sell_order = build_sell_order(&config, batting, &batting_book);
@@ -119,16 +131,33 @@ pub async fn run(
             }
             CricketSignal::Wide(r) => {
                 tracing::debug!(extra_runs = r, "wide");
-                app.push_event("ball", &format!("wide +{r}"));
+                app.push_event("ball", &format!("Wd+{r}"));
             }
-            CricketSignal::NoBall => {
-                tracing::debug!("no ball");
-                app.push_event("ball", "no ball");
+            CricketSignal::NoBall(r) => {
+                tracing::debug!(extra_runs = r, "no ball");
+                app.push_event("ball", &format!("N+{r}"));
             }
         }
     }
 
     tracing::info!("strategy engine stopped");
+}
+
+fn price_in_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
+    let check = |book: &OrderBook| -> bool {
+        if let Some(bid) = book.best_bid() {
+            if bid.price < config.min_trade_price || bid.price > config.max_trade_price {
+                return false;
+            }
+        }
+        if let Some(ask) = book.best_ask() {
+            if ask.price < config.min_trade_price || ask.price > config.max_trade_price {
+                return false;
+            }
+        }
+        true
+    };
+    check(&books.0) && check(&books.1)
 }
 
 fn team_books(books: &(OrderBook, OrderBook), team: Team) -> (OrderBook, OrderBook) {

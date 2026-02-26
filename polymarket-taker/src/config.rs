@@ -22,6 +22,8 @@ pub struct SavedSettings {
     pub first_batting: Option<String>,
     pub total_budget_usdc: Option<String>,
     pub max_trade_usdc: Option<String>,
+    pub min_trade_price: Option<String>,
+    pub max_trade_price: Option<String>,
     pub revert_delay_ms: Option<u64>,
     pub dry_run: Option<bool>,
 }
@@ -72,6 +74,8 @@ impl SavedSettings {
             first_batting: Some(format!("{}", config.first_batting)),
             total_budget_usdc: Some(config.total_budget_usdc.to_string()),
             max_trade_usdc: Some(config.max_trade_usdc.to_string()),
+            min_trade_price: Some(config.min_trade_price.to_string()),
+            max_trade_price: Some(config.max_trade_price.to_string()),
             revert_delay_ms: Some(config.revert_delay_ms),
             dry_run: Some(config.dry_run),
         }
@@ -100,6 +104,8 @@ pub struct Config {
 
     pub total_budget_usdc: Decimal,
     pub max_trade_usdc: Decimal,
+    pub min_trade_price: Decimal,
+    pub max_trade_price: Decimal,
     pub revert_delay_ms: u64,
     pub tick_size: String,
 
@@ -157,6 +163,10 @@ impl Config {
                 "TOTAL_BUDGET_USDC", "100", saved.total_budget_usdc.as_deref())?,
             max_trade_usdc: decimal_env_or_saved(
                 "MAX_TRADE_USDC", "10", saved.max_trade_usdc.as_deref())?,
+            min_trade_price: decimal_env_or_saved(
+                "MIN_TRADE_PRICE", "0.02", saved.min_trade_price.as_deref())?,
+            max_trade_price: decimal_env_or_saved(
+                "MAX_TRADE_PRICE", "0.98", saved.max_trade_price.as_deref())?,
             revert_delay_ms: saved.revert_delay_ms
                 .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "3000").parse().unwrap_or(3000)),
             tick_size: env_or("TICK_SIZE", "0.01"),
