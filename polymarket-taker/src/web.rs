@@ -193,10 +193,14 @@ button:disabled{opacity:.4;cursor:not-allowed}
       <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
     </div>
   </div>
+  <div style="margin-top:8px">
+    <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
+  </div>
   <div style="font-size:11px;color:#8b949e;margin-top:6px">
     <b>Split:</b> $X USDC → X YES + X NO tokens &nbsp;|&nbsp;
     <b>Merge:</b> X YES + X NO → $X USDC &nbsp;|&nbsp;
-    <b>Redeem:</b> winning tokens → USDC (after market resolves)
+    <b>Redeem:</b> winning tokens → USDC (after market resolves) &nbsp;|&nbsp;
+    <b>Sync:</b> fetch real token balances from chain
   </div>
 </div>
 
@@ -400,6 +404,9 @@ async function ctfMerge() {
 async function ctfRedeem() {
   if (!confirm('Redeem all winning tokens for USDC? (market must be resolved)')) return;
   await api('/api/ctf-redeem', {method:'POST'});
+}
+async function ctfSyncBalance() {
+  await api('/api/ctf-balance', {method:'POST'});
 }
 
 function drawInventoryChart(data) {

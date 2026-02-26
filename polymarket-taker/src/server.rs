@@ -37,6 +37,7 @@ pub fn build_router(state: S) -> Router {
         .route("/api/match-over", post(post_match_over))
         .route("/api/cancel-all", post(post_cancel_all))
         .route("/api/reset", post(post_reset))
+        .route("/api/ctf-balance", post(post_ctf_balance))
         .route("/api/ctf-split", post(post_ctf_split))
         .route("/api/ctf-merge", post(post_ctf_merge))
         .route("/api/ctf-redeem", post(post_ctf_redeem))
@@ -333,8 +334,6 @@ async fn post_start_innings(
         let auth = st.auth.read().unwrap().clone().unwrap();
 
         strategy::run(&config, &auth, signal_rx, book_rx, st.position.clone(), st.clone()).await;
-
-        *st.phase.write().unwrap() = MatchPhase::InningsPaused;
     });
 
     let ms = state.match_state.read().unwrap();
@@ -359,10 +358,12 @@ async fn post_stop_innings(
     if let Some(tx) = tx {
         let _ = tx.send(CricketSignal::InningsOver).await;
     }
+    *state.signal_tx.write().unwrap() = None;
 
     if let Some(cancel) = state.ws_cancel.read().unwrap().clone() {
         cancel.cancel();
     }
+    *state.ws_cancel.write().unwrap() = None;
 
     *state.phase.write().unwrap() = MatchPhase::InningsPaused;
     state.match_state.write().unwrap().switch_innings();
@@ -483,6 +484,46 @@ async fn post_reset(
     state.reset_for_new_match();
     state.push_event("reset", "state reset for new match");
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── CTF Balance (fetch on-chain token balances) ─────────────────────────────
+
+async fn post_ctf_balance(
+    State(state): State<S>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if !config.has_tokens() {
+        return Err((StatusCode::BAD_REQUEST, "token IDs not set".into()));
+    }
+
+    state.push_event("ctf", "fetching on-chain token balances…");
+
+    let bal_a = ctf::balance_of(&config, &config.team_a_token_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("balance_of A failed: {e}")))?;
+    let bal_b = ctf::balance_of(&config, &config.team_b_token_id).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("balance_of B failed: {e}")))?;
+
+    {
+        let mut pos = state.position.lock().unwrap();
+        pos.team_a_tokens = rust_decimal::Decimal::from(bal_a);
+        pos.team_b_tokens = rust_decimal::Decimal::from(bal_b);
+    }
+    state.snapshot_inventory();
+
+    state.push_event("ctf", &format!(
+        "on-chain balances: {} {} = {}, {} = {}",
+        config.team_a_name, bal_a, config.team_b_name, bal_b,
+        config.team_a_name
+    ));
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "team_a": bal_a,
+        "team_b": bal_b,
+    })))
 }
 
 // ── CTF Split (USDC → YES + NO tokens on-chain) ────────────────────────────

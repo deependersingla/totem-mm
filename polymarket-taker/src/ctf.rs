@@ -165,6 +165,44 @@ pub async fn redeem(config: &Config, condition_id: &str) -> Result<String> {
     Ok(tx_hash)
 }
 
+/// Fetch ERC1155 token balance for a given token_id from the CTF contract.
+pub async fn balance_of(config: &Config, token_id: &str) -> Result<u64> {
+    let provider = Provider::<Http>::try_from(config.polygon_rpc.as_str())?;
+    let ctf_addr: Address = CTF_CONTRACT.parse()?;
+
+    let key = config.polymarket_private_key.strip_prefix("0x")
+        .unwrap_or(&config.polymarket_private_key);
+    let key_bytes = hex::decode(key)?;
+    let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into())?;
+    let wallet = LocalWallet::from(signing_key);
+    let owner = wallet.address();
+
+    let token_id_u256 = U256::from_dec_str(token_id)
+        .or_else(|_| {
+            let s = token_id.strip_prefix("0x").unwrap_or(token_id);
+            U256::from_str_radix(s, 16).map_err(|e| anyhow::anyhow!("{e}"))
+        })?;
+
+    let selector = &keccak256(b"balanceOf(address,uint256)")[..4];
+    let encoded = abi::encode(&[
+        Token::Address(owner),
+        Token::Uint(token_id_u256),
+    ]);
+    let mut data = selector.to_vec();
+    data.extend_from_slice(&encoded);
+
+    let call = TransactionRequest::new().to(ctf_addr).data(Bytes::from(data));
+    let result = provider.call(&call.into(), None).await?;
+
+    let decoded = abi::decode(&[ethers::abi::ParamType::Uint(256)], &result)?;
+    if let Some(Token::Uint(val)) = decoded.first() {
+        // CTF tokens have same decimals as USDC.e (6)
+        Ok((val / U256::from(1_000_000u64)).as_u64())
+    } else {
+        Ok(0)
+    }
+}
+
 fn parse_bytes32(hex_str: &str) -> Result<[u8; 32]> {
     let s = hex_str.strip_prefix("0x").unwrap_or(hex_str);
     let bytes = hex::decode(s)?;
