@@ -138,6 +138,7 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "neg_risk": config.neg_risk,
         "wallet_set": config.has_wallet(),
         "polymarket_address": config.polymarket_address,
+        "private_key_set": config.has_wallet(),
     }))
 }
 
@@ -184,12 +185,13 @@ async fn post_setup(
         config.first_batting = if v.to_uppercase() == "B" { Team::TeamB } else { Team::TeamA };
     }
 
+    config.persist();
     drop(config);
     *state.match_state.write().unwrap() = crate::types::MatchState::new(
         state.config.read().unwrap().first_batting,
     );
 
-    state.push_event("setup", "match setup updated");
+    state.push_event("setup", "match setup updated + saved");
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -218,11 +220,13 @@ async fn post_wallet(
     }
 
     let config = state.config.read().unwrap().clone();
+    config.persist();
+
     if config.has_wallet() {
         match ClobAuth::derive(&config).await {
             Ok(auth) => {
                 *state.auth.write().unwrap() = Some(auth);
-                state.push_event("wallet", "wallet configured and CLOB auth derived");
+                state.push_event("wallet", "wallet configured, auth derived + saved");
             }
             Err(e) => {
                 state.push_event("wallet", &format!("auth derivation failed: {e}"));
@@ -259,8 +263,9 @@ async fn post_limits(
     }
     if let Some(v) = body.revert_delay_ms { config.revert_delay_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
+    config.persist();
 
-    state.push_event("limits", "trading limits updated");
+    state.push_event("limits", "trading limits updated + saved");
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

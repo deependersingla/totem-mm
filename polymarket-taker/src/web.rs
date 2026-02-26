@@ -332,6 +332,10 @@ async function loadConfig() {
     document.getElementById('lDryRun').value = String(c.dry_run);
     document.getElementById('wSigType').value = c.signature_type;
     if (c.polymarket_address) document.getElementById('wAddr').value = c.polymarket_address;
+    const wk = document.getElementById('wKey');
+    if (c.private_key_set) {
+      wk.placeholder = '********** (already set)';
+    }
   } catch(e) {}
 }
 
