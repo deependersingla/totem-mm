@@ -138,6 +138,7 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "neg_risk": config.neg_risk,
         "wallet_set": config.has_wallet(),
         "polymarket_address": config.polymarket_address,
+        "private_key_set": config.has_wallet(),
     }))
 }
 
