@@ -146,13 +146,19 @@ fn fill_price_returns_zero_when_missing() {
 
 // ── EIP-712 struct hash ───────────────────────────────────────────────────────
 
+/// A real Polymarket token ID — exceeds u128::MAX (~3.4e38), so it has 77 decimal
+/// digits. The old pad_u256 parsed this as u128 and silently returned 0, making
+/// every signature wrong.
+const REAL_TOKEN_ID: &str =
+    "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+
 fn sample_order() -> ClobOrder {
     ClobOrder {
         salt: "12345".to_string(),
         maker: "0x1234567890123456789012345678901234567890".to_string(),
         signer: "0x1234567890123456789012345678901234567890".to_string(),
         taker: "0x0000000000000000000000000000000000000000".to_string(),
-        token_id: "999".to_string(),
+        token_id: REAL_TOKEN_ID.to_string(),
         maker_amount: "1000000".to_string(),
         taker_amount: "1538461".to_string(),
         side: 0,
@@ -210,4 +216,37 @@ fn struct_hash_differs_by_salt() {
     order.salt = "99999".to_string();
     let h2 = order_struct_hash(&order);
     assert_ne!(h1, h2, "same order with different salt must produce different hash");
+}
+
+/// Regression: token IDs on Polymarket are 77-digit numbers that exceed u128::MAX.
+/// The old pad_u256 parsed them as u128 (fails → unwrap_or(0)), making every
+/// order with a real token ID hash to the same value as token_id="0".
+#[test]
+fn struct_hash_large_token_id_differs_from_zero() {
+    let mut order = sample_order();
+    order.token_id = REAL_TOKEN_ID.to_string();
+    let real_hash = order_struct_hash(&order);
+
+    order.token_id = "0".to_string();
+    let zero_hash = order_struct_hash(&order);
+
+    assert_ne!(
+        real_hash, zero_hash,
+        "real token ID must not hash the same as token_id=0 (u128 truncation regression)"
+    );
+}
+
+/// Regression: two different large token IDs must produce different struct hashes.
+#[test]
+fn struct_hash_large_token_ids_differ() {
+    let mut order = sample_order();
+    order.token_id = REAL_TOKEN_ID.to_string();
+    let h1 = order_struct_hash(&order);
+
+    order.token_id =
+        "52114319501245915516055106046884209969926127482827954674443846427813813222426"
+            .to_string();
+    let h2 = order_struct_hash(&order);
+
+    assert_ne!(h1, h2, "different large token IDs must produce different hashes");
 }
