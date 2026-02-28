@@ -122,6 +122,8 @@ fn handle_message(
         }
     };
 
+    let mut book_changed = false;
+
     for event in events {
         let asset_id = match &event.asset_id {
             Some(id) => id.as_str(),
@@ -140,6 +142,8 @@ fn handle_message(
             Some("book") => {
                 book.bids = parse_levels(&event.bids);
                 book.asks = parse_levels(&event.asks);
+                sort_bids(&mut book.bids);
+                sort_asks(&mut book.asks);
                 if let Some(ts) = &event.timestamp {
                     book.timestamp_ms = ts.parse().unwrap_or(0);
                 }
@@ -150,17 +154,35 @@ fn handle_message(
                     ask = ?book.best_ask().map(|l| l.price),
                     "book snapshot"
                 );
+                book_changed = true;
             }
             Some("price_change") => {
-                apply_deltas(&mut book.bids, &event.bids);
-                apply_deltas(&mut book.asks, &event.asks);
+                if !event.bids.is_empty() || !event.asks.is_empty() {
+                    apply_deltas(&mut book.bids, &event.bids);
+                    apply_deltas(&mut book.asks, &event.asks);
+                    sort_bids(&mut book.bids);
+                    sort_asks(&mut book.asks);
+                    book_changed = true;
+                }
             }
             _ => {}
         }
     }
 
-    let _ = book_tx.send((a_book.clone(), b_book.clone()));
+    if book_changed {
+        let _ = book_tx.send((a_book.clone(), b_book.clone()));
+    }
     Ok(())
+}
+
+/// Sorts bids highest-first so `best()` / `best_bid()` returns the top of book.
+fn sort_bids(side: &mut OrderBookSide) {
+    side.levels.sort_by(|a, b| b.price.cmp(&a.price));
+}
+
+/// Sorts asks lowest-first so `best()` / `best_ask()` returns the top of book.
+fn sort_asks(side: &mut OrderBookSide) {
+    side.levels.sort_by(|a, b| a.price.cmp(&b.price));
 }
 
 fn parse_levels(raw: &[Vec<serde_json::Value>]) -> OrderBookSide {

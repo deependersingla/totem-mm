@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
+use futures_util::future;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
@@ -338,7 +339,22 @@ async fn post_start_innings(
     // wait for book to populate, then start strategy (no initial buy from CLOB)
     let st = state.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        // Poll until at least one token has a best bid/ask (max 5s)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let books = book_rx.borrow();
+                if books.0.best_bid().is_some() || books.1.best_bid().is_some() {
+                    tracing::info!("orderbook ready — starting strategy");
+                    break;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!("orderbook not ready after 5s — starting strategy anyway");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
 
         let config = st.config.read().unwrap().clone();
         let auth = st.auth.read().unwrap().clone().unwrap();
@@ -465,9 +481,12 @@ async fn post_cancel_all(
     let config = state.config.read().unwrap().clone();
     let order_ids: Vec<String> = state.live_order_ids.lock().unwrap().clone();
 
+    let results = future::join_all(
+        order_ids.iter().map(|oid| orders::cancel_order(&config, &auth, oid))
+    ).await;
     let mut cancelled = 0u32;
-    for oid in &order_ids {
-        match orders::cancel_order(&config, &auth, oid).await {
+    for (oid, result) in order_ids.iter().zip(results) {
+        match result {
             Ok(_) => cancelled += 1,
             Err(e) => tracing::warn!(order_id = oid, error = %e, "cancel failed"),
         }
