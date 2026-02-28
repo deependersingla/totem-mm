@@ -48,9 +48,15 @@ fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
     );
 
     fn pad_u256(val: &str) -> [u8; 32] {
-        let v: u128 = val.parse().unwrap_or(0);
+        use ethers::types::U256;
+        let v = U256::from_dec_str(val)
+            .or_else(|_| {
+                let s = val.strip_prefix("0x").unwrap_or(val);
+                U256::from_str_radix(s, 16).map_err(|_| ())
+            })
+            .unwrap_or(U256::zero());
         let mut buf = [0u8; 32];
-        buf[16..].copy_from_slice(&v.to_be_bytes());
+        v.to_big_endian(&mut buf);
         buf
     }
 
@@ -109,6 +115,7 @@ struct PostOrderRequest {
     order: PostOrderBody,
     owner: String,
     order_type: String,
+    tick_size: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,7 +196,7 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
 }
 
 async fn post_order(
-    _config: &Config,
+    config: &Config,
     auth: &ClobAuth,
     clob_order: &ClobOrder,
     order_type: &str,
@@ -199,6 +206,7 @@ async fn post_order(
         order: PostOrderBody::from(clob_order),
         owner: auth.api_key.clone(),
         order_type: order_type.to_string(),
+        tick_size: config.tick_size.clone(),
     };
 
     let body_json = serde_json::to_string(&body)?;
@@ -251,7 +259,7 @@ pub async fn post_fak_order(
         price = %order.price, size = %order.size, "posting FAK order");
 
     let signed = build_signed_order(config, auth, order)?;
-    post_order(config, auth, &signed, "FAK", tag).await
+    post_order(config, auth, &signed, "FOK", tag).await
 }
 
 pub async fn post_limit_order(

@@ -6,12 +6,22 @@ use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use ethers::types::{Address, Bytes, TransactionRequest, U256};
 use ethers::utils::keccak256;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 
 use crate::config::Config;
 
+/// Standard ConditionalTokens contract (Polygon mainnet).
 const CTF_CONTRACT: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+/// Neg-risk NegRiskAdapter contract (Polygon mainnet).
+/// Neg-risk markets route split/merge/redeem through this adapter, NOT the
+/// standard CTF contract. Using the wrong contract will revert the transaction.
+const NEG_RISK_CTF_CONTRACT: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 const USDC_CONTRACT: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+
+fn ctf_contract(config: &Config) -> &'static str {
+    if config.neg_risk { NEG_RISK_CTF_CONTRACT } else { CTF_CONTRACT }
+}
 
 type SignedClient = SignerMiddleware<Provider<Http>, LocalWallet>;
 
@@ -35,7 +45,7 @@ fn build_client(config: &Config) -> Result<Arc<SignedClient>> {
 /// The proxy wallet then forwards the call with itself as msg.sender, meaning
 /// CTF tokens end up in the proxy wallet and are available for CLOB trading.
 ///
-/// Function selector: keccak256("execute(address,uint256,bytes)") = 0x1cff79cd
+/// Function selector: keccak256("execute(address,uint256,bytes)") = 0xb61d27f6
 pub fn proxy_execute_calldata(target: Address, inner_data: Bytes) -> Result<Bytes> {
     let selector = &keccak256(b"execute(address,uint256,bytes)")[..4];
     let encoded = abi::encode(&[
@@ -168,7 +178,7 @@ fn approve_calldata(spender: &str, amount: U256) -> Result<Bytes> {
 /// the proxy wallet so tokens land in the proxy wallet, not the EOA.
 pub async fn split(config: &Config, condition_id: &str, amount_usdc: u64) -> Result<String> {
     let client = build_client(config)?;
-    let ctf_addr: Address = CTF_CONTRACT.parse()?;
+    let ctf_addr: Address = ctf_contract(config).parse()?;
     let usdc_addr: Address = USDC_CONTRACT.parse()?;
 
     let approve_amount = U256::from(amount_usdc) * U256::from(1_000_000u64);
@@ -208,7 +218,7 @@ pub async fn split(config: &Config, condition_id: &str, amount_usdc: u64) -> Res
 /// on tokens held in the proxy wallet.
 pub async fn merge(config: &Config, condition_id: &str, amount_tokens: u64) -> Result<String> {
     let client = build_client(config)?;
-    let ctf_addr: Address = CTF_CONTRACT.parse()?;
+    let ctf_addr: Address = ctf_contract(config).parse()?;
 
     let merge_data = merge_positions_calldata(condition_id, amount_tokens)?;
     let (merge_to, merge_final) = resolve_tx(config, ctf_addr, merge_data)?;
@@ -234,7 +244,7 @@ pub async fn merge(config: &Config, condition_id: &str, amount_tokens: u64) -> R
 /// When signature_type == 1, routed through the proxy wallet.
 pub async fn redeem(config: &Config, condition_id: &str) -> Result<String> {
     let client = build_client(config)?;
-    let ctf_addr: Address = CTF_CONTRACT.parse()?;
+    let ctf_addr: Address = ctf_contract(config).parse()?;
 
     let redeem_data = redeem_positions_calldata(condition_id)?;
     let (redeem_to, redeem_final) = resolve_tx(config, ctf_addr, redeem_data)?;
@@ -256,12 +266,17 @@ pub async fn redeem(config: &Config, condition_id: &str) -> Result<String> {
 
 /// Fetch ERC1155 token balance for a given token_id from the CTF contract.
 ///
+/// Returns the balance as a `Decimal` preserving up to 6 decimal places
+/// (CTF tokens share USDC's 6-decimal precision). Returning `u64` would
+/// truncate fractional balances (e.g. 1.5 tokens → 1), corrupting position
+/// accounting after partial fills or small splits.
+///
 /// Queries the balance of the correct token owner:
 /// - signature_type == 1: proxy wallet (config.polymarket_address) holds the tokens
 /// - signature_type == 0: EOA derived from private key holds the tokens
-pub async fn balance_of(config: &Config, token_id: &str) -> Result<u64> {
+pub async fn balance_of(config: &Config, token_id: &str) -> Result<Decimal> {
     let provider = Provider::<Http>::try_from(config.polygon_rpc.as_str())?;
-    let ctf_addr: Address = CTF_CONTRACT.parse()?;
+    let ctf_addr: Address = ctf_contract(config).parse()?;
 
     let owner = ctf_token_owner(config)?;
     tracing::debug!(
@@ -290,16 +305,18 @@ pub async fn balance_of(config: &Config, token_id: &str) -> Result<u64> {
 
     let decoded = abi::decode(&[ethers::abi::ParamType::Uint(256)], &result)?;
     if let Some(Token::Uint(val)) = decoded.first() {
-        // CTF tokens use 6 decimals (same as USDC)
-        Ok((val / U256::from(1_000_000u64)).as_u64())
+        // val is in base units (6 decimals). Convert to Decimal to preserve fractions.
+        let raw_str = val.to_string();
+        let raw: u128 = raw_str.parse().unwrap_or(0);
+        Ok(Decimal::from(raw) / Decimal::from(1_000_000u64))
     } else {
-        Ok(0)
+        Ok(Decimal::ZERO)
     }
 }
 
 /// Sync on-chain token balances into the position tracker.
-/// Returns (team_a_tokens, team_b_tokens) in whole token units.
-pub async fn sync_balances(config: &Config) -> Result<(u64, u64)> {
+/// Returns (team_a_tokens, team_b_tokens) as Decimal with 6-decimal precision.
+pub async fn sync_balances(config: &Config) -> Result<(Decimal, Decimal)> {
     if !config.has_tokens() {
         bail!("token IDs not configured");
     }
@@ -330,8 +347,8 @@ mod tests {
         let target: Address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045".parse().unwrap();
         let inner = Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]);
         let result = proxy_execute_calldata(target, inner).unwrap();
-        // keccak256("execute(address,uint256,bytes)")[0..4] = 0x1cff79cd
-        assert_eq!(&result[..4], &[0x1c, 0xff, 0x79, 0xcd]);
+        // keccak256("execute(address,uint256,bytes)")[0..4] = 0xb61d27f6
+        assert_eq!(&result[..4], &[0xb6, 0x1d, 0x27, 0xf6]);
     }
 
     #[test]

@@ -350,8 +350,8 @@ async fn post_start_innings(
                 match ctf::sync_balances(&sync_config).await {
                     Ok((a, b)) => {
                         let mut pos = sync_state.position.lock().unwrap();
-                        pos.team_a_tokens = rust_decimal::Decimal::from(a);
-                        pos.team_b_tokens = rust_decimal::Decimal::from(b);
+                        pos.team_a_tokens = a;
+                        pos.team_b_tokens = b;
                         drop(pos);
                         sync_state.snapshot_inventory();
                         sync_state.push_event("sync", &format!(
@@ -360,7 +360,7 @@ async fn post_start_innings(
                             sync_config.team_a_name, a,
                             sync_config.team_b_name, b,
                         ));
-                        tracing::info!(team_a = a, team_b = b, "on-chain balances synced at innings start");
+                        tracing::info!(team_a = %a, team_b = %b, "on-chain balances synced at innings start");
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "could not sync on-chain balances at innings start");
@@ -389,11 +389,11 @@ async fn post_start_innings(
                         match ctf::sync_balances(&sync_config).await {
                             Ok((a, b)) => {
                                 let mut pos = sync_state.position.lock().unwrap();
-                                pos.team_a_tokens = rust_decimal::Decimal::from(a);
-                                pos.team_b_tokens = rust_decimal::Decimal::from(b);
+                                pos.team_a_tokens = a;
+                                pos.team_b_tokens = b;
                                 drop(pos);
                                 sync_state.snapshot_inventory();
-                                tracing::debug!(team_a = a, team_b = b, "periodic on-chain balance sync");
+                                tracing::debug!(team_a = %a, team_b = %b, "periodic on-chain balance sync");
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "periodic on-chain balance sync failed");
@@ -683,8 +683,8 @@ async fn post_ctf_balance(
 
     {
         let mut pos = state.position.lock().unwrap();
-        pos.team_a_tokens = rust_decimal::Decimal::from(bal_a);
-        pos.team_b_tokens = rust_decimal::Decimal::from(bal_b);
+        pos.team_a_tokens = bal_a;
+        pos.team_b_tokens = bal_b;
     }
     state.snapshot_inventory();
 
