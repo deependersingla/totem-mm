@@ -13,6 +13,10 @@ use tower_http::cors::CorsLayer;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
+
+/// How often to sync on-chain token balances into the position tracker
+/// while an innings is running.
+const CHAIN_SYNC_INTERVAL_SECS: u64 = 30;
 use crate::orders;
 use crate::state::{AppState, MatchPhase};
 use crate::strategy;
@@ -335,10 +339,108 @@ async fn post_start_innings(
         }
     });
 
-    // wait for book to populate, then start strategy (no initial buy from CLOB)
+    // Sync on-chain balances into position tracker before the innings starts.
+    // This reconciles any fills or manual token movements (split/merge) that
+    // happened since the last session.
+    {
+        let sync_config = config.clone();
+        let sync_state = state.clone();
+        tokio::spawn(async move {
+            if sync_config.has_tokens() {
+                match ctf::sync_balances(&sync_config).await {
+                    Ok((a, b)) => {
+                        let mut pos = sync_state.position.lock().unwrap();
+                        pos.team_a_tokens = rust_decimal::Decimal::from(a);
+                        pos.team_b_tokens = rust_decimal::Decimal::from(b);
+                        drop(pos);
+                        sync_state.snapshot_inventory();
+                        sync_state.push_event("sync", &format!(
+                            "on-chain balance synced (sig_type={}): {} = {}, {} = {}",
+                            sync_config.signature_type,
+                            sync_config.team_a_name, a,
+                            sync_config.team_b_name, b,
+                        ));
+                        tracing::info!(team_a = a, team_b = b, "on-chain balances synced at innings start");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not sync on-chain balances at innings start");
+                        sync_state.push_event("warn", &format!("on-chain balance sync failed: {e}"));
+                    }
+                }
+            }
+        });
+    }
+
+    // Background task: periodically sync on-chain balances while innings is running.
+    // This keeps inventory accurate even if local tracking drifts (e.g., timed-out fills).
+    {
+        let sync_config = config.clone();
+        let sync_state = state.clone();
+        let sync_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(
+                std::time::Duration::from_secs(CHAIN_SYNC_INTERVAL_SECS)
+            );
+            interval.tick().await; // skip immediate first tick (covered by the sync above)
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if !sync_config.has_tokens() { continue; }
+                        match ctf::sync_balances(&sync_config).await {
+                            Ok((a, b)) => {
+                                let mut pos = sync_state.position.lock().unwrap();
+                                pos.team_a_tokens = rust_decimal::Decimal::from(a);
+                                pos.team_b_tokens = rust_decimal::Decimal::from(b);
+                                drop(pos);
+                                sync_state.snapshot_inventory();
+                                tracing::debug!(team_a = a, team_b = b, "periodic on-chain balance sync");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "periodic on-chain balance sync failed");
+                            }
+                        }
+                    }
+                    _ = sync_cancel.cancelled() => {
+                        tracing::debug!("chain sync task stopped");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wait for book to populate then start strategy.
+    // Rather than a blind 3s sleep, poll until we have a non-empty book snapshot
+    // (or fall back to 5s max wait so we don't block forever on WS failure).
     let st = state.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let book_wait_start = tokio::time::Instant::now();
+        let book_wait_max = std::time::Duration::from_secs(5);
+
+        loop {
+            let has_book = {
+                let br = st.book_rx.read().unwrap();
+                if let Some(rx) = br.as_ref() {
+                    let books = rx.borrow();
+                    books.0.best_bid().is_some() || books.0.best_ask().is_some()
+                        || books.1.best_bid().is_some() || books.1.best_ask().is_some()
+                } else {
+                    false
+                }
+            };
+
+            if has_book {
+                tracing::info!("book data received — starting strategy");
+                break;
+            }
+
+            if book_wait_start.elapsed() >= book_wait_max {
+                tracing::warn!("book wait timed out after {}s — starting strategy with empty book", book_wait_max.as_secs());
+                break;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
 
         let config = st.config.read().unwrap().clone();
         let auth = st.auth.read().unwrap().clone().unwrap();
@@ -587,9 +689,8 @@ async fn post_ctf_balance(
     state.snapshot_inventory();
 
     state.push_event("ctf", &format!(
-        "on-chain balances: {} {} = {}, {} = {}",
-        config.team_a_name, bal_a, config.team_b_name, bal_b,
-        config.team_a_name
+        "on-chain balances (sig_type={}): {} = {}, {} = {}",
+        config.signature_type, config.team_a_name, bal_a, config.team_b_name, bal_b
     ));
 
     Ok(Json(serde_json::json!({
