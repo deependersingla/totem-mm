@@ -18,12 +18,12 @@ fn side_to_u8(side: Side) -> u8 {
     }
 }
 
-fn to_base_units(amount: Decimal) -> u128 {
+pub(crate) fn to_base_units(amount: Decimal) -> u128 {
     let scaled = amount * Decimal::from(USDC_DECIMALS);
     scaled.to_string().parse::<f64>().unwrap_or(0.0).floor() as u128
 }
 
-fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String) {
+pub(crate) fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String) {
     match side {
         Side::Buy => {
             let taker_amount = to_base_units(size);
@@ -38,7 +38,7 @@ fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String
     }
 }
 
-fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
+pub(crate) fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
     let type_hash = keccak256(
         b"Order(uint256 salt,address maker,address signer,address taker,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint256 expiration,uint256 nonce,uint256 feeRateBps,uint8 side,uint8 signatureType)",
     );
@@ -83,7 +83,7 @@ fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClobOrder {
+pub(crate) struct ClobOrder {
     pub salt: String,
     pub maker: String,
     pub signer: String,
