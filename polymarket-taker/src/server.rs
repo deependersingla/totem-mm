@@ -263,10 +263,17 @@ async fn post_limits(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut config = state.config.write().unwrap();
 
-    if let Some(v) = &body.total_budget_usdc {
-        config.total_budget_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget".into()))?;
-        state.position.lock().unwrap().total_budget = config.total_budget_usdc;
-    }
+    // Parse new budget value first (while holding config lock), then apply to
+    // position AFTER releasing config lock. Holding config.write() while
+    // acquiring position.lock() creates ABBA deadlock with strategy tasks that
+    // hold position.lock() and then read config.read().
+    let new_budget = if let Some(v) = &body.total_budget_usdc {
+        let b: Decimal = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget".into()))?;
+        config.total_budget_usdc = b;
+        Some(b)
+    } else {
+        None
+    };
     if let Some(v) = &body.max_trade_usdc {
         config.max_trade_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_trade".into()))?;
     }
@@ -276,6 +283,11 @@ async fn post_limits(
     if let Some(v) = body.fill_poll_timeout_ms { config.fill_poll_timeout_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
     config.persist();
+    drop(config); // release write lock before acquiring position mutex
+
+    if let Some(b) = new_budget {
+        state.position.lock().unwrap().total_budget = b;
+    }
 
     state.push_event("limits", "trading limits updated + saved");
     Ok(Json(serde_json::json!({"ok": true})))
@@ -308,6 +320,14 @@ async fn post_start_innings(
             Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("auth failed: {e}"))),
         }
     }
+
+    // Snapshot auth now, before spawning, to avoid a TOCTOU race where
+    // a concurrent post_wallet/post_reset could clear auth between here
+    // and the spawned task body, causing an unwrap() panic inside tokio.
+    let auth_snapshot = match state.auth.read().unwrap().clone() {
+        Some(a) => a,
+        None => return Err((StatusCode::INTERNAL_SERVER_ERROR, "auth not initialized".into())),
+    };
 
     let (signal_tx, signal_rx) = mpsc::channel::<CricketSignal>(64);
     let (book_tx, book_rx) = watch::channel((OrderBook::default(), OrderBook::default()));
@@ -357,9 +377,7 @@ async fn post_start_innings(
         }
 
         let config = st.config.read().unwrap().clone();
-        let auth = st.auth.read().unwrap().clone().unwrap();
-
-        strategy::run(&config, &auth, signal_rx, book_rx, st.position.clone(), st.clone()).await;
+        strategy::run(&config, &auth_snapshot, signal_rx, book_rx, st.position.clone(), st.clone()).await;
     });
 
     let ms = state.match_state.read().unwrap();
@@ -380,6 +398,18 @@ async fn post_stop_innings(
         return Err((StatusCode::CONFLICT, "no innings running".into()));
     }
 
+    // Compute next batting state BEFORE sending InningsOver so the event message
+    // is correct regardless of when the strategy processes the signal.
+    let (next_batting_name, next_innings_num) = {
+        let ms = state.match_state.read().unwrap();
+        let config = state.config.read().unwrap();
+        // After InningsOver the opponent bats next; innings counter increments.
+        (config.team_name(ms.batting.opponent()).to_string(), ms.innings + 1)
+    };
+
+    // Signal strategy to stop. The strategy's InningsOver handler calls
+    // switch_innings on app.match_state — do NOT call it here too or the
+    // innings counter and batting team will be toggled twice (double-switch bug).
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
         let _ = tx.send(CricketSignal::InningsOver).await;
@@ -392,15 +422,9 @@ async fn post_stop_innings(
     *state.ws_cancel.write().unwrap() = None;
 
     *state.phase.write().unwrap() = MatchPhase::InningsPaused;
-    state.match_state.write().unwrap().switch_innings();
 
-    let (batting_name, innings) = {
-        let ms = state.match_state.read().unwrap();
-        let config = state.config.read().unwrap();
-        (config.team_name(ms.batting).to_string(), ms.innings)
-    };
     state.push_event("innings", &format!(
-        "innings paused — next: {batting_name} batting (innings {innings})"
+        "innings paused — next: {next_batting_name} batting (innings {next_innings_num})"
     ));
 
     Ok(Json(serde_json::json!({"ok": true})))
