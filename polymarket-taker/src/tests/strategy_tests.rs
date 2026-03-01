@@ -29,10 +29,18 @@ fn test_config(max_trade_usdc: &str, safe_percentage: u64) -> Config {
         fill_poll_interval_ms: 500,
         fill_poll_timeout_ms: 5000,
         tick_size: "0.01".to_string(),
+        order_min_size: Decimal::ONE,
         ws_ping_interval_secs: 10,
         dry_run: true,
         log_level: "info".to_string(),
         http_port: 3000,
+        api_key: String::new(),
+        api_secret: String::new(),
+        api_passphrase: String::new(),
+        market_slug: String::new(),
+        edge_wicket: 2.0,
+        edge_boundary_4: 1.0,
+        edge_boundary_6: 1.0,
     }
 }
 
@@ -136,7 +144,7 @@ fn compute_size_zero_available_returns_zero() {
 fn build_sell_order_uses_best_bid_price_and_size() {
     let config = test_config("10", 2);
     let book = book_with_bid(dec!(0.65), dec!(50));
-    let order = build_sell_order(&config, Team::TeamA, &book).unwrap();
+    let order = build_sell_order(&config, Team::TeamA, &book, None).unwrap();
     assert_eq!(order.side, Side::Sell);
     assert_eq!(order.team, Team::TeamA);
     assert_eq!(order.price, dec!(0.65));
@@ -149,7 +157,7 @@ fn build_sell_order_uses_best_bid_price_and_size() {
 fn build_sell_order_returns_none_for_empty_bids() {
     let config = test_config("10", 2);
     let book = OrderBook::default();
-    assert!(build_sell_order(&config, Team::TeamA, &book).is_none());
+    assert!(build_sell_order(&config, Team::TeamA, &book, None).is_none());
 }
 
 // ── build_buy_order ───────────────────────────────────────────────────────────

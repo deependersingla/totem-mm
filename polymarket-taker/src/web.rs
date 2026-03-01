@@ -35,6 +35,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .btn-danger{background:#da3633;color:#fff}
 .btn-signal{background:#30363d;color:#e1e4e8;min-width:42px;font-size:15px;padding:10px 8px}
 .btn-signal.wicket{background:#da3633;color:#fff}
+.btn-signal.boundary{background:#1f6feb;color:#fff}
 .signal-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .events{max-height:280px;overflow-y:auto;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace}
 .events::-webkit-scrollbar{width:6px}
@@ -96,15 +97,36 @@ button:disabled{opacity:.4;cursor:not-allowed}
   </div>
 </div>
 
-<!-- Inventory Chart -->
+<!-- Live Order Book -->
 <div class="card full">
-  <h2>Inventory</h2>
-  <canvas id="invChart" width="860" height="180" style="width:100%;height:180px;border-radius:4px"></canvas>
-  <div id="chartTooltip" style="font-size:11px;color:#e1e4e8;margin-top:4px;min-height:14px"></div>
-  <div style="font-size:11px;color:#8b949e;margin-top:2px;display:flex;gap:16px">
-    <span><span style="color:#58a6ff">&#9632;</span> Team A</span>
-    <span><span style="color:#f0883e">&#9632;</span> Team B</span>
-    <span><span style="color:#3fb950">&#9632;</span> Total</span>
+  <h2>Live Order Book <span id="bookUpdated" style="font-size:10px;color:#484f58;font-weight:normal;margin-left:8px"></span></h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+    <div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600" id="bookLabelA">Team A</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <thead><tr>
+          <th style="text-align:left;color:#3fb950;padding:2px 6px;border-bottom:1px solid #21262d">BID</th>
+          <th style="text-align:right;color:#3fb950;padding:2px 6px;border-bottom:1px solid #21262d">SIZE</th>
+          <th style="width:12px;border-bottom:1px solid #21262d"></th>
+          <th style="text-align:left;color:#f85149;padding:2px 6px;border-bottom:1px solid #21262d">ASK</th>
+          <th style="text-align:right;color:#f85149;padding:2px 6px;border-bottom:1px solid #21262d">SIZE</th>
+        </tr></thead>
+        <tbody id="bookBodyA"></tbody>
+      </table>
+    </div>
+    <div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600" id="bookLabelB">Team B</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <thead><tr>
+          <th style="text-align:left;color:#3fb950;padding:2px 6px;border-bottom:1px solid #21262d">BID</th>
+          <th style="text-align:right;color:#3fb950;padding:2px 6px;border-bottom:1px solid #21262d">SIZE</th>
+          <th style="width:12px;border-bottom:1px solid #21262d"></th>
+          <th style="text-align:left;color:#f85149;padding:2px 6px;border-bottom:1px solid #21262d">ASK</th>
+          <th style="text-align:right;color:#f85149;padding:2px 6px;border-bottom:1px solid #21262d">SIZE</th>
+        </tr></thead>
+        <tbody id="bookBodyB"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -140,17 +162,48 @@ button:disabled{opacity:.4;cursor:not-allowed}
 <div class="card">
   <h2>Wallet</h2>
   <div id="walletLock">
-    <label>Private Key</label><input id="wKey" type="password" placeholder="0x...">
-    <label>Address</label><input id="wAddr" placeholder="0x...">
+    <label>MetaMask Private Key (signs everything, pays gas)</label>
+    <input id="wKey" type="password" placeholder="0x... (your MetaMask private key)">
+    <label style="color:#58a6ff">↳ EOA Address (derived)</label>
+    <input id="wEoa" readonly placeholder="set private key and save" style="font-size:10px;color:#58a6ff;cursor:default">
+    <label>Polymarket Proxy Wallet Address (holds USDC, maker of CLOB trades)</label>
+    <input id="wAddr" placeholder="0x... (your Polymarket proxy — NOT MetaMask address)">
     <div class="row">
       <div><label>Sig Type</label>
-        <select id="wSigType"><option value="0">EOA (0)</option><option value="1">Proxy (1)</option></select>
+        <select id="wSigType">
+          <option value="1">POLY_PROXY (1) — MetaMask + Polymarket proxy ✓</option>
+          <option value="0">EOA (0) — no proxy, direct wallet</option>
+          <option value="2">GNOSIS_SAFE (2)</option>
+        </select>
       </div>
     </div>
+    <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.5">
+      <b>Most users:</b> Private Key = MetaMask key · Address = Polymarket proxy (shown at polymarket.com when logged in) · Sig Type = POLY_PROXY (1)
+    </div>
     <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveWallet()">Save Wallet</button>
+    <div id="wDeriveStatus" style="margin-top:8px;font-size:12px;display:none">
+      <div style="color:#3fb950;font-weight:600">API Key derived via EIP-712 signing</div>
+      <div style="color:#8b949e;font-size:11px;margin-top:2px">Key: <span id="wDerivedKey" style="color:#58a6ff;font-family:monospace"></span></div>
+    </div>
   </div>
   <div id="walletLockedMsg" class="locked-notice" style="display:none">Wallet locked while match is running</div>
   <div class="stat" style="margin-top:6px"><span>Status</span> <strong id="walletStatus">Not Set</strong></div>
+</div>
+
+<!-- Wallets & Balances -->
+<div class="card">
+  <h2>Wallets &amp; Balances <button class="btn-primary" style="font-size:11px;padding:3px 10px;float:right" onclick="refreshWallets()">Refresh</button></h2>
+  <div style="margin-bottom:8px">
+    <div style="font-size:11px;color:#8b949e;margin-bottom:4px">EOA (MetaMask — signs, pays gas)</div>
+    <div style="font-size:10px;color:#58a6ff;word-break:break-all;font-family:monospace" id="wBalEoa">—</div>
+    <div class="stat"><span>USDC (EOA)</span> <strong id="wBalEoaUsdc">—</strong></div>
+  </div>
+  <div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Proxy (Polymarket — holds USDC, maker of trades)</div>
+    <div style="font-size:10px;color:#3fb950;word-break:break-all;font-family:monospace" id="wBalProxy">—</div>
+    <div class="stat"><span>USDC (Proxy)</span> <strong id="wBalProxyUsdc">—</strong></div>
+  </div>
+  <div id="wPositions" style="margin-top:8px;font-size:11px"></div>
 </div>
 
 <!-- Limits -->
@@ -173,6 +226,15 @@ button:disabled{opacity:.4;cursor:not-allowed}
       <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
     </div>
   </div>
+  <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
+    <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Revert Edge (profit margin on GTC limit orders)</div>
+    <div class="row">
+      <div><label>Wicket W (%)</label><input id="lEdgeW" type="number" value="2" min="0" max="50" step="0.1"></div>
+      <div><label>Boundary 4 (%)</label><input id="lEdge4" type="number" value="1" min="0" max="50" step="0.1"></div>
+      <div><label>Boundary 6 (%)</label><input id="lEdge6" type="number" value="1" min="0" max="50" step="0.1"></div>
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-top:4px">SELL revert: limit = buy_price × (1 + edge%). BUY revert: limit = sell_price × (1 - edge%). Higher edge = more profit per fill but slower to fill.</div>
+  </div>
   <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
   <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
 </div>
@@ -191,12 +253,12 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <button class="btn-warn" style="margin-top:8px;width:100%" onclick="resetMatch()">Reset (New Match)</button>
 </div>
 
-<!-- CTF Split / Merge / Redeem -->
+<!-- CTF Split / Merge / Redeem / Move -->
 <div class="card full">
   <h2>CTF On-Chain</h2>
-  <div class="row">
+  <div class="row" style="margin-bottom:8px">
     <div style="flex:2">
-      <label>Amount (USDC / tokens)</label>
+      <label>CTF Amount (USDC / tokens)</label>
       <input id="ctfAmount" type="number" value="10" min="1" step="1">
     </div>
     <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
@@ -205,29 +267,61 @@ button:disabled{opacity:.4;cursor:not-allowed}
       <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
     </div>
   </div>
-  <div style="margin-top:8px">
-    <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
+  <div style="border-top:1px solid #21262d;padding-top:8px;margin-top:4px">
+    <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600">Move Funds (EOA ↔ Proxy)</div>
+    <div class="row" style="margin-bottom:6px">
+      <button class="btn-primary" style="flex:1" onclick="moveTokens('to_proxy')">Move All Tokens → Proxy</button>
+      <button class="btn-warn" style="flex:1" onclick="moveTokens('to_eoa')">Move All Tokens → EOA</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <div style="flex:2">
+        <label>USDC Amount ($)</label>
+        <input id="moveUsdcAmt" type="number" value="50" min="1" step="1">
+      </div>
+      <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
+        <button class="btn-primary" style="flex:1" onclick="moveUsdc('to_proxy')">USDC → Proxy</button>
+        <button class="btn-warn" style="flex:1" onclick="moveUsdc('to_eoa')">USDC → EOA</button>
+      </div>
+    </div>
   </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:6px">
-    <b>Split:</b> $X USDC → X YES + X NO tokens &nbsp;|&nbsp;
+  <div style="margin-top:8px;display:flex;gap:8px">
+    <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
+    <button class="btn-primary" style="background:#6e40c9" onclick="megaResolve()">Mega Resolve (All Positions)</button>
+  </div>
+  <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.6">
+    <b>Split:</b> $X USDC → X YES + X NO &nbsp;|&nbsp;
     <b>Merge:</b> X YES + X NO → $X USDC &nbsp;|&nbsp;
-    <b>Redeem:</b> winning tokens → USDC (after market resolves) &nbsp;|&nbsp;
-    <b>Sync:</b> fetch real token balances from chain
+    <b>Redeem:</b> winning tokens → USDC (post-resolve) &nbsp;|&nbsp;
+    <b>Tokens→Proxy:</b> move YES+NO from your MetaMask wallet into the proxy for CLOB trading &nbsp;|&nbsp;
+    <b>USDC→Proxy:</b> deposit USDC into proxy before splitting
   </div>
 </div>
 
 <!-- Signals -->
 <div class="card full">
-  <h2>Signals</h2>
-  <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Runs (normal delivery)</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h2 style="margin-bottom:0">Signals</h2>
+    <div style="display:flex;gap:14px;align-items:center">
+      <span style="font-size:11px;color:#8b949e;font-weight:600">Trade on:</span>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;margin:0">
+        <input type="checkbox" id="chkTeamA" checked onchange="toggleTeam('A', this.checked)" style="width:15px;height:15px;accent-color:#238636;cursor:pointer">
+        <span id="chkTeamALabel" style="font-size:12px;color:#e1e4e8">Team A</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;margin:0">
+        <input type="checkbox" id="chkTeamB" checked onchange="toggleTeam('B', this.checked)" style="width:15px;height:15px;accent-color:#238636;cursor:pointer">
+        <span id="chkTeamBLabel" style="font-size:12px;color:#e1e4e8">Team B</span>
+      </label>
+    </div>
+  </div>
+  <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Runs — <span style="color:#1f6feb">blue=boundary (sell bowling/buy batting + revert)</span></div>
   <div class="signal-grid">
     <button class="btn-signal" onclick="sendSignal('0')">0</button>
     <button class="btn-signal" onclick="sendSignal('1')">1</button>
     <button class="btn-signal" onclick="sendSignal('2')">2</button>
     <button class="btn-signal" onclick="sendSignal('3')">3</button>
-    <button class="btn-signal" onclick="sendSignal('4')">4</button>
+    <button class="btn-signal boundary" onclick="sendSignal('4')">4</button>
     <button class="btn-signal" onclick="sendSignal('5')">5</button>
-    <button class="btn-signal" onclick="sendSignal('6')">6</button>
+    <button class="btn-signal boundary" onclick="sendSignal('6')">6</button>
   </div>
   <div style="font-size:11px;color:#f85149;margin-top:8px;margin-bottom:6px">Wicket (+ runs on that ball)</div>
   <div class="signal-grid">
@@ -239,26 +333,68 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <button class="btn-signal wicket" onclick="sendSignal('W5')">W5</button>
     <button class="btn-signal wicket" onclick="sendSignal('W6')">W6</button>
   </div>
-  <div style="font-size:11px;color:#d29922;margin-top:8px;margin-bottom:6px">Wide (+ extra runs)</div>
+  <div style="font-size:11px;color:#d29922;margin-top:8px;margin-bottom:6px">Wide (+ extra runs) — Wd4/Wd6 = boundary</div>
   <div class="signal-grid">
     <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd0')">Wd0</button>
     <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd1')">Wd1</button>
     <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd2')">Wd2</button>
     <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd3')">Wd3</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd4')">Wd4</button>
+    <button class="btn-signal boundary" onclick="sendSignal('Wd4')">Wd4</button>
     <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd5')">Wd5</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd6')">Wd6</button>
+    <button class="btn-signal boundary" onclick="sendSignal('Wd6')">Wd6</button>
   </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:8px;margin-bottom:6px">No Ball (+ runs)</div>
+  <div style="font-size:11px;color:#8b949e;margin-top:8px;margin-bottom:6px">No Ball (+ runs) — N4/N6 = boundary</div>
   <div class="signal-grid">
     <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N0')">N0</button>
     <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N1')">N1</button>
     <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N2')">N2</button>
     <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N3')">N3</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N4')">N4</button>
+    <button class="btn-signal boundary" onclick="sendSignal('N4')">N4</button>
     <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N5')">N5</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N6')">N6</button>
+    <button class="btn-signal boundary" onclick="sendSignal('N6')">N6</button>
   </div>
+</div>
+
+<!-- Trade Log (from Polymarket API) -->
+<div class="card full">
+  <h2>Trade Log <span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:6px">(from Polymarket CLOB)</span></h2>
+  <div id="tradeSummary" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px"></div>
+  <div style="max-height:300px;overflow-y:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+      <thead><tr style="border-bottom:2px solid #30363d">
+        <th style="text-align:left;padding:4px 6px;color:#8b949e">Time</th>
+        <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+        <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+        <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
+        <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
+        <th style="text-align:right;padding:4px 6px;color:#8b949e">Cost</th>
+        <th style="text-align:left;padding:4px 6px;color:#8b949e">Type</th>
+        <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
+      </tr></thead>
+      <tbody id="tradeBody"></tbody>
+    </table>
+  </div>
+  <div id="tradeEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No trades yet</div>
+</div>
+
+<!-- Live Price Chart -->
+<div class="card full" id="chartCard" style="display:none">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h2 style="margin-bottom:0">Live Odds</h2>
+    <div style="display:flex;gap:12px;align-items:center">
+      <select id="chartInterval" onchange="pollPriceChart()" style="background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:3px 8px;border-radius:4px;font-size:11px">
+        <option value="1m">1 Min</option>
+        <option value="5m">5 Min</option>
+        <option value="15m">15 Min</option>
+        <option value="30m">30 Min</option>
+        <option value="1h" selected>1 Hour</option>
+        <option value="2h">2 Hours</option>
+        <option value="6h">6 Hours</option>
+      </select>
+      <div id="chartLegend" style="display:flex;gap:16px;font-size:13px;font-weight:600"></div>
+    </div>
+  </div>
+  <canvas id="priceChart" height="200" style="width:100%;background:#0d1117;border-radius:6px"></canvas>
 </div>
 
 <!-- Event Log -->
@@ -342,6 +478,12 @@ async function pollStatus() {
     // disable signal buttons when not running
     document.querySelectorAll('.btn-signal').forEach(b => b.disabled = !running);
 
+    // sync trade-on checkboxes
+    el('chkTeamA').checked = s.trade_team_a;
+    el('chkTeamB').checked = s.trade_team_b;
+    el('chkTeamALabel').textContent = s.team_a_name;
+    el('chkTeamBLabel').textContent = s.team_b_name;
+
   } catch(e) { /* ignore poll errors */ }
 }
 
@@ -368,6 +510,7 @@ async function loadConfig() {
     document.getElementById('sTokenA').value = c.team_a_token_id;
     document.getElementById('sTokenB').value = c.team_b_token_id;
     document.getElementById('sCondition').value = c.condition_id || '';
+    if (c.market_slug) document.getElementById('sSlug').value = c.market_slug;
     document.getElementById('sBatFirst').value = c.first_batting === 'TEAM_B' ? 'B' : 'A';
     document.getElementById('sNegRisk').value = String(c.neg_risk);
     document.getElementById('lBudget').value = c.total_budget_usdc;
@@ -377,12 +520,53 @@ async function loadConfig() {
     document.getElementById('lPollInterval').value = c.fill_poll_interval_ms;
     document.getElementById('lPollTimeout').value = c.fill_poll_timeout_ms;
     document.getElementById('lDryRun').value = String(c.dry_run);
+    if (c.edge_wicket != null) document.getElementById('lEdgeW').value = c.edge_wicket;
+    if (c.edge_boundary_4 != null) document.getElementById('lEdge4').value = c.edge_boundary_4;
+    if (c.edge_boundary_6 != null) document.getElementById('lEdge6').value = c.edge_boundary_6;
     document.getElementById('wSigType').value = c.signature_type;
     if (c.polymarket_address) document.getElementById('wAddr').value = c.polymarket_address;
+    if (c.eoa_address) document.getElementById('wEoa').value = c.eoa_address;
     const wk = document.getElementById('wKey');
     if (c.private_key_set) {
       wk.placeholder = '********** (already set)';
     }
+    const ds = document.getElementById('wDeriveStatus');
+    if (c.api_key_set && c.api_key_id) {
+      ds.style.display = '';
+      document.getElementById('wDerivedKey').textContent = c.api_key_id;
+    } else {
+      ds.style.display = c.api_key_set ? '' : 'none';
+      if (c.api_key_set) document.getElementById('wDerivedKey').textContent = '(configured)';
+    }
+  } catch(e) {}
+}
+
+async function refreshWallets() {
+  try {
+    const w = await api('/api/wallets');
+    document.getElementById('wBalEoa').textContent = w.eoa_address || '—';
+    document.getElementById('wBalProxy').textContent = w.proxy_address || '—';
+    document.getElementById('wBalEoaUsdc').textContent = w.eoa_usdc != null ? '$' + parseFloat(w.eoa_usdc).toFixed(2) : '—';
+    document.getElementById('wBalProxyUsdc').textContent = w.proxy_usdc != null ? '$' + parseFloat(w.proxy_usdc).toFixed(2) : '—';
+    // Render positions
+    const pos = document.getElementById('wPositions');
+    const positions = Array.isArray(w.positions) ? w.positions : [];
+    if (positions.length === 0) {
+      pos.textContent = '';
+    } else {
+      pos.innerHTML = '<div style="color:#8b949e;margin-bottom:4px">Open Positions (proxy)</div>' +
+        positions.slice(0, 10).map(p => {
+          const slug = p.market?.slug || p.conditionId || '?';
+          const outcome = p.outcome || p.side || '?';
+          const size = parseFloat(p.size || 0).toFixed(2);
+          const val = p.currentValue != null ? ' ($' + parseFloat(p.currentValue).toFixed(2) + ')' : '';
+          return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #21262d">
+            <span style="color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">${slug}</span>
+            <span style="color:#3fb950;white-space:nowrap">${outcome} ${size}${val}</span>
+          </div>`;
+        }).join('');
+    }
+    if (w.eoa_address) document.getElementById('wEoa').value = w.eoa_address;
   } catch(e) {}
 }
 
@@ -406,7 +590,14 @@ async function saveWallet() {
   if (key) body.private_key = key;
   if (addr) body.address = addr;
   body.signature_type = sig;
-  await api('/api/wallet', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const r = await api('/api/wallet', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (r && r.api_key) {
+    const ds = document.getElementById('wDeriveStatus');
+    ds.style.display = '';
+    document.getElementById('wDerivedKey').textContent = r.api_key;
+  }
+  await loadConfig();
+  refreshWallets();
 }
 
 async function saveLimits() {
@@ -418,6 +609,9 @@ async function saveLimits() {
     fill_poll_interval_ms: parseInt(document.getElementById('lPollInterval').value),
     fill_poll_timeout_ms: parseInt(document.getElementById('lPollTimeout').value),
     dry_run: document.getElementById('lDryRun').value === 'true',
+    edge_wicket: parseFloat(document.getElementById('lEdgeW').value),
+    edge_boundary_4: parseFloat(document.getElementById('lEdge4').value),
+    edge_boundary_6: parseFloat(document.getElementById('lEdge6').value),
   })});
 }
 
@@ -454,6 +648,29 @@ async function ctfRedeem() {
 async function ctfSyncBalance() {
   await api('/api/ctf-balance', {method:'POST'});
 }
+async function moveTokens(direction) {
+  const label = direction === 'to_proxy' ? 'EOA → Proxy' : 'Proxy → EOA';
+  if (!confirm(`Move ALL YES + NO tokens (${label})?\nThis transfers your full token balance.`)) return;
+  await api('/api/move-tokens', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({direction})});
+}
+async function moveUsdc(direction) {
+  const amt = parseInt(document.getElementById('moveUsdcAmt').value);
+  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
+  const label = direction === 'to_proxy' ? 'EOA → Proxy' : 'Proxy → EOA';
+  if (!confirm(`Move $${amt} USDC (${label})?`)) return;
+  await api('/api/move-usdc', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({amount_usdc: amt, direction})});
+}
+async function toggleTeam(team, enabled) {
+  await api('/api/toggle-team', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({team, enabled})});
+}
+
+async function megaResolve() {
+  if (!confirm('Try to redeem ALL resolved positions? This will attempt redeem on every condition_id found in your open positions.')) return;
+  await api('/api/mega-resolve', {method:'POST'});
+}
+
 async function fetchMarket() {
   const slug = document.getElementById('sSlug').value.trim();
   if (!slug) { showToast('enter a market slug'); return; }
@@ -465,120 +682,221 @@ async function fetchMarket() {
     document.getElementById('sTokenB').value = r.team_b_token_id;
     document.getElementById('sCondition').value = r.condition_id;
     document.getElementById('sNegRisk').value = String(r.neg_risk);
+    pollPriceChart();
   }
 }
 
-let lastChartData = [];
-function drawInventoryChart(data) {
-  lastChartData = data || [];
-  const canvas = document.getElementById('invChart');
+async function pollTrades() {
+  try {
+    const d = await api('/api/trades');
+    const body = document.getElementById('tradeBody');
+    const empty = document.getElementById('tradeEmpty');
+    if (d.error) return;
+    const trades = d.trades || [];
+    if (trades.length === 0) {
+      body.innerHTML = '';
+      empty.style.display = '';
+      document.getElementById('tradeSummary').innerHTML = '';
+      return;
+    }
+    empty.style.display = 'none';
+    body.innerHTML = trades.slice().reverse().map(t => {
+      const sideColor = t.side === 'BUY' ? '#3fb950' : '#f85149';
+      const cost = parseFloat(t.cost).toFixed(2);
+      const statusColor = t.status === 'MATCHED' ? '#3fb950' : t.status === 'LIVE' ? '#58a6ff' : '#8b949e';
+      return `<tr style="border-bottom:1px solid #21262d">
+        <td style="padding:3px 6px;color:#484f58">${t.ts}</td>
+        <td style="padding:3px 6px;color:${sideColor};font-weight:600">${t.side}</td>
+        <td style="padding:3px 6px;color:#e1e4e8">${t.team}</td>
+        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">${t.size}</td>
+        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">${t.price}</td>
+        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">$${cost}</td>
+        <td style="padding:3px 6px;color:#8b949e">${t.order_type}</td>
+        <td style="padding:3px 6px;color:${statusColor}">${t.status}</td>
+      </tr>`;
+    }).join('');
+    // Render summary
+    const s = d.summary;
+    const a = s.team_a, b = s.team_b;
+    const pnlColor = v => parseFloat(v) >= 0 ? '#3fb950' : '#f85149';
+    const fmt = v => parseFloat(v).toFixed(2);
+    const fmtPnl = v => (parseFloat(v) >= 0 ? '+$' : '-$') + Math.abs(parseFloat(v)).toFixed(2);
+    document.getElementById('tradeSummary').innerHTML = `
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">
+        <div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">${a.name}</div>
+        <div>Bought: <strong>${a.bought}</strong> @ avg <strong>${fmt(a.avg_buy)}</strong> = $${fmt(a.buy_cost)}</div>
+        <div>Sold: <strong>${a.sold}</strong> @ avg <strong>${fmt(a.avg_sell)}</strong> = $${fmt(a.sell_revenue)}</div>
+        <div>Net tokens: <strong>${a.net_tokens}</strong></div>
+        <div>P&L: <strong style="color:${pnlColor(a.realized_pnl)}">${fmtPnl(a.realized_pnl)}</strong></div>
+      </div>
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">
+        <div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">${b.name}</div>
+        <div>Bought: <strong>${b.bought}</strong> @ avg <strong>${fmt(b.avg_buy)}</strong> = $${fmt(b.buy_cost)}</div>
+        <div>Sold: <strong>${b.sold}</strong> @ avg <strong>${fmt(b.avg_sell)}</strong> = $${fmt(b.sell_revenue)}</div>
+        <div>Net tokens: <strong>${b.net_tokens}</strong></div>
+        <div>P&L: <strong style="color:${pnlColor(b.realized_pnl)}">${fmtPnl(b.realized_pnl)}</strong></div>
+      </div>
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;display:flex;align-items:center">
+        <div>Total P&L: <strong style="color:${pnlColor(s.total_pnl)};font-size:16px">${fmtPnl(s.total_pnl)}</strong></div>
+      </div>`;
+  } catch(e) {}
+}
+
+async function pollPriceChart() {
+  try {
+    const interval = document.getElementById('chartInterval').value;
+    const d = await api('/api/price-history?interval=' + interval);
+    const a = d.team_a || [], b = d.team_b || [];
+    if (a.length === 0 && b.length === 0) {
+      document.getElementById('chartCard').style.display = 'none';
+      return;
+    }
+    document.getElementById('chartCard').style.display = '';
+    drawChart(a, b, d.team_a_name, d.team_b_name);
+  } catch(e) {}
+}
+
+function drawChart(dataA, dataB, nameA, nameB) {
+  const canvas = document.getElementById('priceChart');
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
   ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const PAD_L = 45, PAD_R = 10, PAD_T = 10, PAD_B = 24;
+  const cW = W - PAD_L - PAD_R, cH = H - PAD_T - PAD_B;
 
-  ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, w, h);
+  ctx.clearRect(0, 0, W, H);
 
-  if (!data || data.length === 0) {
-    ctx.fillStyle = '#484f58';
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('No inventory data yet', w/2, h/2);
-    return;
+  // Determine time range from both series
+  let allT = [];
+  dataA.forEach(p => allT.push(p.t));
+  dataB.forEach(p => allT.push(p.t));
+  if (allT.length === 0) return;
+  const minT = Math.min(...allT), maxT = Math.max(...allT);
+  const tRange = maxT - minT || 1;
+
+  // Y axis: 0% to 100%
+  const minP = 0, maxP = 1;
+
+  const xOf = t => PAD_L + ((t - minT) / tRange) * cW;
+  const yOf = p => PAD_T + (1 - (p - minP) / (maxP - minP)) * cH;
+
+  // Grid lines
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  for (let pct = 0; pct <= 100; pct += 25) {
+    const y = yOf(pct / 100);
+    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+    ctx.fillStyle = '#484f58'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(pct + '%', PAD_L - 4, y + 3);
   }
 
-  const pad = {top:10, right:10, bottom:22, left:44};
-  const cw = w - pad.left - pad.right;
-  const ch = h - pad.top - pad.bottom;
+  // Time labels
+  ctx.fillStyle = '#484f58'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  const nLabels = Math.min(6, allT.length);
+  for (let i = 0; i < nLabels; i++) {
+    const t = minT + (tRange * i / (nLabels - 1 || 1));
+    const d = new Date(t * 1000);
+    const lbl = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    ctx.fillText(lbl, xOf(t), H - 4);
+  }
 
-  const allVals = data.flatMap(d => {
-    const a = parseFloat(d.team_a), b = parseFloat(d.team_b);
-    return [a, b, a + b];
-  });
-  const maxVal = Math.max(...allVals, 1);
-  const minVal = Math.min(...allVals, 0);
-  const range = maxVal - minVal || 1;
-
-  const xStep = data.length > 1 ? cw / (data.length - 1) : cw;
-
-  function drawLine(valFn, color) {
+  // Draw line
+  function drawLine(data, color) {
+    if (data.length < 2) return;
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.beginPath();
-    data.forEach((d, i) => {
-      const x = pad.left + (data.length > 1 ? i * xStep : cw/2);
-      const y = pad.top + ch - ((valFn(d) - minVal) / range) * ch;
+    data.forEach((pt, i) => {
+      const x = xOf(pt.t), y = yOf(pt.p);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
+
+    // Glow fill
+    ctx.save();
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    data.forEach((pt, i) => {
+      const x = xOf(pt.t), y = yOf(pt.p);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.lineTo(xOf(data[data.length-1].t), yOf(0));
+    ctx.lineTo(xOf(data[0].t), yOf(0));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 
-  ctx.strokeStyle = '#21262d';
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = pad.top + (ch / 4) * i;
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
-    const val = maxVal - (range / 4) * i;
-    ctx.fillStyle = '#484f58';
-    ctx.font = '10px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(val.toFixed(0), pad.left - 4, y + 3);
-  }
+  const colorA = '#3fb950', colorB = '#f85149';
+  drawLine(dataA, colorA);
+  drawLine(dataB, colorB);
 
-  drawLine(d => parseFloat(d.team_a), '#58a6ff');
-  drawLine(d => parseFloat(d.team_b), '#f0883e');
-  drawLine(d => parseFloat(d.team_a) + parseFloat(d.team_b), '#3fb950');
+  // Current price labels at the end of lines
+  function endLabel(data, color, name) {
+    if (data.length === 0) return;
+    const last = data[data.length - 1];
+    const x = xOf(last.t), y = yOf(last.p);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+    const pct = (last.p * 100).toFixed(0) + '%';
+    ctx.fillText(pct, x + 8, y + 4);
+  }
+  endLabel(dataA, colorA, nameA);
+  endLabel(dataB, colorB, nameB);
 
-  ctx.fillStyle = '#484f58';
-  ctx.font = '9px sans-serif';
-  ctx.textAlign = 'center';
-  const labelCount = Math.min(data.length, 8);
-  const labelStep = Math.max(1, Math.floor(data.length / labelCount));
-  for (let i = 0; i < data.length; i += labelStep) {
-    const x = pad.left + (data.length > 1 ? i * xStep : cw/2);
-    ctx.fillText(data[i].ts, x, h - 4);
-  }
-  if (data.length > 1) {
-    const x = pad.left + (data.length - 1) * xStep;
-    ctx.fillText(data[data.length-1].ts, x, h - 4);
-  }
+  // Legend
+  const lastA = dataA.length ? (dataA[dataA.length-1].p * 100).toFixed(0) + '%' : '—';
+  const lastB = dataB.length ? (dataB[dataB.length-1].p * 100).toFixed(0) + '%' : '—';
+  document.getElementById('chartLegend').innerHTML =
+    `<span style="color:${colorA}">● ${nameA} ${lastA}</span>` +
+    `<span style="color:${colorB}">● ${nameB} ${lastB}</span>`;
 }
-document.getElementById('invChart').addEventListener('mousemove', function(e) {
-  const data = lastChartData;
-  if (!data || data.length === 0) return;
-  const rect = this.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const pad = {left:44, right:10};
-  const cw = rect.width - pad.left - pad.right;
-  const xStep = data.length > 1 ? cw / (data.length - 1) : cw;
-  let idx = Math.round((mx - pad.left) / xStep);
-  idx = Math.max(0, Math.min(data.length - 1, idx));
-  const d = data[idx];
-  const a = parseFloat(d.team_a), b = parseFloat(d.team_b);
-  document.getElementById('chartTooltip').textContent =
-    d.ts + '  |  A: ' + a.toFixed(1) + '  B: ' + b.toFixed(1) + '  Total: ' + (a+b).toFixed(1);
-});
-document.getElementById('invChart').addEventListener('mouseleave', function() {
-  document.getElementById('chartTooltip').textContent = '';
-});
 
-async function pollInventory() {
+function renderBookTable(bodyId, bids, asks) {
+  const rows = Math.max(bids.length, asks.length, 5);
+  let html = '';
+  for (let i = 0; i < rows; i++) {
+    const bid = bids[i], ask = asks[i];
+    html += `<tr>
+      <td style="text-align:left;color:#3fb950;padding:3px 6px">${bid ? parseFloat(bid.price).toFixed(2) : '—'}</td>
+      <td style="text-align:right;color:#3fb950;padding:3px 6px">${bid ? parseFloat(bid.size).toFixed(1) : ''}</td>
+      <td style="border-left:1px solid #21262d"></td>
+      <td style="text-align:left;color:#f85149;padding:3px 6px">${ask ? parseFloat(ask.price).toFixed(2) : '—'}</td>
+      <td style="text-align:right;color:#f85149;padding:3px 6px">${ask ? parseFloat(ask.size).toFixed(1) : ''}</td>
+    </tr>`;
+  }
+  document.getElementById(bodyId).innerHTML = html;
+}
+
+async function pollBook() {
   try {
-    const data = await api('/api/inventory');
-    drawInventoryChart(data);
+    const b = await api('/api/book');
+    document.getElementById('bookLabelA').textContent = b.team_a_name;
+    document.getElementById('bookLabelB').textContent = b.team_b_name;
+    renderBookTable('bookBodyA', b.team_a_bids, b.team_a_asks);
+    renderBookTable('bookBodyB', b.team_b_bids, b.team_b_asks);
+    document.getElementById('bookUpdated').textContent = new Date().toLocaleTimeString();
   } catch(e) {}
 }
 
 loadConfig();
 pollStatus();
 pollEvents();
-pollInventory();
-setInterval(() => { pollStatus(); pollEvents(); pollInventory(); }, 1500);
+pollTrades();
+pollBook();
+pollPriceChart();
+setInterval(pollStatus, 1500);
+setInterval(pollEvents, 1500);
+setInterval(pollTrades, 2000);
+setInterval(pollBook, 500);
+setInterval(pollPriceChart, 1000);
 </script>
 </body>
 </html>

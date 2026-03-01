@@ -1,6 +1,7 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -26,12 +27,51 @@ use crate::web;
 
 type S = Arc<AppState>;
 
+/// Start (or restart) the orderbook WebSocket feed so the UI shows live
+/// bid/ask data even before a match is started.  Safe to call multiple times —
+/// cancels any existing WS before spawning a new one.
+pub fn start_book_ws(state: &Arc<AppState>) {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_tokens() {
+        return; // nothing to subscribe to yet
+    }
+
+    // Cancel previous WS if running
+    if let Some(old) = state.ws_cancel.read().unwrap().as_ref() {
+        old.cancel();
+    }
+
+    let (book_tx, book_rx) = watch::channel((OrderBook::default(), OrderBook::default()));
+    *state.book_rx.write().unwrap() = Some(book_rx);
+    *state.book_tx.write().unwrap() = Some(book_tx.clone());
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    *state.ws_cancel.write().unwrap() = Some(cancel.clone());
+
+    let team_a = config.team_a_name.clone();
+    let team_b = config.team_b_name.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            res = market_ws::run(&config, book_tx) => {
+                if let Err(e) = res {
+                    tracing::error!(error = %e, "book ws failed");
+                }
+            }
+            _ = cancel.cancelled() => {
+                tracing::debug!("book ws stopped (setup changed)");
+            }
+        }
+    });
+    tracing::info!("orderbook WebSocket started for {} vs {}", team_a, team_b);
+}
+
 pub fn build_router(state: S) -> Router {
     Router::new()
         .route("/", get(serve_ui))
         .route("/api/status", get(get_status))
         .route("/api/config", get(get_config))
         .route("/api/events", get(get_events))
+        .route("/api/trades", get(get_trades))
         .route("/api/inventory", get(get_inventory))
         .route("/api/setup", post(post_setup))
         .route("/api/wallet", post(post_wallet))
@@ -39,14 +79,21 @@ pub fn build_router(state: S) -> Router {
         .route("/api/start-innings", post(post_start_innings))
         .route("/api/stop-innings", post(post_stop_innings))
         .route("/api/signal", post(post_signal))
+        .route("/api/toggle-team", post(post_toggle_team))
         .route("/api/match-over", post(post_match_over))
         .route("/api/cancel-all", post(post_cancel_all))
         .route("/api/reset", post(post_reset))
         .route("/api/fetch-market", post(post_fetch_market))
+        .route("/api/book", get(get_book))
+        .route("/api/price-history", get(get_price_history))
         .route("/api/ctf-balance", post(post_ctf_balance))
         .route("/api/ctf-split", post(post_ctf_split))
         .route("/api/ctf-merge", post(post_ctf_merge))
         .route("/api/ctf-redeem", post(post_ctf_redeem))
+        .route("/api/mega-resolve", post(post_mega_resolve))
+        .route("/api/wallets", get(get_wallets))
+        .route("/api/move-tokens", post(post_move_tokens))
+        .route("/api/move-usdc", post(post_move_usdc))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -81,6 +128,8 @@ struct StatusResponse {
     book_b_bid: Option<Decimal>,
     book_b_ask: Option<Decimal>,
     live_orders: usize,
+    trade_team_a: bool,
+    trade_team_b: bool,
 }
 
 async fn get_status(State(state): State<S>) -> Json<StatusResponse> {
@@ -125,11 +174,112 @@ async fn get_status(State(state): State<S>) -> Json<StatusResponse> {
         book_b_bid: bb_bid,
         book_b_ask: bb_ask,
         live_orders: state.live_order_ids.lock().unwrap().len(),
+        trade_team_a: *state.trade_team_a.read().unwrap(),
+        trade_team_b: *state.trade_team_b.read().unwrap(),
     })
+}
+
+// ── Live order book (top N levels) ──────────────────────────────────────────
+
+#[derive(Serialize)]
+struct BookLevelDto {
+    price: Decimal,
+    size: Decimal,
+}
+
+#[derive(Serialize)]
+struct BookResponse {
+    team_a_name: String,
+    team_b_name: String,
+    team_a_bids: Vec<BookLevelDto>,
+    team_a_asks: Vec<BookLevelDto>,
+    team_b_bids: Vec<BookLevelDto>,
+    team_b_asks: Vec<BookLevelDto>,
+}
+
+async fn get_book(State(state): State<S>) -> Json<BookResponse> {
+    const N: usize = 7;
+    let config = state.config.read().unwrap();
+    let br = state.book_rx.read().unwrap();
+    let (a_bids, a_asks, b_bids, b_asks) = if let Some(rx) = br.as_ref() {
+        let books = rx.borrow().clone();
+        let to_dto = |levels: &[crate::types::PriceLevel]| -> Vec<BookLevelDto> {
+            levels.iter().take(N).map(|l| BookLevelDto { price: l.price, size: l.size }).collect()
+        };
+        (
+            to_dto(&books.0.bids.levels),
+            to_dto(&books.0.asks.levels),
+            to_dto(&books.1.bids.levels),
+            to_dto(&books.1.asks.levels),
+        )
+    } else {
+        (vec![], vec![], vec![], vec![])
+    };
+    Json(BookResponse {
+        team_a_name: config.team_a_name.clone(),
+        team_b_name: config.team_b_name.clone(),
+        team_a_bids: a_bids,
+        team_a_asks: a_asks,
+        team_b_bids: b_bids,
+        team_b_asks: b_asks,
+    })
+}
+
+#[derive(Deserialize)]
+struct PriceHistoryQuery {
+    interval: Option<String>,
+}
+
+async fn get_price_history(
+    State(state): State<S>,
+    Query(query): Query<PriceHistoryQuery>,
+) -> Json<serde_json::Value> {
+    let (token_a, token_b, name_a, name_b, clob) = {
+        let config = state.config.read().unwrap();
+        (
+            config.team_a_token_id.clone(),
+            config.team_b_token_id.clone(),
+            config.team_a_name.clone(),
+            config.team_b_name.clone(),
+            config.clob_http.clone(),
+        )
+    };
+
+    if token_a.is_empty() || token_b.is_empty() {
+        return Json(serde_json::json!({"team_a_name": name_a, "team_b_name": name_b, "team_a": [], "team_b": []}));
+    }
+
+    let api_interval = query.interval.as_deref().unwrap_or("1h");
+
+    let url_a = format!("{clob}/prices-history?interval={api_interval}&market={token_a}&fidelity=1");
+    let url_b = format!("{clob}/prices-history?interval={api_interval}&market={token_b}&fidelity=1");
+
+    let client = reqwest::Client::new();
+    let (ra, rb) = tokio::join!(client.get(&url_a).send(), client.get(&url_b).send());
+
+    let a = match ra {
+        Ok(r) => r.json::<serde_json::Value>().await.unwrap_or_default(),
+        Err(_) => serde_json::json!({}),
+    };
+    let b = match rb {
+        Ok(r) => r.json::<serde_json::Value>().await.unwrap_or_default(),
+        Err(_) => serde_json::json!({}),
+    };
+
+    Json(serde_json::json!({
+        "team_a_name": name_a,
+        "team_b_name": name_b,
+        "team_a": a.get("history").cloned().unwrap_or(serde_json::json!([])),
+        "team_b": b.get("history").cloned().unwrap_or(serde_json::json!([])),
+    }))
 }
 
 async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
     let config = state.config.read().unwrap();
+    let auth_guard = state.auth.read().unwrap();
+    let eoa_address = auth_guard.as_ref().map(|a| a.address().to_string());
+    let api_key_id = auth_guard.as_ref().map(|a| a.api_key.clone()).filter(|k| !k.is_empty());
+    drop(auth_guard);
     Json(serde_json::json!({
         "team_a_name": config.team_a_name,
         "team_b_name": config.team_b_name,
@@ -149,6 +299,55 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "wallet_set": config.has_wallet(),
         "polymarket_address": config.polymarket_address,
         "private_key_set": config.has_wallet(),
+        "eoa_address": eoa_address,
+        "api_key_set": !config.api_key.is_empty() || api_key_id.is_some(),
+        "api_key_id": api_key_id,
+        "market_slug": config.market_slug,
+        "edge_wicket": config.edge_wicket,
+        "edge_boundary_4": config.edge_boundary_4,
+        "edge_boundary_6": config.edge_boundary_6,
+    }))
+}
+
+// ── Wallets + USDC balances ──────────────────────────────────────────────────
+
+async fn get_wallets(State(state): State<S>) -> Json<serde_json::Value> {
+    let config = state.config.read().unwrap().clone();
+    let eoa_address = state.auth.read().unwrap().as_ref().map(|a| a.address().to_string());
+    let proxy_address = if config.polymarket_address.is_empty() { None } else { Some(config.polymarket_address.clone()) };
+
+    // Fetch USDC balances from chain in parallel (best-effort, silently ignore errors).
+    let (eoa_usdc, proxy_usdc) = tokio::join!(
+        async {
+            if let Some(addr) = &eoa_address {
+                ctf::usdc_balance(&config.polygon_rpc, addr).await.ok().map(|v| v.to_string())
+            } else { None }
+        },
+        async {
+            if let Some(addr) = &proxy_address {
+                ctf::usdc_balance(&config.polygon_rpc, addr).await.ok().map(|v| v.to_string())
+            } else { None }
+        }
+    );
+
+    // Fetch open positions for the proxy wallet from Gamma API (best-effort).
+    let positions = if let Some(addr) = &proxy_address {
+        let url = format!("https://data-api.polymarket.com/positions?user={addr}&limit=50&sizeThreshold=0.01");
+        match reqwest::get(&url).await {
+            Ok(resp) => resp.json::<serde_json::Value>().await.unwrap_or(serde_json::json!([])),
+            Err(_) => serde_json::json!([]),
+        }
+    } else {
+        serde_json::json!([])
+    };
+
+    Json(serde_json::json!({
+        "eoa_address": eoa_address,
+        "proxy_address": proxy_address,
+        "eoa_usdc": eoa_usdc,
+        "proxy_usdc": proxy_usdc,
+        "positions": positions,
+        "sig_type": config.signature_type,
     }))
 }
 
@@ -157,9 +356,237 @@ async fn get_events(State(state): State<S>) -> Json<Vec<crate::state::EventEntry
     Json(events.iter().cloned().collect())
 }
 
+async fn get_trades(State(state): State<S>) -> Json<serde_json::Value> {
+    let (auth_opt, config) = {
+        let auth = state.auth.read().unwrap().clone();
+        let config = state.config.read().unwrap().clone();
+        (auth, config)
+    };
+
+    let auth = match auth_opt {
+        Some(a) => a,
+        None => return Json(serde_json::json!({"trades": [], "summary": null, "error": "no auth"})),
+    };
+
+    let token_a = &config.team_a_token_id;
+    let token_b = &config.team_b_token_id;
+
+    if token_a.is_empty() && token_b.is_empty() {
+        return Json(serde_json::json!({"trades": [], "summary": null}));
+    }
+
+    // Fetch orders for both tokens in parallel
+    let (res_a, res_b) = tokio::join!(
+        orders::get_user_orders(&auth, if token_a.is_empty() { None } else { Some(token_a.as_str()) }),
+        orders::get_user_orders(&auth, if token_b.is_empty() { None } else { Some(token_b.as_str()) }),
+    );
+
+    let orders_a = res_a.unwrap_or_default();
+    let orders_b = res_b.unwrap_or_default();
+
+    // Helper to parse order into trade record
+    fn parse_order(o: &serde_json::Value, team_name: &str) -> Option<serde_json::Value> {
+        let size_matched = o.get("size_matched")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO);
+        // Skip orders with no fills
+        if size_matched.is_zero() { return None; }
+
+        let side = o.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
+        let price = o.get("price")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO);
+        let original_size = o.get("original_size")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO);
+        let cost = size_matched * price;
+        let status = o.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let order_type = o.get("type").and_then(|v| v.as_str()).unwrap_or("FOK");
+        let order_id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let created = o.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let ts = if created.len() > 19 {
+            // Parse ISO timestamp to HH:MM:SS
+            created.get(11..19).unwrap_or(created)
+        } else { created };
+
+        // Map CLOB side: "BUY"/"SELL" (CLOB uses "BUY"=0, "SELL"=1 but returns string)
+        let display_side = if side == "BUY" || side == "0" { "BUY" } else { "SELL" };
+
+        Some(serde_json::json!({
+            "ts": ts,
+            "side": display_side,
+            "team": team_name,
+            "size": size_matched.to_string(),
+            "original_size": original_size.to_string(),
+            "price": price.to_string(),
+            "cost": cost.round_dp(2).to_string(),
+            "order_type": order_type,
+            "status": status,
+            "order_id": order_id,
+        }))
+    }
+
+    let mut trades: Vec<serde_json::Value> = Vec::new();
+    for o in &orders_a { if let Some(t) = parse_order(o, &config.team_a_name) { trades.push(t); } }
+    for o in &orders_b { if let Some(t) = parse_order(o, &config.team_b_name) { trades.push(t); } }
+
+    // Sort by ts
+    trades.sort_by(|a, b| {
+        let ta = a.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        let tb = b.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        ta.cmp(tb)
+    });
+
+    // Compute per-team summaries
+    let mut team_a_bought = Decimal::ZERO;
+    let mut team_a_sold = Decimal::ZERO;
+    let mut team_a_buy_cost = Decimal::ZERO;
+    let mut team_a_sell_revenue = Decimal::ZERO;
+    let mut team_b_bought = Decimal::ZERO;
+    let mut team_b_sold = Decimal::ZERO;
+    let mut team_b_buy_cost = Decimal::ZERO;
+    let mut team_b_sell_revenue = Decimal::ZERO;
+
+    for t in &trades {
+        let is_a = t.get("team").and_then(|v| v.as_str()) == Some(&config.team_a_name);
+        let side = t.get("side").and_then(|v| v.as_str()).unwrap_or("");
+        let size = t.get("size").and_then(|v| v.as_str()).and_then(|s| Decimal::from_str(s).ok()).unwrap_or(Decimal::ZERO);
+        let cost = t.get("cost").and_then(|v| v.as_str()).and_then(|s| Decimal::from_str(s).ok()).unwrap_or(Decimal::ZERO);
+        match side {
+            "BUY" => {
+                if is_a { team_a_bought += size; team_a_buy_cost += cost; }
+                else    { team_b_bought += size; team_b_buy_cost += cost; }
+            }
+            "SELL" => {
+                if is_a { team_a_sold += size; team_a_sell_revenue += cost; }
+                else    { team_b_sold += size; team_b_sell_revenue += cost; }
+            }
+            _ => {}
+        }
+    }
+
+    let avg = |cost: Decimal, qty: Decimal| -> Decimal {
+        if qty.is_zero() { Decimal::ZERO } else { (cost / qty).round_dp(4) }
+    };
+
+    let pnl_a = team_a_sell_revenue - team_a_buy_cost;
+    let pnl_b = team_b_sell_revenue - team_b_buy_cost;
+
+    Json(serde_json::json!({
+        "trades": trades,
+        "summary": {
+            "team_a": {
+                "name": config.team_a_name,
+                "bought": team_a_bought,
+                "sold": team_a_sold,
+                "buy_cost": team_a_buy_cost,
+                "sell_revenue": team_a_sell_revenue,
+                "avg_buy": avg(team_a_buy_cost, team_a_bought),
+                "avg_sell": avg(team_a_sell_revenue, team_a_sold),
+                "net_tokens": team_a_bought - team_a_sold,
+                "realized_pnl": pnl_a,
+            },
+            "team_b": {
+                "name": config.team_b_name,
+                "bought": team_b_bought,
+                "sold": team_b_sold,
+                "buy_cost": team_b_buy_cost,
+                "sell_revenue": team_b_sell_revenue,
+                "avg_buy": avg(team_b_buy_cost, team_b_bought),
+                "avg_sell": avg(team_b_sell_revenue, team_b_sold),
+                "net_tokens": team_b_bought - team_b_sold,
+                "realized_pnl": pnl_b,
+            },
+            "total_pnl": pnl_a + pnl_b,
+        }
+    }))
+}
+
 async fn get_inventory(State(state): State<S>) -> Json<Vec<crate::state::InventorySnapshot>> {
     let history = state.inventory_history.lock().unwrap();
     Json(history.clone())
+}
+
+// ── Move tokens / USDC between EOA and proxy ────────────────────────────────
+
+#[derive(Deserialize)]
+struct MoveTokensRequest {
+    direction: String,    // "to_proxy" or "to_eoa"
+}
+
+async fn post_move_tokens(
+    State(state): State<S>,
+    Json(body): Json<MoveTokensRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if !config.has_tokens() {
+        return Err((StatusCode::BAD_REQUEST, "token IDs not set (fetch a market first)".into()));
+    }
+
+    let label = if body.direction == "to_proxy" { "EOA → proxy" } else { "proxy → EOA" };
+    state.push_event("move", &format!("moving all YES + NO tokens {label}…"));
+
+    let result = if body.direction == "to_proxy" {
+        ctf::move_tokens_to_proxy(&config).await
+    } else {
+        ctf::move_tokens_to_eoa(&config).await
+    };
+
+    match result {
+        Ok((tx, dec_a, dec_b)) => {
+            state.push_event("move", &format!("tokens moved {label}: {dec_a:.2} A + {dec_b:.2} B — tx={tx}"));
+            Ok(Json(serde_json::json!({"ok": true, "tx": tx, "moved_a": dec_a.to_string(), "moved_b": dec_b.to_string()})))
+        }
+        Err(e) => {
+            state.push_event("error", &format!("move tokens failed: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("move failed: {e}")))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MoveUsdcRequest {
+    amount_usdc: u64,   // whole dollars (e.g. 50 = $50 USDC)
+    direction: String,  // "to_proxy" or "to_eoa"
+}
+
+async fn post_move_usdc(
+    State(state): State<S>,
+    Json(body): Json<MoveUsdcRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if body.amount_usdc == 0 {
+        return Err((StatusCode::BAD_REQUEST, "amount must be > 0".into()));
+    }
+
+    let label = if body.direction == "to_proxy" { "EOA → proxy" } else { "proxy → EOA" };
+    state.push_event("move", &format!("moving ${} USDC {label}…", body.amount_usdc));
+
+    let result = if body.direction == "to_proxy" {
+        ctf::move_usdc_to_proxy(&config, body.amount_usdc).await
+    } else {
+        ctf::move_usdc_to_eoa(&config, body.amount_usdc).await
+    };
+
+    match result {
+        Ok(tx) => {
+            state.push_event("move", &format!("USDC moved {label}: tx={tx}"));
+            Ok(Json(serde_json::json!({"ok": true, "tx": tx})))
+        }
+        Err(e) => {
+            state.push_event("error", &format!("move USDC failed: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("move failed: {e}")))
+        }
+    }
 }
 
 // ── Setup (teams + tokens) ─────────────────────────────────────────────────
@@ -202,6 +629,10 @@ async fn post_setup(
     );
 
     state.push_event("setup", "match setup updated + saved");
+
+    // Start/restart orderbook WS so book data shows before innings
+    start_book_ws(&state);
+
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -227,6 +658,10 @@ async fn post_wallet(
         if let Some(v) = body.private_key { config.polymarket_private_key = v; }
         if let Some(v) = body.address { config.polymarket_address = v; }
         if let Some(v) = body.signature_type { config.signature_type = v; }
+        // Clear pre-configured API keys so derivation always runs from private key
+        config.api_key = String::new();
+        config.api_secret = String::new();
+        config.api_passphrase = String::new();
     }
 
     let config = state.config.read().unwrap().clone();
@@ -235,8 +670,18 @@ async fn post_wallet(
     if config.has_wallet() {
         match ClobAuth::derive(&config).await {
             Ok(auth) => {
+                let api_key = auth.api_key.clone();
+                // Persist derived credentials so future startups skip L1 derivation
+                {
+                    let mut cfg = state.config.write().unwrap();
+                    cfg.api_key = auth.api_key.clone();
+                    cfg.api_secret = auth.api_secret.clone();
+                    cfg.api_passphrase = auth.passphrase.clone();
+                    cfg.persist();
+                }
                 *state.auth.write().unwrap() = Some(auth);
-                state.push_event("wallet", "wallet configured, auth derived + saved");
+                state.push_event("wallet", &format!("wallet configured, API key derived: {api_key}"));
+                return Ok(Json(serde_json::json!({"ok": true, "api_key": api_key})));
             }
             Err(e) => {
                 state.push_event("wallet", &format!("auth derivation failed: {e}"));
@@ -259,6 +704,9 @@ struct LimitsRequest {
     fill_poll_interval_ms: Option<u64>,
     fill_poll_timeout_ms: Option<u64>,
     dry_run: Option<bool>,
+    edge_wicket: Option<f64>,
+    edge_boundary_4: Option<f64>,
+    edge_boundary_6: Option<f64>,
 }
 
 async fn post_limits(
@@ -286,6 +734,9 @@ async fn post_limits(
     if let Some(v) = body.fill_poll_interval_ms { config.fill_poll_interval_ms = v; }
     if let Some(v) = body.fill_poll_timeout_ms { config.fill_poll_timeout_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
+    if let Some(v) = body.edge_wicket { config.edge_wicket = v; }
+    if let Some(v) = body.edge_boundary_4 { config.edge_boundary_4 = v; }
+    if let Some(v) = body.edge_boundary_6 { config.edge_boundary_6 = v; }
     config.persist();
     drop(config); // release write lock before acquiring position mutex
 
@@ -334,31 +785,18 @@ async fn post_start_innings(
     };
 
     let (signal_tx, signal_rx) = mpsc::channel::<CricketSignal>(64);
-    let (book_tx, book_rx) = watch::channel((OrderBook::default(), OrderBook::default()));
 
     *state.signal_tx.write().unwrap() = Some(signal_tx);
-    *state.book_rx.write().unwrap() = Some(book_rx.clone());
-    *state.book_tx.write().unwrap() = Some(book_tx.clone());
     *state.phase.write().unwrap() = MatchPhase::InningsRunning;
 
-    let cancel = tokio_util::sync::CancellationToken::new();
-    *state.ws_cancel.write().unwrap() = Some(cancel.clone());
+    // Always (re-)start the orderbook WS.  It may have been cancelled by a
+    // previous stop-innings, so we can't just check book_rx.is_some().
+    start_book_ws(&state);
 
-    // spawn market websocket
-    let ws_config = config.clone();
-    let ws_cancel = cancel.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            res = market_ws::run(&ws_config, book_tx) => {
-                if let Err(e) = res {
-                    tracing::error!(error = %e, "market ws failed");
-                }
-            }
-            _ = ws_cancel.cancelled() => {
-                tracing::info!("market ws stopped by cancellation");
-            }
-        }
-    });
+    let book_rx = state.book_rx.read().unwrap().clone()
+        .expect("book_rx must be set after start_book_ws");
+    let cancel = state.ws_cancel.read().unwrap().clone()
+        .expect("ws_cancel must be set after start_book_ws");
 
     // Sync on-chain balances into position tracker before the innings starts.
     // This reconciles any fills or manual token movements (split/merge) that
@@ -544,6 +982,35 @@ async fn post_signal(
     Ok(Json(serde_json::json!({"ok": true, "signal": body.signal})))
 }
 
+// ── Toggle team trading ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ToggleTeamRequest {
+    team: String,       // "A" or "B"
+    enabled: bool,
+}
+
+async fn post_toggle_team(
+    State(state): State<S>,
+    Json(body): Json<ToggleTeamRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap();
+    match body.team.to_uppercase().as_str() {
+        "A" => {
+            *state.trade_team_a.write().unwrap() = body.enabled;
+            let label = if body.enabled { "enabled" } else { "disabled" };
+            state.push_event("config", &format!("{} trading {}", config.team_a_name, label));
+        }
+        "B" => {
+            *state.trade_team_b.write().unwrap() = body.enabled;
+            let label = if body.enabled { "enabled" } else { "disabled" };
+            state.push_event("config", &format!("{} trading {}", config.team_b_name, label));
+        }
+        _ => return Err((StatusCode::BAD_REQUEST, "team must be 'A' or 'B'".into())),
+    }
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 // ── Match Over ──────────────────────────────────────────────────────────────
 
 async fn post_match_over(
@@ -578,23 +1045,20 @@ async fn post_cancel_all(
     let auth = state.auth.read().unwrap().clone()
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "no auth — configure wallet first".into()))?;
 
-    let config = state.config.read().unwrap().clone();
-    let order_ids: Vec<String> = state.live_order_ids.lock().unwrap().clone();
-
-    let results = future::join_all(
-        order_ids.iter().map(|oid| orders::cancel_order(&config, &auth, oid))
-    ).await;
-    let mut cancelled = 0u32;
-    for (oid, result) in order_ids.iter().zip(results) {
-        match result {
-            Ok(_) => cancelled += 1,
-            Err(e) => tracing::warn!(order_id = oid, error = %e, "cancel failed"),
+    // Use bulk cancel-all endpoint to cancel ALL open orders (including orphans
+    // from previous sessions that we don't track in live_order_ids).
+    match orders::cancel_all_open_orders(&auth).await {
+        Ok(()) => {
+            state.clear_orders();
+            state.push_event("cancel", "cancel-all: all open CLOB orders cancelled");
+            Ok(Json(serde_json::json!({"ok": true})))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cancel-all failed");
+            state.push_event("error", &format!("cancel-all failed: {e}"));
+            Err((StatusCode::INTERNAL_SERVER_ERROR, format!("cancel-all failed: {e}")))
         }
     }
-    state.clear_orders();
-
-    state.push_event("cancel", &format!("cancelled {cancelled}/{} orders", order_ids.len()));
-    Ok(Json(serde_json::json!({"ok": true, "cancelled": cancelled, "total": order_ids.len()})))
 }
 
 // ── Reset ───────────────────────────────────────────────────────────────────
@@ -641,6 +1105,18 @@ async fn post_fetch_market(
 
     let condition_id = market["conditionId"].as_str().unwrap_or("").to_string();
     let neg_risk = market["negRisk"].as_bool().unwrap_or(false);
+    let restricted = market["restricted"].as_bool().unwrap_or(false);
+    let tick_size = market["orderPriceMinTickSize"]
+        .as_f64()
+        .map(|v| format!("{v}"))
+        .unwrap_or_else(|| "0.01".to_string());
+    let order_min_size = market["orderMinSize"].as_f64().unwrap_or(1.0);
+    let order_min_size_dec = Decimal::from_str(&order_min_size.to_string()).unwrap_or(Decimal::ONE);
+
+    if restricted {
+        tracing::warn!("market is restricted — API trading may be blocked or limited");
+        state.push_event("warn", "Market is restricted; API orders may be rejected");
+    }
 
     let outcomes: Vec<String> = serde_json::from_str(
         market["outcomes"].as_str().unwrap_or("[]")
@@ -662,10 +1138,16 @@ async fn post_fetch_market(
         config.team_b_token_id = team_b_token.clone();
         config.condition_id = condition_id.clone();
         config.neg_risk = neg_risk;
+        config.tick_size = tick_size.clone();
+        config.order_min_size = order_min_size_dec;
+        config.market_slug = body.slug.clone();
         config.persist();
     }
 
-    state.push_event("setup", &format!("fetched market: {} vs {}", team_a_name, team_b_name));
+    state.push_event("setup", &format!("fetched market: {} vs {} (tick={}, min_size={})", team_a_name, team_b_name, tick_size, order_min_size));
+
+    // Start/restart orderbook WS so book data shows before innings
+    start_book_ws(&state);
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -675,6 +1157,9 @@ async fn post_fetch_market(
         "team_b_token_id": team_b_token,
         "condition_id": condition_id,
         "neg_risk": neg_risk,
+        "tick_size": tick_size,
+        "order_min_size": order_min_size,
+        "restricted": restricted,
     })))
 }
 
@@ -828,4 +1313,92 @@ async fn post_ctf_redeem(
             Err((StatusCode::INTERNAL_SERVER_ERROR, format!("redeem failed: {e}")))
         }
     }
+}
+
+// ── Mega Resolve (redeem ALL resolved positions) ─────────────────────────────
+
+async fn post_mega_resolve(
+    State(state): State<S>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+
+    let proxy_addr = if config.signature_type > 0 && !config.polymarket_address.is_empty() {
+        &config.polymarket_address
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "proxy wallet not configured".into()));
+    };
+
+    state.push_event("ctf", "mega resolve: fetching all positions…");
+
+    // Fetch all positions from Gamma API for this proxy wallet
+    let url = format!(
+        "https://data-api.polymarket.com/positions?user={proxy_addr}&limit=200&sizeThreshold=0.001"
+    );
+    let positions: Vec<serde_json::Value> = reqwest::get(&url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch positions failed: {e}")))?
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse positions failed: {e}")))?;
+
+    // Collect unique condition IDs from positions
+    let mut condition_ids: Vec<String> = positions
+        .iter()
+        .filter_map(|p| p["conditionId"].as_str().map(|s| s.to_string()))
+        .collect();
+    condition_ids.sort();
+    condition_ids.dedup();
+
+    if condition_ids.is_empty() {
+        state.push_event("ctf", "mega resolve: no positions found");
+        return Ok(Json(serde_json::json!({"ok": true, "redeemed": 0, "total": 0})));
+    }
+
+    state.push_event("ctf", &format!(
+        "mega resolve: found {} unique conditions from {} positions — trying to redeem each…",
+        condition_ids.len(), positions.len()
+    ));
+
+    let mut redeemed = 0u32;
+    let mut failed = 0u32;
+    let mut skipped = 0u32;
+
+    for cid in &condition_ids {
+        match ctf::redeem(&config, cid).await {
+            Ok(tx_hash) => {
+                redeemed += 1;
+                state.push_event("ctf", &format!("redeemed {cid} — tx: {tx_hash}"));
+                tracing::info!(condition_id = cid, tx = %tx_hash, "mega resolve: redeemed");
+            }
+            Err(e) => {
+                let err_str = format!("{e}");
+                // Common failures: "not resolved yet", "no balance", "already redeemed"
+                // These are expected for active/already-redeemed positions
+                if err_str.contains("revert") || err_str.contains("execution reverted") {
+                    skipped += 1;
+                    tracing::debug!(condition_id = cid, error = %e, "mega resolve: skipped (likely not resolved or no balance)");
+                } else {
+                    failed += 1;
+                    state.push_event("warn", &format!("mega resolve failed for {cid}: {e}"));
+                    tracing::warn!(condition_id = cid, error = %e, "mega resolve: failed");
+                }
+            }
+        }
+    }
+
+    let msg = format!(
+        "mega resolve done: {redeemed} redeemed, {skipped} skipped (not resolved/no balance), {failed} failed"
+    );
+    state.push_event("ctf", &msg);
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "redeemed": redeemed,
+        "skipped": skipped,
+        "failed": failed,
+        "total_conditions": condition_ids.len(),
+    })))
 }
