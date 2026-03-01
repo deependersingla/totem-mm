@@ -96,16 +96,33 @@ button:disabled{opacity:.4;cursor:not-allowed}
   </div>
 </div>
 
+<!-- Inventory Chart -->
+<div class="card full">
+  <h2>Inventory</h2>
+  <canvas id="invChart" width="860" height="180" style="width:100%;height:180px;border-radius:4px"></canvas>
+  <div id="chartTooltip" style="font-size:11px;color:#e1e4e8;margin-top:4px;min-height:14px"></div>
+  <div style="font-size:11px;color:#8b949e;margin-top:2px;display:flex;gap:16px">
+    <span><span style="color:#58a6ff">&#9632;</span> Team A</span>
+    <span><span style="color:#f0883e">&#9632;</span> Team B</span>
+    <span><span style="color:#3fb950">&#9632;</span> Total</span>
+  </div>
+</div>
+
 <!-- Setup -->
 <div class="card">
   <h2>Match Setup</h2>
   <div id="setupLock">
+    <div class="row" style="margin-bottom:6px">
+      <div style="flex:3"><label>Polymarket Slug</label><input id="sSlug" value="" placeholder="e.g. crint-ind-zwe-2026-02-26"></div>
+      <div style="flex:1;display:flex;align-items:flex-end"><button class="btn-primary" style="width:100%" onclick="fetchMarket()">Fetch</button></div>
+    </div>
     <div class="row">
       <div><label>Team A</label><input id="sTeamA" value=""></div>
       <div><label>Team B</label><input id="sTeamB" value=""></div>
     </div>
-    <label>Team A Token ID</label><input id="sTokenA" value="">
-    <label>Team B Token ID</label><input id="sTokenB" value="">
+    <label>Team A Token ID</label><input id="sTokenA" value="" style="font-size:10px">
+    <label>Team B Token ID</label><input id="sTokenB" value="" style="font-size:10px">
+    <label>Condition ID</label><input id="sCondition" value="" placeholder="0x..." style="font-size:10px">
     <div class="row">
       <div><label>First Batting</label>
         <select id="sBatFirst"><option value="A">A</option><option value="B">B</option></select>
@@ -141,17 +158,22 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <h2>Limits</h2>
   <div class="row">
     <div><label>Budget ($)</label><input id="lBudget" type="number" value="100"></div>
-    <div><label>Initial Buy ($)</label><input id="lInitial" type="number" value="20"></div>
+    <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
   </div>
   <div class="row">
-    <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
+    <div><label>Safe % (cents)</label><input id="lSafePct" type="number" value="2" min="1" max="49"></div>
     <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
+  </div>
+  <div class="row">
+    <div><label>Fill Poll (ms)</label><input id="lPollInterval" type="number" value="500" min="100"></div>
+    <div><label>Poll Timeout (ms)</label><input id="lPollTimeout" type="number" value="5000" min="1000"></div>
   </div>
   <div class="row">
     <div><label>Dry Run</label>
       <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
     </div>
   </div>
+  <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
   <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
 </div>
 
@@ -169,9 +191,35 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <button class="btn-warn" style="margin-top:8px;width:100%" onclick="resetMatch()">Reset (New Match)</button>
 </div>
 
+<!-- CTF Split / Merge / Redeem -->
+<div class="card full">
+  <h2>CTF On-Chain</h2>
+  <div class="row">
+    <div style="flex:2">
+      <label>Amount (USDC / tokens)</label>
+      <input id="ctfAmount" type="number" value="10" min="1" step="1">
+    </div>
+    <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
+      <button class="btn-primary" style="flex:1" onclick="ctfSplit()">Split USDC → Tokens</button>
+      <button class="btn-warn" style="flex:1" onclick="ctfMerge()">Merge Tokens → USDC</button>
+      <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
+    </div>
+  </div>
+  <div style="margin-top:8px">
+    <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
+  </div>
+  <div style="font-size:11px;color:#8b949e;margin-top:6px">
+    <b>Split:</b> $X USDC → X YES + X NO tokens &nbsp;|&nbsp;
+    <b>Merge:</b> X YES + X NO → $X USDC &nbsp;|&nbsp;
+    <b>Redeem:</b> winning tokens → USDC (after market resolves) &nbsp;|&nbsp;
+    <b>Sync:</b> fetch real token balances from chain
+  </div>
+</div>
+
 <!-- Signals -->
 <div class="card full">
   <h2>Signals</h2>
+  <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Runs (normal delivery)</div>
   <div class="signal-grid">
     <button class="btn-signal" onclick="sendSignal('0')">0</button>
     <button class="btn-signal" onclick="sendSignal('1')">1</button>
@@ -180,9 +228,36 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <button class="btn-signal" onclick="sendSignal('4')">4</button>
     <button class="btn-signal" onclick="sendSignal('5')">5</button>
     <button class="btn-signal" onclick="sendSignal('6')">6</button>
+  </div>
+  <div style="font-size:11px;color:#f85149;margin-top:8px;margin-bottom:6px">Wicket (+ runs on that ball)</div>
+  <div class="signal-grid">
     <button class="btn-signal wicket" onclick="sendSignal('W')">W</button>
-    <button class="btn-signal" onclick="sendSignal('Wd')">Wd</button>
-    <button class="btn-signal" onclick="sendSignal('N')">N</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W1')">W1</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W2')">W2</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W3')">W3</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W4')">W4</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W5')">W5</button>
+    <button class="btn-signal wicket" onclick="sendSignal('W6')">W6</button>
+  </div>
+  <div style="font-size:11px;color:#d29922;margin-top:8px;margin-bottom:6px">Wide (+ extra runs)</div>
+  <div class="signal-grid">
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd0')">Wd0</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd1')">Wd1</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd2')">Wd2</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd3')">Wd3</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd4')">Wd4</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd5')">Wd5</button>
+    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd6')">Wd6</button>
+  </div>
+  <div style="font-size:11px;color:#8b949e;margin-top:8px;margin-bottom:6px">No Ball (+ runs)</div>
+  <div class="signal-grid">
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N0')">N0</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N1')">N1</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N2')">N2</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N3')">N3</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N4')">N4</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N5')">N5</button>
+    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N6')">N6</button>
   </div>
 </div>
 
@@ -292,15 +367,22 @@ async function loadConfig() {
     document.getElementById('sTeamB').value = c.team_b_name;
     document.getElementById('sTokenA').value = c.team_a_token_id;
     document.getElementById('sTokenB').value = c.team_b_token_id;
+    document.getElementById('sCondition').value = c.condition_id || '';
     document.getElementById('sBatFirst').value = c.first_batting === 'TEAM_B' ? 'B' : 'A';
     document.getElementById('sNegRisk').value = String(c.neg_risk);
     document.getElementById('lBudget').value = c.total_budget_usdc;
-    document.getElementById('lInitial').value = c.initial_buy_usdc;
     document.getElementById('lMaxTrade').value = c.max_trade_usdc;
+    document.getElementById('lSafePct').value = c.safe_percentage;
     document.getElementById('lDelay').value = c.revert_delay_ms;
+    document.getElementById('lPollInterval').value = c.fill_poll_interval_ms;
+    document.getElementById('lPollTimeout').value = c.fill_poll_timeout_ms;
     document.getElementById('lDryRun').value = String(c.dry_run);
     document.getElementById('wSigType').value = c.signature_type;
     if (c.polymarket_address) document.getElementById('wAddr').value = c.polymarket_address;
+    const wk = document.getElementById('wKey');
+    if (c.private_key_set) {
+      wk.placeholder = '********** (already set)';
+    }
   } catch(e) {}
 }
 
@@ -310,6 +392,7 @@ async function saveSetup() {
     team_b_name: document.getElementById('sTeamB').value,
     team_a_token_id: document.getElementById('sTokenA').value,
     team_b_token_id: document.getElementById('sTokenB').value,
+    condition_id: document.getElementById('sCondition').value,
     first_batting: document.getElementById('sBatFirst').value,
     neg_risk: document.getElementById('sNegRisk').value === 'true',
   })});
@@ -329,9 +412,11 @@ async function saveWallet() {
 async function saveLimits() {
   await api('/api/limits', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
     total_budget_usdc: document.getElementById('lBudget').value,
-    initial_buy_usdc: document.getElementById('lInitial').value,
     max_trade_usdc: document.getElementById('lMaxTrade').value,
+    safe_percentage: parseInt(document.getElementById('lSafePct').value),
     revert_delay_ms: parseInt(document.getElementById('lDelay').value),
+    fill_poll_interval_ms: parseInt(document.getElementById('lPollInterval').value),
+    fill_poll_timeout_ms: parseInt(document.getElementById('lPollTimeout').value),
     dry_run: document.getElementById('lDryRun').value === 'true',
   })});
 }
@@ -350,10 +435,150 @@ async function resetMatch() {
 }
 async function sendSignal(sig) { await api('/api/signal', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signal:sig})}); }
 
+async function ctfSplit() {
+  const amt = parseInt(document.getElementById('ctfAmount').value);
+  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
+  if (!confirm('Split $' + amt + ' USDC into ' + amt + ' YES + ' + amt + ' NO tokens?')) return;
+  await api('/api/ctf-split', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({amount_usdc: amt})});
+}
+async function ctfMerge() {
+  const amt = parseInt(document.getElementById('ctfAmount').value);
+  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
+  if (!confirm('Merge ' + amt + ' YES + ' + amt + ' NO tokens back into $' + amt + ' USDC?')) return;
+  await api('/api/ctf-merge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({amount_tokens: amt})});
+}
+async function ctfRedeem() {
+  if (!confirm('Redeem all winning tokens for USDC? (market must be resolved)')) return;
+  await api('/api/ctf-redeem', {method:'POST'});
+}
+async function ctfSyncBalance() {
+  await api('/api/ctf-balance', {method:'POST'});
+}
+async function fetchMarket() {
+  const slug = document.getElementById('sSlug').value.trim();
+  if (!slug) { showToast('enter a market slug'); return; }
+  const r = await api('/api/fetch-market', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({slug})});
+  if (r && r.ok) {
+    document.getElementById('sTeamA').value = r.team_a_name;
+    document.getElementById('sTeamB').value = r.team_b_name;
+    document.getElementById('sTokenA').value = r.team_a_token_id;
+    document.getElementById('sTokenB').value = r.team_b_token_id;
+    document.getElementById('sCondition').value = r.condition_id;
+    document.getElementById('sNegRisk').value = String(r.neg_risk);
+  }
+}
+
+let lastChartData = [];
+function drawInventoryChart(data) {
+  lastChartData = data || [];
+  const canvas = document.getElementById('invChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+
+  ctx.fillStyle = '#0d1117';
+  ctx.fillRect(0, 0, w, h);
+
+  if (!data || data.length === 0) {
+    ctx.fillStyle = '#484f58';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No inventory data yet', w/2, h/2);
+    return;
+  }
+
+  const pad = {top:10, right:10, bottom:22, left:44};
+  const cw = w - pad.left - pad.right;
+  const ch = h - pad.top - pad.bottom;
+
+  const allVals = data.flatMap(d => {
+    const a = parseFloat(d.team_a), b = parseFloat(d.team_b);
+    return [a, b, a + b];
+  });
+  const maxVal = Math.max(...allVals, 1);
+  const minVal = Math.min(...allVals, 0);
+  const range = maxVal - minVal || 1;
+
+  const xStep = data.length > 1 ? cw / (data.length - 1) : cw;
+
+  function drawLine(valFn, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    data.forEach((d, i) => {
+      const x = pad.left + (data.length > 1 ? i * xStep : cw/2);
+      const y = pad.top + ch - ((valFn(d) - minVal) / range) * ch;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (ch / 4) * i;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w - pad.right, y); ctx.stroke();
+    const val = maxVal - (range / 4) * i;
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(val.toFixed(0), pad.left - 4, y + 3);
+  }
+
+  drawLine(d => parseFloat(d.team_a), '#58a6ff');
+  drawLine(d => parseFloat(d.team_b), '#f0883e');
+  drawLine(d => parseFloat(d.team_a) + parseFloat(d.team_b), '#3fb950');
+
+  ctx.fillStyle = '#484f58';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  const labelCount = Math.min(data.length, 8);
+  const labelStep = Math.max(1, Math.floor(data.length / labelCount));
+  for (let i = 0; i < data.length; i += labelStep) {
+    const x = pad.left + (data.length > 1 ? i * xStep : cw/2);
+    ctx.fillText(data[i].ts, x, h - 4);
+  }
+  if (data.length > 1) {
+    const x = pad.left + (data.length - 1) * xStep;
+    ctx.fillText(data[data.length-1].ts, x, h - 4);
+  }
+}
+document.getElementById('invChart').addEventListener('mousemove', function(e) {
+  const data = lastChartData;
+  if (!data || data.length === 0) return;
+  const rect = this.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const pad = {left:44, right:10};
+  const cw = rect.width - pad.left - pad.right;
+  const xStep = data.length > 1 ? cw / (data.length - 1) : cw;
+  let idx = Math.round((mx - pad.left) / xStep);
+  idx = Math.max(0, Math.min(data.length - 1, idx));
+  const d = data[idx];
+  const a = parseFloat(d.team_a), b = parseFloat(d.team_b);
+  document.getElementById('chartTooltip').textContent =
+    d.ts + '  |  A: ' + a.toFixed(1) + '  B: ' + b.toFixed(1) + '  Total: ' + (a+b).toFixed(1);
+});
+document.getElementById('invChart').addEventListener('mouseleave', function() {
+  document.getElementById('chartTooltip').textContent = '';
+});
+
+async function pollInventory() {
+  try {
+    const data = await api('/api/inventory');
+    drawInventoryChart(data);
+  } catch(e) {}
+}
+
 loadConfig();
 pollStatus();
 pollEvents();
-setInterval(() => { pollStatus(); pollEvents(); }, 1500);
+pollInventory();
+setInterval(() => { pollStatus(); pollEvents(); pollInventory(); }, 1500);
 </script>
 </body>
 </html>

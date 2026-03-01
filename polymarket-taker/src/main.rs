@@ -1,5 +1,6 @@
 mod clob_auth;
 mod config;
+mod ctf;
 mod market_ws;
 mod orders;
 mod position;
@@ -9,6 +10,9 @@ mod state;
 mod strategy;
 mod types;
 mod web;
+
+#[cfg(test)]
+mod tests;
 
 use anyhow::Result;
 

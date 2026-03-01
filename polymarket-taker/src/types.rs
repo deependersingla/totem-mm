@@ -44,36 +44,44 @@ impl std::fmt::Display for Side {
 /// Raw cricket delivery signal from the oracle / telegram bot
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CricketSignal {
-    Runs(u8),         // 0, 1, 2, 3, 4, 5, 6
-    Wicket,           // W
-    Wide(u8),         // Wd (0 extra runs) or 1Wd (1 run on wide)
-    NoBall,           // N
+    Runs(u8),         // 0..6
+    Wicket(u8),       // W (0 extra runs), W1..W6 (runs scored on wicket ball)
+    Wide(u8),         // Wd0..Wd6
+    NoBall(u8),       // N0..N6
     InningsOver,      // IO — batting team switches
     MatchOver,        // MO — stop everything
 }
 
 impl CricketSignal {
+    pub fn is_wicket(&self) -> bool {
+        matches!(self, Self::Wicket(_))
+    }
+
     /// Parse a raw string into a cricket signal.
-    /// Accepted formats: "0".."6", "W", "Wd", "1Wd", "2Wd", "N", "IO", "MO"
+    /// Formats: "0".."6", "W","W0".."W6", "Wd","Wd0".."Wd6", "N","N0".."N6", "IO", "MO"
     pub fn parse(raw: &str) -> Option<Self> {
         let s = raw.trim();
         match s {
-            "W" => Some(Self::Wicket),
-            "N" => Some(Self::NoBall),
             "IO" => Some(Self::InningsOver),
             "MO" => Some(Self::MatchOver),
+            "W" => Some(Self::Wicket(0)),
+            "N" => Some(Self::NoBall(0)),
             "Wd" => Some(Self::Wide(0)),
-            _ if s.ends_with("Wd") => {
-                let runs: u8 = s.trim_end_matches("Wd").parse().ok()?;
-                Some(Self::Wide(runs))
+            _ if s.starts_with("Wd") => {
+                let runs: u8 = s.strip_prefix("Wd")?.parse().ok()?;
+                if runs <= 6 { Some(Self::Wide(runs)) } else { None }
+            }
+            _ if s.starts_with('W') => {
+                let runs: u8 = s.strip_prefix('W')?.parse().ok()?;
+                if runs <= 6 { Some(Self::Wicket(runs)) } else { None }
+            }
+            _ if s.starts_with('N') => {
+                let runs: u8 = s.strip_prefix('N')?.parse().ok()?;
+                if runs <= 6 { Some(Self::NoBall(runs)) } else { None }
             }
             _ => {
                 let runs: u8 = s.parse().ok()?;
-                if runs <= 6 {
-                    Some(Self::Runs(runs))
-                } else {
-                    None
-                }
+                if runs <= 6 { Some(Self::Runs(runs)) } else { None }
             }
         }
     }
@@ -83,10 +91,12 @@ impl std::fmt::Display for CricketSignal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Runs(r) => write!(f, "{r}"),
-            Self::Wicket => write!(f, "W"),
+            Self::Wicket(0) => write!(f, "W"),
+            Self::Wicket(r) => write!(f, "W{r}"),
             Self::Wide(0) => write!(f, "Wd"),
-            Self::Wide(r) => write!(f, "{r}Wd"),
-            Self::NoBall => write!(f, "N"),
+            Self::Wide(r) => write!(f, "Wd{r}"),
+            Self::NoBall(0) => write!(f, "N"),
+            Self::NoBall(r) => write!(f, "N{r}"),
             Self::InningsOver => write!(f, "IO"),
             Self::MatchOver => write!(f, "MO"),
         }

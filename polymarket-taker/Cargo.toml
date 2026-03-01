@@ -20,6 +20,7 @@ thiserror = "2"
 chrono = "0.4"
 url = "2"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
 rand = "0.8"
 hmac = "0.12"
 sha2 = "0.10"

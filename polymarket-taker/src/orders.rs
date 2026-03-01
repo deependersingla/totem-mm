@@ -4,6 +4,7 @@ use ethers::utils::keccak256;
 use rand::Rng;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
 use crate::types::{FakOrder, Side};
@@ -17,12 +18,16 @@ fn side_to_u8(side: Side) -> u8 {
     }
 }
 
-fn to_base_units(amount: Decimal) -> u128 {
-    let scaled = amount * Decimal::from(USDC_DECIMALS);
-    scaled.to_string().parse::<f64>().unwrap_or(0.0).floor() as u128
+/// Convert a Decimal amount to 6-decimal base units (USDC / CTF token precision).
+/// Uses Decimal::floor() for exact integer truncation — avoids the f64 precision
+/// loss that the previous implementation had (f64 can't represent many 6-decimal
+/// values exactly, causing off-by-one errors in order amounts).
+pub(crate) fn to_base_units(amount: Decimal) -> u128 {
+    let scaled = (amount * Decimal::from(USDC_DECIMALS)).floor();
+    scaled.to_string().parse::<u128>().unwrap_or(0)
 }
 
-fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String) {
+pub(crate) fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String) {
     match side {
         Side::Buy => {
             let taker_amount = to_base_units(size);
@@ -37,15 +42,21 @@ fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String
     }
 }
 
-fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
+pub(crate) fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
     let type_hash = keccak256(
         b"Order(uint256 salt,address maker,address signer,address taker,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint256 expiration,uint256 nonce,uint256 feeRateBps,uint8 side,uint8 signatureType)",
     );
 
     fn pad_u256(val: &str) -> [u8; 32] {
-        let v: u128 = val.parse().unwrap_or(0);
+        use ethers::types::U256;
+        let v = U256::from_dec_str(val)
+            .or_else(|_| {
+                let s = val.strip_prefix("0x").unwrap_or(val);
+                U256::from_str_radix(s, 16).map_err(|_| ())
+            })
+            .unwrap_or(U256::zero());
         let mut buf = [0u8; 32];
-        buf[16..].copy_from_slice(&v.to_be_bytes());
+        v.to_big_endian(&mut buf);
         buf
     }
 
@@ -82,7 +93,7 @@ fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClobOrder {
+pub(crate) struct ClobOrder {
     pub salt: String,
     pub maker: String,
     pub signer: String,
@@ -104,6 +115,7 @@ struct PostOrderRequest {
     order: PostOrderBody,
     owner: String,
     order_type: String,
+    tick_size: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,7 +196,7 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
 }
 
 async fn post_order(
-    _config: &Config,
+    config: &Config,
     auth: &ClobAuth,
     clob_order: &ClobOrder,
     order_type: &str,
@@ -194,6 +206,7 @@ async fn post_order(
         order: PostOrderBody::from(clob_order),
         owner: auth.api_key.clone(),
         order_type: order_type.to_string(),
+        tick_size: config.tick_size.clone(),
     };
 
     let body_json = serde_json::to_string(&body)?;
@@ -243,7 +256,7 @@ pub async fn post_fak_order(
     tag: &str,
 ) -> Result<PostOrderResponse> {
     tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
-        price = %order.price, size = %order.size, "posting FOK order");
+        price = %order.price, size = %order.size, "posting FAK order");
 
     let signed = build_signed_order(config, auth, order)?;
     post_order(config, auth, &signed, "FOK", tag).await
@@ -260,6 +273,61 @@ pub async fn post_limit_order(
 
     let signed = build_signed_order(config, auth, order)?;
     post_order(config, auth, &signed, "GTC", tag).await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenOrder {
+    pub id: Option<String>,
+    pub status: Option<String>,
+    pub original_size: Option<String>,
+    pub size_matched: Option<String>,
+    pub price: Option<String>,
+}
+
+impl OpenOrder {
+    pub fn filled_size(&self) -> Decimal {
+        self.size_matched.as_deref()
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn fill_price(&self) -> Decimal {
+        self.price.as_deref()
+            .and_then(|s| Decimal::from_str(s).ok())
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status.as_deref(),
+            Some("matched") | Some("cancelled") | Some("expired")
+        )
+    }
+}
+
+pub async fn get_order(
+    auth: &ClobAuth,
+    order_id: &str,
+) -> Result<OpenOrder> {
+    let path = format!("/order/{order_id}");
+    let headers = auth.l2_headers("GET", &path, None)?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth.http_client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("get_order failed: {status} {body}");
+    }
+
+    let order: OpenOrder = serde_json::from_str(&body)?;
+    Ok(order)
 }
 
 pub async fn cancel_order(

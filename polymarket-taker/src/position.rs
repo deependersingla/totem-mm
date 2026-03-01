@@ -11,7 +11,6 @@ pub struct PositionInner {
     pub total_spent: Decimal,
     pub trade_count: u64,
     pub total_budget: Decimal,
-    pub initial_buy: Decimal,
 }
 
 impl PositionInner {
@@ -66,6 +65,5 @@ pub fn new_position(total_budget: Decimal) -> Position {
         total_spent: Decimal::ZERO,
         trade_count: 0,
         total_budget,
-        initial_buy: Decimal::ZERO,
     }))
 }
