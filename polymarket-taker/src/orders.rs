@@ -18,6 +18,10 @@ fn side_to_u8(side: Side) -> u8 {
     }
 }
 
+/// Convert a Decimal amount to 6-decimal base units (USDC / CTF token precision).
+/// Uses Decimal::floor() for exact integer truncation — avoids the f64 precision
+/// loss that the previous implementation had (f64 can't represent many 6-decimal
+/// values exactly, causing off-by-one errors in order amounts).
 pub(crate) fn to_base_units(amount: Decimal) -> u128 {
     let scaled = (amount * Decimal::from(USDC_DECIMALS)).floor();
     scaled.to_string().parse::<u128>().unwrap_or(0)
