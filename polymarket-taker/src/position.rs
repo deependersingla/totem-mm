@@ -36,7 +36,8 @@ impl PositionInner {
             }
             Side::Sell => {
                 *tokens -= order.size;
-                // selling recovers cash — don't add to spent
+                // selling recovers cash — reduce total_spent proportionally
+                self.total_spent = (self.total_spent - notional).max(Decimal::ZERO);
             }
         }
 

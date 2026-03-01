@@ -25,20 +25,6 @@ fn ctf_contract(config: &Config) -> &'static str {
 
 type SignedClient = SignerMiddleware<Provider<Http>, LocalWallet>;
 
-/// Wrap `inner_data` in a proxy wallet `execute(address,uint256,bytes)` call.
-/// Selector: keccak256("execute(address,uint256,bytes)")[0..4] = 0xb61d27f6
-pub(crate) fn proxy_execute_calldata(target: Address, inner_data: Bytes) -> Result<Bytes> {
-    let selector = &keccak256(b"execute(address,uint256,bytes)")[..4];
-    let encoded = abi::encode(&[
-        Token::Address(target),
-        Token::Uint(U256::zero()),
-        Token::Bytes(inner_data.to_vec()),
-    ]);
-    let mut data = selector.to_vec();
-    data.extend_from_slice(&encoded);
-    Ok(Bytes::from(data))
-}
-
 fn build_client(config: &Config) -> Result<Arc<SignedClient>> {
     let provider = Provider::<Http>::try_from(config.polygon_rpc.as_str())?;
     let key = config.polymarket_private_key.strip_prefix("0x")

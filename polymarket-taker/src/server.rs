@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
+use futures_util::future;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
@@ -266,10 +267,17 @@ async fn post_limits(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut config = state.config.write().unwrap();
 
-    if let Some(v) = &body.total_budget_usdc {
-        config.total_budget_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget".into()))?;
-        state.position.lock().unwrap().total_budget = config.total_budget_usdc;
-    }
+    // Parse new budget value first (while holding config lock), then apply to
+    // position AFTER releasing config lock. Holding config.write() while
+    // acquiring position.lock() creates ABBA deadlock with strategy tasks that
+    // hold position.lock() and then read config.read().
+    let new_budget = if let Some(v) = &body.total_budget_usdc {
+        let b: Decimal = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget".into()))?;
+        config.total_budget_usdc = b;
+        Some(b)
+    } else {
+        None
+    };
     if let Some(v) = &body.max_trade_usdc {
         config.max_trade_usdc = v.parse().map_err(|_| (StatusCode::BAD_REQUEST, "invalid max_trade".into()))?;
     }
@@ -279,6 +287,11 @@ async fn post_limits(
     if let Some(v) = body.fill_poll_timeout_ms { config.fill_poll_timeout_ms = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
     config.persist();
+    drop(config); // release write lock before acquiring position mutex
+
+    if let Some(b) = new_budget {
+        state.position.lock().unwrap().total_budget = b;
+    }
 
     state.push_event("limits", "trading limits updated + saved");
     Ok(Json(serde_json::json!({"ok": true})))
@@ -311,6 +324,14 @@ async fn post_start_innings(
             Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("auth failed: {e}"))),
         }
     }
+
+    // Snapshot auth now, before spawning, to avoid a TOCTOU race where
+    // a concurrent post_wallet/post_reset could clear auth between here
+    // and the spawned task body, causing an unwrap() panic inside tokio.
+    let auth_snapshot = match state.auth.read().unwrap().clone() {
+        Some(a) => a,
+        None => return Err((StatusCode::INTERNAL_SERVER_ERROR, "auth not initialized".into())),
+    };
 
     let (signal_tx, signal_rx) = mpsc::channel::<CricketSignal>(64);
     let (book_tx, book_rx) = watch::channel((OrderBook::default(), OrderBook::default()));
@@ -414,38 +435,25 @@ async fn post_start_innings(
     // (or fall back to 5s max wait so we don't block forever on WS failure).
     let st = state.clone();
     tokio::spawn(async move {
-        let book_wait_start = tokio::time::Instant::now();
-        let book_wait_max = std::time::Duration::from_secs(5);
-
+        // Poll until at least one token has a best bid/ask (max 5s)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let has_book = {
-                let br = st.book_rx.read().unwrap();
-                if let Some(rx) = br.as_ref() {
-                    let books = rx.borrow();
-                    books.0.best_bid().is_some() || books.0.best_ask().is_some()
-                        || books.1.best_bid().is_some() || books.1.best_ask().is_some()
-                } else {
-                    false
+            {
+                let books = book_rx.borrow();
+                if books.0.best_bid().is_some() || books.1.best_bid().is_some() {
+                    tracing::info!("orderbook ready — starting strategy");
+                    break;
                 }
-            };
-
-            if has_book {
-                tracing::info!("book data received — starting strategy");
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!("orderbook not ready after 5s — starting strategy anyway");
                 break;
             }
-
-            if book_wait_start.elapsed() >= book_wait_max {
-                tracing::warn!("book wait timed out after {}s — starting strategy with empty book", book_wait_max.as_secs());
-                break;
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         let config = st.config.read().unwrap().clone();
-        let auth = st.auth.read().unwrap().clone().unwrap();
-
-        strategy::run(&config, &auth, signal_rx, book_rx, st.position.clone(), st.clone()).await;
+        strategy::run(&config, &auth_snapshot, signal_rx, book_rx, st.position.clone(), st.clone()).await;
     });
 
     let ms = state.match_state.read().unwrap();
@@ -466,6 +474,18 @@ async fn post_stop_innings(
         return Err((StatusCode::CONFLICT, "no innings running".into()));
     }
 
+    // Compute next batting state BEFORE sending InningsOver so the event message
+    // is correct regardless of when the strategy processes the signal.
+    let (next_batting_name, next_innings_num) = {
+        let ms = state.match_state.read().unwrap();
+        let config = state.config.read().unwrap();
+        // After InningsOver the opponent bats next; innings counter increments.
+        (config.team_name(ms.batting.opponent()).to_string(), ms.innings + 1)
+    };
+
+    // Signal strategy to stop. The strategy's InningsOver handler calls
+    // switch_innings on app.match_state — do NOT call it here too or the
+    // innings counter and batting team will be toggled twice (double-switch bug).
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
         let _ = tx.send(CricketSignal::InningsOver).await;
@@ -478,15 +498,9 @@ async fn post_stop_innings(
     *state.ws_cancel.write().unwrap() = None;
 
     *state.phase.write().unwrap() = MatchPhase::InningsPaused;
-    state.match_state.write().unwrap().switch_innings();
 
-    let (batting_name, innings) = {
-        let ms = state.match_state.read().unwrap();
-        let config = state.config.read().unwrap();
-        (config.team_name(ms.batting).to_string(), ms.innings)
-    };
     state.push_event("innings", &format!(
-        "innings paused — next: {batting_name} batting (innings {innings})"
+        "innings paused — next: {next_batting_name} batting (innings {next_innings_num})"
     ));
 
     Ok(Json(serde_json::json!({"ok": true})))
@@ -567,9 +581,12 @@ async fn post_cancel_all(
     let config = state.config.read().unwrap().clone();
     let order_ids: Vec<String> = state.live_order_ids.lock().unwrap().clone();
 
+    let results = future::join_all(
+        order_ids.iter().map(|oid| orders::cancel_order(&config, &auth, oid))
+    ).await;
     let mut cancelled = 0u32;
-    for oid in &order_ids {
-        match orders::cancel_order(&config, &auth, oid).await {
+    for (oid, result) in order_ids.iter().zip(results) {
+        match result {
             Ok(_) => cancelled += 1,
             Err(e) => tracing::warn!(order_id = oid, error = %e, "cancel failed"),
         }
