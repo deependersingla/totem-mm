@@ -309,19 +309,40 @@ async fn poll_fill_status(
         }
 
         if tokio::time::Instant::now() >= deadline {
-            tracing::warn!(tag = %result.tag, order_id, "fill poll timed out — assuming intended fill");
-            app.push_event("warn", &format!("{}: fill poll timed out, using intended size", result.tag));
-            return Some(FillInfo {
-                filled_size: result.intended_order.size,
-                avg_price: result.intended_order.price,
-                order: result.intended_order,
-                tag: result.tag,
-            });
+            // One final attempt before giving up — fetch current order state.
+            // If still ambiguous, return None (no confirmed fill) rather than
+            // recording a phantom position. The on-chain balance sync will
+            // reconcile any fill that was missed here.
+            tracing::warn!(tag = %result.tag, order_id, "fill poll timed out — making final status check");
+            match orders::get_order(auth, order_id).await {
+                Ok(open_order) => {
+                    let filled = open_order.filled_size();
+                    if !filled.is_zero() {
+                        let price = open_order.fill_price();
+                        app.push_event("fill", &format!("{}: final check — filled {} @ {}",
+                            result.tag, filled, price));
+                        return Some(FillInfo {
+                            filled_size: filled,
+                            avg_price: if price.is_zero() { result.intended_order.price } else { price },
+                            order: result.intended_order,
+                            tag: result.tag,
+                        });
+                    }
+                    tracing::warn!(tag = %result.tag, order_id, "fill poll timed out — no confirmed fill, skipping position update");
+                    app.push_event("warn", &format!("{}: fill poll timed out, no confirmed fill — check on-chain balance", result.tag));
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(tag = %result.tag, order_id, error = %e, "fill poll timed out and final check failed");
+                    app.push_event("warn", &format!("{}: fill poll timed out, final check failed: {e}", result.tag));
+                    return None;
+                }
+            }
         }
     }
 }
 
-fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
+pub(crate) fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
     let (min, max) = config.safe_price_range();
     let check = |book: &OrderBook| -> bool {
         if let Some(bid) = book.best_bid() {
@@ -342,7 +363,7 @@ fn team_books(books: &(OrderBook, OrderBook), team: Team) -> (OrderBook, OrderBo
     }
 }
 
-fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
+pub(crate) fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
     let best_bid = book.best_bid()?;
     let size = compute_size(config, &best_bid.size, best_bid.price);
     if size.is_zero() {
@@ -352,7 +373,7 @@ fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<Fak
     Some(FakOrder { team, side: Side::Sell, price: best_bid.price, size })
 }
 
-fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
+pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
     let best_ask = book.best_ask()?;
     let size = compute_size(config, &best_ask.size, best_ask.price);
     if size.is_zero() {
@@ -362,7 +383,7 @@ fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakO
     Some(FakOrder { team, side: Side::Buy, price: best_ask.price, size })
 }
 
-fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
+pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
     if price.is_zero() { return Decimal::ZERO; }
     let max_tokens = config.max_trade_usdc / price;
     max_tokens.min(*available)

@@ -49,8 +49,6 @@ BETFAIR_MARKET_IDS = [
 # Set these to True to enable streaming, False for polling
 USE_BETFAIR_STREAMING = False    # Set to True for streaming mode
 USE_POLYMARKET_STREAMING = False  # Set to True for streaming mode
-# USE_BETFAIR_STREAMING = True    # Set to False for polling mode
-# USE_POLYMARKET_STREAMING = True  # Set to False for polling mode
 
 
 # =============================================================================
