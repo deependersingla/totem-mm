@@ -27,6 +27,18 @@ pub struct SavedSettings {
     pub fill_poll_interval_ms: Option<u64>,
     pub fill_poll_timeout_ms: Option<u64>,
     pub dry_run: Option<bool>,
+    /// Pre-configured CLOB API credentials (from Polymarket.com → Settings → API).
+    /// When set, ClobAuth::derive() skips the EIP-712 L1 derivation call entirely.
+    pub api_key: Option<String>,
+    pub api_secret: Option<String>,
+    pub api_passphrase: Option<String>,
+    /// Polymarket market slug (e.g. "crint-ind-wst-2026-03-01") for the embed widget.
+    pub market_slug: Option<String>,
+    /// Edge (profit margin) on revert GTC limit orders, in percentage points.
+    /// e.g. 2 means 2% — if you sold at 28¢, revert buy limit at 28*(1-0.02)=27.44¢.
+    pub edge_wicket: Option<f64>,
+    pub edge_boundary_4: Option<f64>,
+    pub edge_boundary_6: Option<f64>,
 }
 
 impl SavedSettings {
@@ -80,6 +92,13 @@ impl SavedSettings {
             fill_poll_interval_ms: Some(config.fill_poll_interval_ms),
             fill_poll_timeout_ms: Some(config.fill_poll_timeout_ms),
             dry_run: Some(config.dry_run),
+            api_key: Some(config.api_key.clone()).filter(|s| !s.is_empty()),
+            api_secret: Some(config.api_secret.clone()).filter(|s| !s.is_empty()),
+            api_passphrase: Some(config.api_passphrase.clone()).filter(|s| !s.is_empty()),
+            market_slug: Some(config.market_slug.clone()).filter(|s| !s.is_empty()),
+            edge_wicket: Some(config.edge_wicket),
+            edge_boundary_4: Some(config.edge_boundary_4),
+            edge_boundary_6: Some(config.edge_boundary_6),
         }
     }
 }
@@ -111,12 +130,33 @@ pub struct Config {
     pub fill_poll_interval_ms: u64,
     pub fill_poll_timeout_ms: u64,
     pub tick_size: String,
+    /// Min order size from Gamma (orderMinSize); enforced when placing orders.
+    pub order_min_size: Decimal,
 
     pub ws_ping_interval_secs: u64,
     pub dry_run: bool,
     pub log_level: String,
 
     pub http_port: u16,
+
+    /// Pre-configured CLOB API credentials. When all three are non-empty,
+    /// ClobAuth::derive() uses them directly without hitting the L1 auth endpoint.
+    #[serde(skip)]
+    pub api_key: String,
+    #[serde(skip)]
+    pub api_secret: String,
+    #[serde(skip)]
+    pub api_passphrase: String,
+
+    /// Polymarket market slug for the live embed widget.
+    pub market_slug: String,
+
+    /// Edge (profit margin %) on revert GTC orders per signal type.
+    /// REVERT_SELL limit = buy_price * (1 + edge/100)
+    /// REVERT_BUY limit = sell_price * (1 - edge/100)
+    pub edge_wicket: f64,
+    pub edge_boundary_4: f64,
+    pub edge_boundary_6: f64,
 }
 
 impl Config {
@@ -137,6 +177,9 @@ impl Config {
                 .unwrap_or_else(|| env_or("POLYMARKET_PRIVATE_KEY", "")),
             polymarket_address: saved.polymarket_address
                 .unwrap_or_else(|| env_or("POLYMARKET_ADDRESS", "")),
+            // 0=EOA (no proxy), 1=POLY_PROXY (MetaMask+Polymarket proxy, most common),
+            // 2=GNOSIS_SAFE. Default to 1 since most users connect via MetaMask which
+            // creates a Polymarket proxy wallet.
             signature_type: saved.signature_type
                 .unwrap_or_else(|| env_or("POLYMARKET_SIGNATURE_TYPE", "1").parse().unwrap_or(1)),
             neg_risk: saved.neg_risk
@@ -173,8 +216,9 @@ impl Config {
             fill_poll_interval_ms: saved.fill_poll_interval_ms
                 .unwrap_or_else(|| env_or("FILL_POLL_INTERVAL_MS", "500").parse().unwrap_or(500)),
             fill_poll_timeout_ms: saved.fill_poll_timeout_ms
-                .unwrap_or_else(|| env_or("FILL_POLL_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
+                .unwrap_or_else(|| env_or("FILL_POLL_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
             tick_size: env_or("TICK_SIZE", "0.01"),
+            order_min_size: Decimal::ONE,
 
             ws_ping_interval_secs: env_or("WS_PING_INTERVAL_SECS", "10").parse()?,
             dry_run: saved.dry_run
@@ -182,6 +226,15 @@ impl Config {
             log_level: env_or("LOG_LEVEL", "info"),
 
             http_port: env_or("HTTP_PORT", "3000").parse()?,
+
+            api_key: saved.api_key.unwrap_or_else(|| env_or("POLYMARKET_API_KEY", "")),
+            api_secret: saved.api_secret.unwrap_or_else(|| env_or("POLYMARKET_API_SECRET", "")),
+            api_passphrase: saved.api_passphrase.unwrap_or_else(|| env_or("POLYMARKET_API_PASSPHRASE", "")),
+            market_slug: saved.market_slug.unwrap_or_default(),
+
+            edge_wicket: saved.edge_wicket.unwrap_or(2.0),
+            edge_boundary_4: saved.edge_boundary_4.unwrap_or(1.0),
+            edge_boundary_6: saved.edge_boundary_6.unwrap_or(1.0),
         })
     }
 

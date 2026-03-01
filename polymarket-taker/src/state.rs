@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
 use crate::position::{self, Position};
-use crate::types::{CricketSignal, MatchState, OrderBook};
+use crate::types::{CricketSignal, MatchState, OrderBook, Team};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,20 @@ pub struct InventorySnapshot {
     pub team_b: Decimal,
 }
 
+/// A single completed trade record for the trade log.
+#[derive(Debug, Clone, Serialize)]
+pub struct TradeRecord {
+    pub ts: String,
+    pub side: String,       // "BUY" or "SELL"
+    pub team: String,       // team display name
+    pub size: Decimal,      // tokens filled
+    pub price: Decimal,     // fill price per token
+    pub cost: Decimal,      // size * price (USDC)
+    pub order_type: String, // "FAK" or "GTC"
+    pub label: String,      // "WICKET", "RUN6", "REVERT_BUY", etc.
+    pub order_id: String,
+}
+
 pub struct AppState {
     pub config: RwLock<Config>,
     pub auth: RwLock<Option<ClobAuth>>,
@@ -46,7 +60,11 @@ pub struct AppState {
     pub events: Mutex<VecDeque<EventEntry>>,
     pub inventory_history: Mutex<Vec<InventorySnapshot>>,
     pub live_order_ids: Mutex<Vec<String>>,
+    pub trade_log: Mutex<Vec<TradeRecord>>,
     pub ws_cancel: RwLock<Option<CancellationToken>>,
+    /// Which teams are enabled for trading. Default: both true.
+    pub trade_team_a: RwLock<bool>,
+    pub trade_team_b: RwLock<bool>,
 }
 
 const MAX_EVENTS: usize = 200;
@@ -67,7 +85,10 @@ impl AppState {
             events: Mutex::new(VecDeque::with_capacity(MAX_EVENTS)),
             inventory_history: Mutex::new(Vec::new()),
             live_order_ids: Mutex::new(Vec::new()),
+            trade_log: Mutex::new(Vec::new()),
             ws_cancel: RwLock::new(None),
+            trade_team_a: RwLock::new(true),
+            trade_team_b: RwLock::new(true),
         })
     }
 
@@ -111,6 +132,17 @@ impl AppState {
         phase == MatchPhase::Idle || phase == MatchPhase::MatchOver
     }
 
+    pub fn log_trade(&self, record: TradeRecord) {
+        self.trade_log.lock().unwrap().push(record);
+    }
+
+    pub fn is_team_enabled(&self, team: Team) -> bool {
+        match team {
+            Team::TeamA => *self.trade_team_a.read().unwrap(),
+            Team::TeamB => *self.trade_team_b.read().unwrap(),
+        }
+    }
+
     pub fn reset_for_new_match(&self) {
         let config = self.config.read().unwrap();
         *self.phase.write().unwrap() = MatchPhase::Idle;
@@ -124,5 +156,6 @@ impl AppState {
         self.clear_orders();
         self.events.lock().unwrap().clear();
         self.inventory_history.lock().unwrap().clear();
+        self.trade_log.lock().unwrap().clear();
     }
 }

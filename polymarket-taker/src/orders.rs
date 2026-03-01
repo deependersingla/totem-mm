@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ethers::types::Address;
+use ethers::types::{Address, U256};
 use ethers::utils::keccak256;
 use rand::Rng;
 use rust_decimal::Decimal;
@@ -10,6 +10,13 @@ use crate::config::Config;
 use crate::types::{FakOrder, Side};
 
 const USDC_DECIMALS: u64 = 1_000_000;
+
+/// Fee rate in basis points. Polymarket CLOB currently uses 0 for taker fees
+/// on the order struct (fees are handled separately). The fee_rate_bps field
+/// in the EIP-712 Order struct must match what the exchange expects (0).
+fn fee_rate_bps() -> u32 {
+    0
+}
 
 fn side_to_u8(side: Side) -> u8 {
     match side {
@@ -109,6 +116,7 @@ pub(crate) struct ClobOrder {
     pub signature: String,
 }
 
+/// Single-order request body — POST /order
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PostOrderRequest {
@@ -120,7 +128,46 @@ struct PostOrderRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct BatchOrderItem {
+    order: PostOrderBody,
+    owner: String,
+    order_type: String,
+    defer_exec: bool,
+}
+
+/// Response from POST /orders — one element per submitted order.
+/// API also returns makingAmount, takingAmount, transactionsHashes, tradeIDs when relevant.
+/// See: https://docs.polymarket.com/api-reference/trade/post-multiple-orders
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOrderResult {
+    pub success: Option<bool>,
+    #[serde(rename = "orderID")]
+    pub order_id: Option<String>,
+    pub status: Option<String>,
+    pub error_msg: Option<String>,
+}
+
+/// Serialize salt as JSON number; API expects integer, not string.
+fn serialize_salt_as_int<S>(s: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let n: u64 = s.parse().unwrap_or(0);
+    serializer.serialize_u64(n)
+}
+
+/// Pass through the token ID as-is for the API payload.
+/// The CLOB indexes orderbooks by the original token ID string (usually decimal).
+/// The EIP-712 struct hash handles the uint256 encoding internally.
+fn token_id_for_api(s: &str) -> String {
+    s.trim().to_string()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PostOrderBody {
+    #[serde(serialize_with = "serialize_salt_as_int")]
     salt: String,
     maker: String,
     signer: String,
@@ -143,7 +190,7 @@ impl From<&ClobOrder> for PostOrderBody {
             maker: o.maker.clone(),
             signer: o.signer.clone(),
             taker: o.taker.clone(),
-            token_id: o.token_id.clone(),
+            token_id: token_id_for_api(&o.token_id),
             maker_amount: o.maker_amount.clone(),
             taker_amount: o.taker_amount.clone(),
             side: if o.side == 0 { "BUY".into() } else { "SELL".into() },
@@ -160,21 +207,40 @@ impl From<&ClobOrder> for PostOrderBody {
 pub struct PostOrderResponse {
     #[serde(rename = "orderID")]
     pub order_id: Option<String>,
-    #[serde(rename = "errorMsg")]
+    #[serde(alias = "errorMsg", alias = "error")]
     pub error_msg: Option<String>,
     pub status: Option<String>,
 }
 
 fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
-    let salt: u128 = rand::thread_rng().gen();
+    // Salt must fit in IEEE 754 double precision (backend parses as float).
+    // Mask to <= 2^53 - 1 to avoid precision loss.
+    let salt: u64 = rand::thread_rng().gen::<u64>() & ((1u64 << 53) - 1);
     let token_id = config.token_id(order.team).to_string();
     let (maker_amount, taker_amount) = compute_amounts(order.side, order.price, order.size);
 
     let signer_addr = auth.address().to_string();
+    // maker = who provides the funds:
+    //   type 0 (EOA):         maker == signer (both are the EOA)
+    //   type 1 (POLY_PROXY):  maker == funder/proxy wallet address
+    //   type 2 (GNOSIS_SAFE): maker == funder/proxy wallet address
+    let maker_addr = auth.funder_address().to_string();
+
+    let fee_rate_bps = fee_rate_bps();
+
+    tracing::debug!(
+        maker = %maker_addr,
+        signer = %signer_addr,
+        signature_type = config.signature_type,
+        token_id = %token_id,
+        side = %order.side,
+        fee_rate_bps,
+        "building signed order"
+    );
 
     let mut clob_order = ClobOrder {
         salt: salt.to_string(),
-        maker: config.polymarket_address.clone(),
+        maker: maker_addr,
         signer: signer_addr,
         taker: "0x0000000000000000000000000000000000000000".to_string(),
         token_id,
@@ -183,13 +249,32 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
         side: side_to_u8(order.side),
         expiration: "0".to_string(),
         nonce: "0".to_string(),
-        fee_rate_bps: "0".to_string(),
+        fee_rate_bps: fee_rate_bps.to_string(),
         signature_type: config.signature_type,
         signature: String::new(),
     };
 
     let struct_hash = order_struct_hash(&clob_order);
-    let signature = auth.sign_order(&struct_hash, config.exchange_address(), config.chain_id)?;
+    let exchange = config.exchange_address();
+
+    tracing::info!(
+        struct_hash = %format!("0x{}", hex::encode(struct_hash)),
+        exchange,
+        chain_id = config.chain_id,
+        neg_risk = config.neg_risk,
+        salt = %clob_order.salt,
+        maker = %clob_order.maker,
+        signer = %clob_order.signer,
+        token_id = %clob_order.token_id,
+        maker_amount = %clob_order.maker_amount,
+        taker_amount = %clob_order.taker_amount,
+        side = clob_order.side,
+        fee_rate_bps = %clob_order.fee_rate_bps,
+        signature_type = clob_order.signature_type,
+        "order EIP-712 signing"
+    );
+
+    let signature = auth.sign_order(&struct_hash, exchange, config.chain_id, config.neg_risk)?;
     clob_order.signature = signature;
 
     Ok(clob_order)
@@ -259,7 +344,76 @@ pub async fn post_fak_order(
         price = %order.price, size = %order.size, "posting FAK order");
 
     let signed = build_signed_order(config, auth, order)?;
-    post_order(config, auth, &signed, "FOK", tag).await
+    post_order(config, auth, &signed, "FAK", tag).await
+}
+
+/// Post multiple FAK orders in a single HTTP call (POST /orders).
+pub async fn post_fak_orders_batch(
+    config: &Config,
+    auth: &ClobAuth,
+    orders: &[(FakOrder, &str)],
+) -> Result<Vec<BatchOrderResult>> {
+    let mut items = Vec::with_capacity(orders.len());
+    for (order, tag) in orders {
+        tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
+            price = %order.price, size = %order.size, "batch FAK order");
+        let signed = build_signed_order(config, auth, order)?;
+        items.push(BatchOrderItem {
+            order: PostOrderBody::from(&signed),
+            owner: auth.api_key.clone(),
+            order_type: "FAK".to_string(),
+            defer_exec: false,
+        });
+    }
+    let body_json = serde_json::to_string(&items)?;
+    let path = "/orders";
+    let headers = auth.l2_headers("POST", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    tracing::debug!(
+        payload = %body_json,
+        owner = %auth.api_key,
+        "batch order request"
+    );
+
+    let resp = auth
+        .http_client()
+        .post(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json.clone())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "batch order HTTP error");
+        tracing::warn!(payload = %body_json, "batch order request payload (rejected)");
+        anyhow::bail!("batch orders HTTP {status}: {resp_body}");
+    }
+
+    let results: Vec<BatchOrderResult> = serde_json::from_str(&resp_body).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, body = resp_body, "failed to parse batch order response");
+        Vec::new()
+    });
+
+    for (i, r) in results.iter().enumerate() {
+        let tag = orders.get(i).map(|(_, t)| *t).unwrap_or("?");
+        let err = r.error_msg.as_deref().unwrap_or("");
+        let oid = r.order_id.as_deref().filter(|s| !s.is_empty());
+        if !err.is_empty() {
+            tracing::warn!(tag, error = err, "batch order rejected");
+            if err.contains("orderbook") && err.contains("does not exist") {
+                tracing::info!("hint: if this market is neg-risk, set neg_risk=true in config (or try neg_risk=false)");
+            }
+        } else if let Some(oid) = oid {
+            tracing::info!(tag, order_id = oid, status = ?r.status, "batch order accepted");
+        }
+    }
+
+    Ok(results)
 }
 
 pub async fn post_limit_order(
@@ -298,10 +452,10 @@ impl OpenOrder {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.status.as_deref(),
-            Some("matched") | Some("cancelled") | Some("expired")
-        )
+        self.status.as_deref().map_or(false, |s| {
+            let lower = s.to_lowercase();
+            matches!(lower.as_str(), "matched" | "cancelled" | "expired")
+        })
     }
 }
 
@@ -309,7 +463,12 @@ pub async fn get_order(
     auth: &ClobAuth,
     order_id: &str,
 ) -> Result<OpenOrder> {
-    let path = format!("/order/{order_id}");
+    if order_id.is_empty() {
+        anyhow::bail!("get_order: order_id must not be empty");
+    }
+    // Use /data/order/ endpoint — /order/ returns 404 for FAK orders
+    // that have already been matched or cancelled.
+    let path = format!("/data/order/{order_id}");
     let headers = auth.l2_headers("GET", &path, None)?;
     let url = format!("{}{}", auth.clob_http_url(), path);
 
@@ -324,6 +483,13 @@ pub async fn get_order(
 
     if !status.is_success() {
         anyhow::bail!("get_order failed: {status} {body}");
+    }
+
+    // The /data/order/ endpoint returns "null" before the order is indexed.
+    // Treat it as a transient error so the poll loop retries.
+    let trimmed = body.trim();
+    if trimmed == "null" || trimmed.is_empty() {
+        anyhow::bail!("order not yet indexed (null response)");
     }
 
     let order: OpenOrder = serde_json::from_str(&body)?;
@@ -354,4 +520,91 @@ pub async fn cancel_order(
 
     tracing::info!(order_id, "order cancelled");
     Ok(())
+}
+
+/// Cancel ALL open orders on the CLOB for this user.
+/// Uses DELETE /cancel-all which cancels every open order regardless of market.
+pub async fn cancel_all_open_orders(auth: &ClobAuth) -> Result<()> {
+    let path = "/cancel-all";
+    let headers = auth.l2_headers("DELETE", path, None)?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth.http_client()
+        .delete(&url)
+        .headers(headers)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body, "cancel-all HTTP error");
+        anyhow::bail!("cancel-all failed: {status} {body}");
+    }
+
+    tracing::info!(response = body, "cancel-all completed");
+    Ok(())
+}
+
+/// Fetch recent trades for the authenticated user from CLOB API.
+/// Used as fallback when /data/order/{id} is slow to index.
+pub async fn get_user_trades(
+    auth: &ClobAuth,
+    asset_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut path = "/data/trades".to_string();
+    if let Some(aid) = asset_id {
+        path = format!("/data/trades?asset_id={aid}");
+    }
+    let headers = auth.l2_headers("GET", &path, None)?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth.http_client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("get_user_trades failed: {status} {body}");
+    }
+
+    let trades: Vec<serde_json::Value> = serde_json::from_str(&body)
+        .unwrap_or_default();
+    Ok(trades)
+}
+
+/// Fetch all orders for the authenticated user from CLOB API.
+/// Optionally filter by asset_id (token_id).
+pub async fn get_user_orders(
+    auth: &ClobAuth,
+    asset_id: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut path = "/data/orders".to_string();
+    if let Some(aid) = asset_id {
+        path = format!("/data/orders?asset_id={aid}");
+    }
+    let headers = auth.l2_headers("GET", &path, None)?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth.http_client()
+        .get(&url)
+        .headers(headers)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let body = resp.text().await?;
+
+    if !status.is_success() {
+        anyhow::bail!("get_user_orders failed: {status} {body}");
+    }
+
+    let orders: Vec<serde_json::Value> = serde_json::from_str(&body)
+        .unwrap_or_default();
+    Ok(orders)
 }

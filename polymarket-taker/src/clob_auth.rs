@@ -18,6 +18,10 @@ pub struct ClobAuth {
     pub passphrase: String,
     wallet: LocalWallet,
     address: String,
+    /// Funder / proxy wallet address. For signature types 1 (POLY_PROXY) and
+    /// 2 (GNOSIS_SAFE), this is the on-chain proxy wallet that holds funds.
+    /// For type 0 (EOA), this is empty and address is used instead.
+    funder: String,
     http_client: reqwest::Client,
     clob_http: String,
 }
@@ -102,7 +106,7 @@ fn sign_eip712_hash(domain_sep: &[u8; 32], struct_hash: &[u8; 32], wallet: &Loca
     Ok(format!("0x{}", hex::encode(sig_bytes)))
 }
 
-/// Build HMAC-SHA256 signature for L2 auth
+/// Build HMAC-SHA256 signature for L2 auth.
 fn build_hmac_signature(
     secret: &str,
     timestamp: &str,
@@ -110,6 +114,7 @@ fn build_hmac_signature(
     request_path: &str,
     body: Option<&str>,
 ) -> Result<String> {
+    use base64::Engine;
     let decoded = base64::engine::general_purpose::URL_SAFE
         .decode(secret)
         .map_err(|e| anyhow::anyhow!("base64 decode error: {e}"))?;
@@ -123,8 +128,6 @@ fn build_hmac_signature(
         HmacSha256::new_from_slice(&decoded).map_err(|e| anyhow::anyhow!("hmac error: {e}"))?;
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
-
-    use base64::Engine;
     Ok(base64::engine::general_purpose::URL_SAFE.encode(result))
 }
 
@@ -139,6 +142,50 @@ impl ClobAuth {
         let address = format!("{:#x}", wallet.address());
         let http_client = reqwest::Client::new();
 
+        // If all three CLOB API credentials are pre-configured (pasted from
+        // Polymarket.com → Settings → API), skip the L1 derivation entirely.
+        // This avoids the EOA→proxy API-key mismatch that causes 401 errors.
+        if !config.api_key.is_empty() && !config.api_secret.is_empty() && !config.api_passphrase.is_empty() {
+            let funder = if config.signature_type > 0 && !config.polymarket_address.is_empty() {
+                config.polymarket_address.clone()
+            } else {
+                String::new()
+            };
+            tracing::info!(
+                signer = %address,
+                funder = if funder.is_empty() { "(same as signer)" } else { &funder },
+                "using pre-configured CLOB API credentials (skipping L1 derivation)"
+            );
+            return Ok(Self {
+                api_key: config.api_key.clone(),
+                api_secret: config.api_secret.clone(),
+                passphrase: config.api_passphrase.clone(),
+                wallet,
+                address,
+                funder,
+                http_client,
+                clob_http: config.clob_http.clone(),
+            });
+        }
+
+        // For sig types 1/2, the funder (proxy wallet) is the polymarket_address
+        let funder = if config.signature_type > 0 && !config.polymarket_address.is_empty() {
+            config.polymarket_address.clone()
+        } else {
+            String::new()
+        };
+
+        tracing::info!(
+            signer = %address,
+            funder = if funder.is_empty() { "(same as signer)" } else { &funder },
+            signature_type = config.signature_type,
+            "wallet addresses"
+        );
+
+        // L1 auth always uses the EOA address (the actual signing key), even for proxy wallet
+        // users. Polymarket's backend knows the EOA→proxy mapping and returns the proxy's API
+        // key. The CLOB validates L1 auth by recovering the signer from the signature and
+        // comparing it to POLY_ADDRESS — so POLY_ADDRESS must match the signing key (EOA).
         let timestamp = chrono::Utc::now().timestamp().to_string();
         let nonce: u64 = 0;
 
@@ -191,6 +238,7 @@ impl ClobAuth {
                 passphrase: creds.passphrase.unwrap_or_default(),
                 wallet,
                 address,
+                funder,
                 http_client,
                 clob_http: config.clob_http.clone(),
             });
@@ -206,12 +254,13 @@ impl ClobAuth {
             passphrase: creds.passphrase.unwrap_or_default(),
             wallet,
             address,
+            funder,
             http_client,
             clob_http: config.clob_http.clone(),
         })
     }
 
-    /// Build L2 headers for authenticated requests (HMAC-signed)
+    /// Build L2 headers for authenticated requests (HMAC-signed).
     pub fn l2_headers(&self, method: &str, path: &str, body: Option<&str>) -> Result<HeaderMap> {
         let timestamp = chrono::Utc::now().timestamp().to_string();
         let hmac_sig = build_hmac_signature(&self.api_secret, &timestamp, method, path, body)?;
@@ -226,8 +275,15 @@ impl ClobAuth {
     }
 
     /// Sign an order using EIP-712 (Order struct for CTF Exchange)
-    pub fn sign_order(&self, order_hash: &[u8; 32], exchange_address: &str, chain_id: u64) -> Result<String> {
-        let domain_sep = order_domain_separator(chain_id, exchange_address);
+    pub fn sign_order(&self, order_hash: &[u8; 32], exchange_address: &str, chain_id: u64, neg_risk: bool) -> Result<String> {
+        let domain_sep = order_domain_separator(chain_id, exchange_address, neg_risk);
+        tracing::debug!(
+            domain_sep = %format!("0x{}", hex::encode(domain_sep)),
+            exchange = exchange_address,
+            chain_id,
+            signer = %self.address,
+            "EIP-712 order domain separator"
+        );
         sign_eip712_hash(&domain_sep, order_hash, &self.wallet)
     }
 
@@ -246,10 +302,21 @@ impl ClobAuth {
     pub fn address(&self) -> &str {
         &self.address
     }
+
+    /// Returns the funder (proxy wallet) address if set, otherwise the EOA.
+    pub fn funder_address(&self) -> &str {
+        if !self.funder.is_empty() {
+            &self.funder
+        } else {
+            &self.address
+        }
+    }
 }
 
-/// EIP-712 domain separator for Polymarket CTF Exchange orders
-fn order_domain_separator(chain_id: u64, exchange_address: &str) -> [u8; 32] {
+/// EIP-712 domain separator for Polymarket CTF Exchange orders.
+/// The domain name is "Polymarket CTF Exchange" for BOTH standard and neg-risk
+/// exchanges. Only the verifyingContract address differs.
+fn order_domain_separator(chain_id: u64, exchange_address: &str, _neg_risk: bool) -> [u8; 32] {
     let type_hash = keccak256(
         b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );

@@ -44,6 +44,13 @@ impl PositionInner {
         self.trade_count += 1;
     }
 
+    pub fn token_balance(&self, team: Team) -> Decimal {
+        match team {
+            Team::TeamA => self.team_a_tokens,
+            Team::TeamB => self.team_b_tokens,
+        }
+    }
+
     pub fn summary(&self, config: &Config) -> String {
         format!(
             "{}={} {}={} spent={}/{} remaining={} trades={}",

@@ -112,14 +112,14 @@ fn sell_fill_decreases_team_a_tokens() {
 }
 
 #[test]
-fn sell_fill_does_not_change_total_spent() {
-    // Selling recovers cash but the current implementation does not track
-    // it in total_spent. This test documents that behaviour.
+fn sell_fill_reduces_total_spent() {
+    // Selling recovers cash — total_spent is reduced by the notional value.
     let mut pos = make_position("100");
     pos.total_spent = dec!(20);
     pos.team_a_tokens = dec!(10);
     pos.on_fill(&sell_order(Team::TeamA, dec!(0.65), dec!(10)));
-    assert_eq!(pos.total_spent, dec!(20), "sell should not change total_spent");
+    // notional = 0.65 * 10 = 6.50, so 20 - 6.50 = 13.50
+    assert_eq!(pos.total_spent, dec!(13.50), "sell should reduce total_spent by notional");
 }
 
 #[test]
