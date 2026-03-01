@@ -342,7 +342,7 @@ async fn poll_fill_status(
     }
 }
 
-fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
+pub(crate) fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
     let (min, max) = config.safe_price_range();
     let check = |book: &OrderBook| -> bool {
         if let Some(bid) = book.best_bid() {
@@ -363,7 +363,7 @@ fn team_books(books: &(OrderBook, OrderBook), team: Team) -> (OrderBook, OrderBo
     }
 }
 
-fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
+pub(crate) fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
     let best_bid = book.best_bid()?;
     let size = compute_size(config, &best_bid.size, best_bid.price);
     if size.is_zero() {
@@ -373,7 +373,7 @@ fn build_sell_order(config: &Config, team: Team, book: &OrderBook) -> Option<Fak
     Some(FakOrder { team, side: Side::Sell, price: best_bid.price, size })
 }
 
-fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
+pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
     let best_ask = book.best_ask()?;
     let size = compute_size(config, &best_ask.size, best_ask.price);
     if size.is_zero() {
@@ -383,7 +383,7 @@ fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakO
     Some(FakOrder { team, side: Side::Buy, price: best_ask.price, size })
 }
 
-fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
+pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
     if price.is_zero() { return Decimal::ZERO; }
     let max_tokens = config.max_trade_usdc / price;
     max_tokens.min(*available)

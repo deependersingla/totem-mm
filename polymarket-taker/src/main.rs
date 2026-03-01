@@ -11,6 +11,9 @@ mod strategy;
 mod types;
 mod web;
 
+#[cfg(test)]
+mod tests;
+
 use anyhow::Result;
 
 #[tokio::main]
