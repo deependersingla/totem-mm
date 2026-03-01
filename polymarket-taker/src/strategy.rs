@@ -4,12 +4,23 @@ use std::time::Duration;
 use rust_decimal::Decimal;
 use tokio::sync::{mpsc, watch};
 
+use rand::Rng;
+
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
-use crate::orders;
+use crate::orders::{self, BatchOrderResult};
 use crate::position::Position;
 use crate::state::AppState;
-use crate::types::{CricketSignal, FakOrder, MatchState, OrderBook, Side, Team};
+use crate::types::{CricketSignal, FakOrder, OrderBook, Side, Team};
+
+fn random_tag(prefix: &str) -> String {
+    let suffix: String = rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .collect();
+    format!("{}_{}", prefix, suffix)
+}
 
 pub async fn run(
     config: &Config,
@@ -19,7 +30,8 @@ pub async fn run(
     position: Position,
     app: Arc<AppState>,
 ) {
-    let mut state = MatchState::new(config.first_batting);
+    // Read current match state — innings 2 means India is already batting
+    let mut state = app.match_state.read().unwrap().clone();
 
     tracing::info!(
         batting = %config.team_name(state.batting),
@@ -74,6 +86,21 @@ pub async fn run(
                 let (batting_book, bowling_book) = team_books(&books, batting);
                 let sell_order = build_sell_order(&config, batting, &batting_book);
                 let buy_order = build_buy_order(&config, bowling, &bowling_book);
+
+                if sell_order.is_none() {
+                    let msg = format!("no bid on {} — sell leg skipped", config.team_name(batting));
+                    tracing::warn!("{msg}");
+                    app.push_event("warn", &msg);
+                }
+                if buy_order.is_none() {
+                    let msg = format!("no ask on {} — buy leg skipped", config.team_name(bowling));
+                    tracing::warn!("{msg}");
+                    app.push_event("warn", &msg);
+                }
+                if sell_order.is_none() && buy_order.is_none() {
+                    app.push_event("skip", "no book liquidity on either side — wicket trade skipped");
+                    continue;
+                }
 
                 let task_config = config.clone();
                 let task_auth = auth.clone();
@@ -133,10 +160,24 @@ async fn execute_wicket_trade(
 ) {
     let trade_start = tokio::time::Instant::now();
 
-    let (sell_result, buy_result) = tokio::join!(
-        fire_fak(config, auth, position, app, sell_order, "WICKET_SELL"),
-        fire_fak(config, auth, position, app, buy_order, "WICKET_BUY"),
-    );
+    // Capture order descriptions before they're moved into fire_fak
+    let sell_desc = sell_order.as_ref()
+        .map(|o| format!("SELL {} @ {} sz={}", config.team_name(o.team), o.price, o.size))
+        .unwrap_or_else(|| "no order".into());
+    let buy_desc = buy_order.as_ref()
+        .map(|o| format!("BUY {} @ {} sz={}", config.team_name(o.team), o.price, o.size))
+        .unwrap_or_else(|| "no order".into());
+
+    // Use random per-trade tags — only in internal logs/events, never sent to Polymarket.
+    let sell_tag = random_tag("sell");
+    let buy_tag  = random_tag("buy");
+
+    // Send both legs in a single batch HTTP call (POST /orders).
+    let (sell_result, buy_result) = fire_fak_batch(
+        config, auth, position, app,
+        sell_order, &sell_tag,
+        buy_order,  &buy_tag,
+    ).await;
 
     let poll_interval = Duration::from_millis(config.fill_poll_interval_ms);
     let poll_timeout = Duration::from_millis(config.fill_poll_timeout_ms);
@@ -159,14 +200,16 @@ async fn execute_wicket_trade(
     }
     app.snapshot_inventory();
 
+    if sell_fill.is_none() && buy_fill.is_none() {
+        let msg = format!("no fills — sell=[{}] buy=[{}]", sell_desc, buy_desc);
+        tracing::info!("{msg}");
+        app.push_event("warn", &msg);
+        return;
+    }
+
     let elapsed = trade_start.elapsed();
     if elapsed < revert_delay {
         tokio::time::sleep(revert_delay - elapsed).await;
-    }
-
-    if sell_fill.is_none() && buy_fill.is_none() {
-        tracing::info!("no fills on either leg — skipping reverts");
-        return;
     }
 
     tracing::info!(delay_ms = config.revert_delay_ms, "REVERT — placing limit orders at avg fill prices");
@@ -191,6 +234,92 @@ async fn execute_wicket_trade(
         };
         execute_limit(config, auth, &revert, position, "REVERT_SELL", app).await;
     }
+}
+
+/// Send sell + buy FAK orders together via POST /orders (batch endpoint).
+/// Handles dry_run, budget checks, and maps responses back to FakResult pairs.
+async fn fire_fak_batch(
+    config: &Config,
+    auth: &ClobAuth,
+    position: &Position,
+    app: &Arc<AppState>,
+    sell_order: Option<FakOrder>,
+    sell_tag: &str,
+    buy_order: Option<FakOrder>,
+    buy_tag: &str,
+) -> (Option<FakResult>, Option<FakResult>) {
+    // Budget check for buy order
+    let buy_order = if let Some(ref buy) = buy_order {
+        let notional = buy.price * buy.size;
+        let can_spend = position.lock().unwrap().can_spend(notional);
+        if !can_spend {
+            tracing::warn!(tag = buy_tag, notional = %notional, "budget exceeded — buy skipped");
+            app.push_event("warn", &format!("{buy_tag}: budget exceeded, skipping"));
+            None
+        } else {
+            buy_order
+        }
+    } else {
+        buy_order
+    };
+
+    // Dry run: simulate both legs independently
+    if config.dry_run {
+        let dry = |order: Option<FakOrder>, tag: &str| -> Option<FakResult> {
+            let o = order?;
+            let notional = o.price * o.size;
+            tracing::info!(tag, side = %o.side, team = %config.team_name(o.team),
+                price = %o.price, size = %o.size, notional = %notional,
+                "[DRY RUN] would place FAK order");
+            app.push_event("trade", &format!("[DRY] {tag}: {} {} @ {} sz={}",
+                o.side, config.team_name(o.team), o.price, o.size));
+            Some(FakResult { order_id: Some("dry_run".to_string()), intended_order: o, tag: tag.to_string() })
+        };
+        return (dry(sell_order, sell_tag), dry(buy_order, buy_tag));
+    }
+
+    // Build batch — track which index corresponds to sell vs buy
+    let mut batch: Vec<(FakOrder, &str)> = Vec::new();
+    let mut sell_idx: Option<usize> = None;
+    let mut buy_idx:  Option<usize> = None;
+
+    if let Some(ref o) = sell_order { sell_idx = Some(batch.len()); batch.push((o.clone(), sell_tag)); }
+    if let Some(ref o) = buy_order  { buy_idx  = Some(batch.len()); batch.push((o.clone(), buy_tag));  }
+
+    if batch.is_empty() {
+        return (None, None);
+    }
+
+    let batch_results = match orders::post_fak_orders_batch(config, auth, &batch).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "batch FAK order failed");
+            app.push_event("error", &format!("batch: {e}"));
+            return (None, None);
+        }
+    };
+
+    let extract = |idx: Option<usize>, order: Option<FakOrder>, tag: &str, results: &[BatchOrderResult]| -> Option<FakResult> {
+        let i = idx?;
+        let order = order?;
+        let r = results.get(i)?;
+        if !r.success.unwrap_or(false) {
+            let err = r.error_msg.as_deref().unwrap_or("");
+            if !err.is_empty() {
+                app.push_event("error", &format!("{tag}: rejected — {err}"));
+            }
+            return None;
+        }
+        let oid = r.order_id.clone()?;
+        let status = r.status.as_deref().unwrap_or("unknown");
+        app.push_event("trade", &format!("{tag}: FAK {} {} @ {} sz={} ({}) [{}]",
+            order.side, config.team_name(order.team), order.price, order.size, oid, status));
+        Some(FakResult { order_id: Some(oid), intended_order: order, tag: tag.to_string() })
+    };
+
+    let sell_result = extract(sell_idx, sell_order, sell_tag, &batch_results);
+    let buy_result  = extract(buy_idx,  buy_order,  buy_tag,  &batch_results);
+    (sell_result, buy_result)
 }
 
 async fn fire_fak(
@@ -386,7 +515,8 @@ pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> 
 pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
     if price.is_zero() { return Decimal::ZERO; }
     let max_tokens = config.max_trade_usdc / price;
-    max_tokens.min(*available)
+    // Floor to whole tokens — Polymarket expects integer share sizes
+    max_tokens.min(*available).floor()
 }
 
 async fn execute_limit(

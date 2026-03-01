@@ -109,6 +109,7 @@ pub(crate) struct ClobOrder {
     pub signature: String,
 }
 
+/// Single-order request body — POST /order
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PostOrderRequest {
@@ -116,6 +117,27 @@ struct PostOrderRequest {
     owner: String,
     order_type: String,
     tick_size: String,
+}
+
+/// Batch order request item — POST /orders (one element per order in the array)
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchOrderItem {
+    order: PostOrderBody,
+    owner: String,
+    order_type: String,
+    defer_exec: bool,
+}
+
+/// Response from POST /orders — one element per submitted order.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchOrderResult {
+    pub success: Option<bool>,
+    #[serde(rename = "orderID")]
+    pub order_id: Option<String>,
+    pub status: Option<String>,
+    pub error_msg: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,10 +193,17 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
     let (maker_amount, taker_amount) = compute_amounts(order.side, order.price, order.size);
 
     let signer_addr = auth.address().to_string();
+    // For EOA (signature_type=0): maker must equal signer (both = EOA address).
+    // For proxy/funder types: maker is the proxy contract address from config.
+    let maker_addr = if config.signature_type == 0 {
+        signer_addr.clone()
+    } else {
+        config.polymarket_address.clone()
+    };
 
     let mut clob_order = ClobOrder {
         salt: salt.to_string(),
-        maker: config.polymarket_address.clone(),
+        maker: maker_addr,
         signer: signer_addr,
         taker: "0x0000000000000000000000000000000000000000".to_string(),
         token_id,
@@ -189,7 +218,7 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
     };
 
     let struct_hash = order_struct_hash(&clob_order);
-    let signature = auth.sign_order(&struct_hash, config.exchange_address(), config.chain_id)?;
+    let signature = auth.sign_order(&struct_hash, config.exchange_address(), config.chain_id, config.neg_risk)?;
     clob_order.signature = signature;
 
     Ok(clob_order)
@@ -260,6 +289,69 @@ pub async fn post_fak_order(
 
     let signed = build_signed_order(config, auth, order)?;
     post_order(config, auth, &signed, "FOK", tag).await
+}
+
+/// Post multiple FAK orders in a single HTTP call (POST /orders).
+/// `orders` is a slice of (FakOrder, tag) pairs. Returns one BatchOrderResult per order,
+/// in the same order. Logs warnings per-order on failure.
+pub async fn post_fak_orders_batch(
+    config: &Config,
+    auth: &ClobAuth,
+    orders: &[(FakOrder, &str)],
+) -> Result<Vec<BatchOrderResult>> {
+    let mut items = Vec::with_capacity(orders.len());
+    for (order, tag) in orders {
+        tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
+            price = %order.price, size = %order.size, "batch FAK order");
+        let signed = build_signed_order(config, auth, order)?;
+        items.push(BatchOrderItem {
+            order: PostOrderBody::from(&signed),
+            owner: auth.api_key.clone(),
+            order_type: "FOK".to_string(),
+            defer_exec: false,
+        });
+    }
+
+    let body_json = serde_json::to_string(&items)?;
+    let path = "/orders";
+    let headers = auth.l2_headers("POST", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth
+        .http_client()
+        .post(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "batch order HTTP error");
+        anyhow::bail!("batch orders HTTP {status}: {resp_body}");
+    }
+
+    let results: Vec<BatchOrderResult> = serde_json::from_str(&resp_body).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, body = resp_body, "failed to parse batch order response");
+        Vec::new()
+    });
+
+    for (i, r) in results.iter().enumerate() {
+        let tag = orders.get(i).map(|(_, t)| *t).unwrap_or("?");
+        if let Some(oid) = &r.order_id {
+            tracing::info!(tag, order_id = oid, status = ?r.status, "batch order accepted");
+        }
+        if let Some(err) = &r.error_msg {
+            if !err.is_empty() {
+                tracing::warn!(tag, error = err, "batch order rejected");
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 pub async fn post_limit_order(

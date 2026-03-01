@@ -226,8 +226,8 @@ impl ClobAuth {
     }
 
     /// Sign an order using EIP-712 (Order struct for CTF Exchange)
-    pub fn sign_order(&self, order_hash: &[u8; 32], exchange_address: &str, chain_id: u64) -> Result<String> {
-        let domain_sep = order_domain_separator(chain_id, exchange_address);
+    pub fn sign_order(&self, order_hash: &[u8; 32], exchange_address: &str, chain_id: u64, neg_risk: bool) -> Result<String> {
+        let domain_sep = order_domain_separator(chain_id, exchange_address, neg_risk);
         sign_eip712_hash(&domain_sep, order_hash, &self.wallet)
     }
 
@@ -248,12 +248,16 @@ impl ClobAuth {
     }
 }
 
-/// EIP-712 domain separator for Polymarket CTF Exchange orders
-fn order_domain_separator(chain_id: u64, exchange_address: &str) -> [u8; 32] {
+/// EIP-712 domain separator for Polymarket CTF Exchange orders.
+/// The domain name must match the hardcoded value in the on-chain contract:
+///   - Standard CTF Exchange: "CTFExchange"
+///   - NegRisk CTF Exchange:  "NegRiskCtfExchange"
+fn order_domain_separator(chain_id: u64, exchange_address: &str, neg_risk: bool) -> [u8; 32] {
     let type_hash = keccak256(
         b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
     );
-    let name_hash = keccak256(b"Polymarket CTF Exchange");
+    let name: &[u8] = if neg_risk { b"NegRiskCtfExchange" } else { b"CTFExchange" };
+    let name_hash = keccak256(name);
     let version_hash = keccak256(b"1");
 
     let mut chain_buf = [0u8; 32];

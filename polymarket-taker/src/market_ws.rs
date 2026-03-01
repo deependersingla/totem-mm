@@ -9,22 +9,43 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::config::Config;
 use crate::types::{OrderBook, OrderBookSide, PriceLevel};
 
+/// Market-level price update: {"market":"0x...","price_changes":[{asset_id,price,size,side}]}
+/// This is a different format from per-asset events — no top-level event_type or asset_id.
+#[derive(Debug, Deserialize)]
+struct MarketUpdate {
+    #[serde(default)]
+    price_changes: Vec<PerAssetChange>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PerAssetChange {
+    asset_id: String,
+    price: String,
+    size: String,
+    side: String,
+}
+
+/// Per-asset event: Polymarket sends event_type (some versions send type) — handle both.
 #[derive(Debug, Deserialize)]
 struct WsEvent {
-    #[serde(rename = "type")]
+    #[serde(alias = "type")]
     event_type: Option<String>,
+
+    /// Present on "book" snapshot events
     #[serde(default)]
-    bids: Vec<Vec<serde_json::Value>>,
+    bids: Vec<serde_json::Value>,
     #[serde(default)]
-    asks: Vec<Vec<serde_json::Value>>,
+    asks: Vec<serde_json::Value>,
+
+    /// Present on "price_change" events — array of {price, size, side}
     #[serde(default)]
+    changes: Vec<serde_json::Value>,
+
     asset_id: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
 }
 
-/// Streams L2 orderbook for both team tokens.
-/// Sends (team_a_book, team_b_book) on every update.
 pub async fn run(
     config: &Config,
     book_tx: watch::Sender<(OrderBook, OrderBook)>,
@@ -42,6 +63,7 @@ pub async fn run(
                 tracing::info!("market websocket connected");
                 let (mut write, mut read) = ws_stream.split();
 
+                // Plain object — Polymarket market channel subscription format
                 let subscribe_msg = serde_json::json!({
                     "assets_ids": [&token_a, &token_b],
                     "type": "market"
@@ -52,12 +74,18 @@ pub async fn run(
                 let mut ping_timer = tokio::time::interval(ping_interval);
                 let mut a_book = OrderBook::default();
                 let mut b_book = OrderBook::default();
+                let mut msg_count = 0u32;
 
                 loop {
                     tokio::select! {
                         msg = read.next() => {
                             match msg {
                                 Some(Ok(Message::Text(text))) => {
+                                    msg_count += 1;
+                                    // Log first few raw messages to help diagnose format issues
+                                    if msg_count <= 5 {
+                                        tracing::info!(n = msg_count, raw = %&text[..text.len().min(500)], "ws raw");
+                                    }
                                     if let Err(e) = handle_message(
                                         &text,
                                         &token_a,
@@ -111,12 +139,14 @@ fn handle_message(
         return Ok(());
     }
 
+    // Polymarket sends either an array of events or a single event
     let events: Vec<WsEvent> = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => {
             if let Ok(single) = serde_json::from_str::<WsEvent>(text) {
                 vec![single]
             } else {
+                tracing::debug!(raw = %text, "ws message unparseable — skipping");
                 return Ok(());
             }
         }
@@ -133,6 +163,7 @@ fn handle_message(
         let is_a = asset_id == token_a;
         let is_b = asset_id == token_b;
         if !is_a && !is_b {
+            tracing::debug!(asset_id, "ws event for unknown asset — skipping");
             continue;
         }
 
@@ -157,15 +188,66 @@ fn handle_message(
                 book_changed = true;
             }
             Some("price_change") => {
-                if !event.bids.is_empty() || !event.asks.is_empty() {
+                if !event.changes.is_empty() {
+                    // Polymarket price_change format: [{price, size, side:"BUY"|"SELL"}]
+                    for change in &event.changes {
+                        if let Some(obj) = change.as_object() {
+                            let price_str = obj.get("price").and_then(|v| v.as_str()).unwrap_or("");
+                            let size_str  = obj.get("size").and_then(|v| v.as_str()).unwrap_or("0");
+                            let side_str  = obj.get("side").and_then(|v| v.as_str()).unwrap_or("");
+                            if let (Ok(price), Ok(size)) = (
+                                Decimal::from_str(price_str),
+                                Decimal::from_str(size_str),
+                            ) {
+                                let side = if side_str == "BUY" { &mut book.bids } else { &mut book.asks };
+                                apply_level(side, price, size);
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback: separate bids/asks arrays in price_change
                     apply_deltas(&mut book.bids, &event.bids);
                     apply_deltas(&mut book.asks, &event.asks);
-                    sort_bids(&mut book.bids);
-                    sort_asks(&mut book.asks);
-                    book_changed = true;
+                }
+                sort_bids(&mut book.bids);
+                sort_asks(&mut book.asks);
+                book_changed = true;
+            }
+            other => {
+                if other.is_some() {
+                    tracing::debug!(event_type = ?other, "unhandled ws event type");
                 }
             }
-            _ => {}
+        }
+    }
+
+    // Handle market-level price_changes format:
+    // {"market":"0x...","price_changes":[{"asset_id":"...","price":"...","size":"...","side":"BUY|SELL"}]}
+    // These have no top-level event_type or asset_id, so the per-event loop above skips them.
+    if let Ok(market) = serde_json::from_str::<MarketUpdate>(text) {
+        if !market.price_changes.is_empty() {
+            for change in &market.price_changes {
+                let is_a = change.asset_id == token_a;
+                let is_b = change.asset_id == token_b;
+                if !is_a && !is_b {
+                    continue;
+                }
+                let book = if is_a { &mut *a_book } else { &mut *b_book };
+                if let (Ok(price), Ok(size)) = (
+                    Decimal::from_str(&change.price),
+                    Decimal::from_str(&change.size),
+                ) {
+                    let side = if change.side == "BUY" { &mut book.bids } else { &mut book.asks };
+                    apply_level(side, price, size);
+                }
+                book_changed = true;
+            }
+            if book_changed {
+                sort_bids(&mut a_book.bids);
+                sort_asks(&mut a_book.asks);
+                sort_bids(&mut b_book.bids);
+                sort_asks(&mut b_book.asks);
+            }
         }
     }
 
@@ -175,44 +257,50 @@ fn handle_message(
     Ok(())
 }
 
-/// Sorts bids highest-first so `best()` / `best_bid()` returns the top of book.
 fn sort_bids(side: &mut OrderBookSide) {
     side.levels.sort_by(|a, b| b.price.cmp(&a.price));
 }
 
-/// Sorts asks lowest-first so `best()` / `best_ask()` returns the top of book.
 fn sort_asks(side: &mut OrderBookSide) {
     side.levels.sort_by(|a, b| a.price.cmp(&b.price));
 }
 
-fn parse_levels(raw: &[Vec<serde_json::Value>]) -> OrderBookSide {
-    let levels = raw
-        .iter()
-        .filter_map(|pair| {
-            let price = decimal_from_value(pair.first()?)?;
-            let size = decimal_from_value(pair.get(1)?)?;
-            Some(PriceLevel { price, size })
-        })
-        .collect();
+/// Parse a level list — handles both object {price,size} and array [price,size] formats
+fn parse_levels(raw: &[serde_json::Value]) -> OrderBookSide {
+    let levels = raw.iter().filter_map(level_from_value).collect();
     OrderBookSide { levels }
 }
 
-fn apply_deltas(side: &mut OrderBookSide, deltas: &[Vec<serde_json::Value>]) {
-    for delta in deltas {
-        let Some(price) = delta.first().and_then(decimal_from_value) else {
-            continue;
-        };
-        let Some(size) = delta.get(1).and_then(decimal_from_value) else {
-            continue;
-        };
-
-        if size.is_zero() {
-            side.levels.retain(|l| l.price != price);
-        } else if let Some(level) = side.levels.iter_mut().find(|l| l.price == price) {
-            level.size = size;
-        } else {
-            side.levels.push(PriceLevel { price, size });
+fn level_from_value(v: &serde_json::Value) -> Option<PriceLevel> {
+    match v {
+        serde_json::Value::Object(obj) => {
+            let price = decimal_from_str(obj.get("price")?.as_str()?)?;
+            let size  = decimal_from_str(obj.get("size")?.as_str()?)?;
+            Some(PriceLevel { price, size })
         }
+        serde_json::Value::Array(arr) => {
+            let price = decimal_from_value(arr.first()?)?;
+            let size  = decimal_from_value(arr.get(1)?)?;
+            Some(PriceLevel { price, size })
+        }
+        _ => None,
+    }
+}
+
+fn apply_level(side: &mut OrderBookSide, price: Decimal, size: Decimal) {
+    if size.is_zero() {
+        side.levels.retain(|l| l.price != price);
+    } else if let Some(level) = side.levels.iter_mut().find(|l| l.price == price) {
+        level.size = size;
+    } else {
+        side.levels.push(PriceLevel { price, size });
+    }
+}
+
+fn apply_deltas(side: &mut OrderBookSide, deltas: &[serde_json::Value]) {
+    for delta in deltas {
+        let Some(pl) = level_from_value(delta) else { continue };
+        apply_level(side, pl.price, pl.size);
     }
 }
 
@@ -222,4 +310,8 @@ fn decimal_from_value(v: &serde_json::Value) -> Option<Decimal> {
         serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
         _ => None,
     }
+}
+
+fn decimal_from_str(s: &str) -> Option<Decimal> {
+    Decimal::from_str(s).ok()
 }
