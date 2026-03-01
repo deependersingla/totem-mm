@@ -1,0 +1,10 @@
+# Use when Prometheus runs on the host (no Docker). Scrapes poll (9091) and stream (9092).
+scrape_configs:
+  - job_name: "live_odds_poll"
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["localhost:9091"]
+  - job_name: "live_odds_stream"
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["localhost:9092"]
