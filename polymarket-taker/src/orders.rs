@@ -132,6 +132,7 @@ struct BatchOrderItem {
     order: PostOrderBody,
     owner: String,
     order_type: String,
+    tick_size: String,
     defer_exec: bool,
 }
 
@@ -362,6 +363,7 @@ pub async fn post_fak_orders_batch(
             order: PostOrderBody::from(&signed),
             owner: auth.api_key.clone(),
             order_type: "FAK".to_string(),
+            tick_size: config.tick_size.clone(),
             defer_exec: false,
         });
     }
