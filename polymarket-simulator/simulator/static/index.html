@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polymarket Simulator</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --green: #3fb950;
+  --green-bg: rgba(63,185,80,0.12);
+  --red: #f85149;
+  --red-bg: rgba(248,81,73,0.12);
+  --blue: #58a6ff;
+  --yellow: #d29922;
+  --purple: #bc8cff;
+  --cyan: #56d4dd;
+  --font: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: var(--font); font-size: 12px; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+
+/* Header */
+.header { display:flex; align-items:center; justify-content:space-between; padding:6px 16px; background:var(--bg2); border-bottom:1px solid var(--border); }
+.header h1 { font-size:13px; color:var(--blue); font-weight:600; }
+.header .status { font-size:11px; color:var(--text-dim); display:flex; align-items:center; gap:12px; }
+.dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; background:var(--red); }
+.dot.connected { background:var(--green); }
+.stat-badge { background:var(--bg3); padding:2px 8px; border-radius:3px; }
+
+/* Search */
+.search-bar { display:flex; align-items:center; gap:8px; padding:6px 16px; background:var(--bg2); border-bottom:1px solid var(--border); }
+.search-bar input { flex:1; background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:5px 10px; color:var(--text); font-family:var(--font); font-size:12px; outline:none; }
+.search-bar input:focus { border-color:var(--blue); }
+.search-bar button { background:var(--blue); color:#000; border:none; border-radius:4px; padding:5px 14px; font-family:var(--font); font-size:11px; cursor:pointer; font-weight:600; }
+.search-results { position:absolute; top:72px; left:16px; right:16px; background:var(--bg2); border:1px solid var(--border); border-radius:6px; max-height:300px; overflow-y:auto; z-index:100; display:none; }
+.search-results .result { padding:8px 12px; cursor:pointer; border-bottom:1px solid var(--border); }
+.search-results .result:hover { background:var(--bg3); }
+.search-results .result .q { color:var(--text); font-size:12px; }
+.search-results .result .meta { color:var(--text-dim); font-size:10px; margin-top:2px; }
+
+.market-label { padding:4px 16px; background:var(--bg); border-bottom:1px solid var(--border); font-size:11px; color:var(--purple); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+/* Main grid: 3 columns */
+.main { display:grid; grid-template-columns:1fr 280px 1fr; height:calc(100vh - 94px); gap:1px; background:var(--border); }
+.panel { background:var(--bg); overflow:hidden; display:flex; flex-direction:column; }
+.panel-header { padding:5px 10px; background:var(--bg2); border-bottom:1px solid var(--border); font-size:10px; font-weight:600; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; display:flex; align-items:center; justify-content:space-between; }
+.panel-body { flex:1; overflow-y:auto; padding:2px; }
+
+/* Tabs */
+.tab-bar { display:flex; border-bottom:1px solid var(--border); }
+.tab-bar button { flex:1; padding:5px; background:var(--bg2); border:none; color:var(--text-dim); font-family:var(--font); font-size:10px; cursor:pointer; border-bottom:2px solid transparent; }
+.tab-bar button.active { color:var(--blue); border-bottom-color:var(--blue); background:var(--bg); }
+
+/* Book */
+.book-row { display:grid; grid-template-columns:1fr 1fr 65px; padding:1px 6px; font-size:11px; position:relative; cursor:pointer; }
+.book-row:hover { background:var(--bg3); }
+.book-row .depth-bar { position:absolute; top:0; bottom:0; right:0; opacity:0.15; pointer-events:none; }
+.book-row.bid .depth-bar { background:var(--green); }
+.book-row.ask .depth-bar { background:var(--red); }
+.book-row.bid .price { color:var(--green); }
+.book-row.ask .price { color:var(--red); }
+.book-row .size { text-align:right; }
+.book-row .notional { text-align:right; color:var(--text-dim); font-size:10px; }
+.book-header { display:grid; grid-template-columns:1fr 1fr 65px; padding:2px 6px; font-size:9px; color:var(--text-dim); text-transform:uppercase; }
+.spread-row { padding:3px 6px; text-align:center; font-size:10px; color:var(--yellow); background:var(--bg2); border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+
+/* Order form */
+.order-form { padding:8px; display:flex; flex-direction:column; gap:6px; }
+.order-form label { font-size:9px; color:var(--text-dim); text-transform:uppercase; }
+.order-form select, .order-form input[type="number"] { width:100%; background:var(--bg3); border:1px solid var(--border); border-radius:3px; padding:5px 6px; color:var(--text); font-family:var(--font); font-size:11px; outline:none; }
+.side-btns { display:flex; gap:4px; }
+.side-btns button { flex:1; padding:6px; border:2px solid; border-radius:3px; font-family:var(--font); font-size:11px; font-weight:600; cursor:pointer; background:transparent; }
+.side-btns .buy-btn { border-color:var(--green); color:var(--green); }
+.side-btns .buy-btn.active { background:var(--green-bg); }
+.side-btns .sell-btn { border-color:var(--red); color:var(--red); }
+.side-btns .sell-btn.active { background:var(--red-bg); }
+.place-btn { width:100%; padding:8px; border:none; border-radius:3px; font-family:var(--font); font-size:12px; font-weight:700; cursor:pointer; text-transform:uppercase; }
+.place-btn.buy { background:var(--green); color:#000; }
+.place-btn.sell { background:var(--red); color:#fff; }
+.place-btn:hover { opacity:0.85; }
+
+/* Position */
+.pos-grid { display:grid; grid-template-columns:1fr 1fr; gap:2px; padding:6px 8px; }
+.pos-item .label { font-size:9px; color:var(--text-dim); text-transform:uppercase; }
+.pos-item .value { font-size:13px; font-weight:600; }
+.pos-item .value.positive { color:var(--green); }
+.pos-item .value.negative { color:var(--red); }
+
+/* Tables */
+.data-table { width:100%; border-collapse:collapse; }
+.data-table th { padding:3px 6px; text-align:left; font-size:9px; color:var(--text-dim); text-transform:uppercase; border-bottom:1px solid var(--border); position:sticky; top:0; background:var(--bg); }
+.data-table td { padding:2px 6px; font-size:10px; border-bottom:1px solid var(--border); }
+.data-table tr:hover { background:var(--bg2); }
+.tag-buy { color:var(--green); }
+.tag-sell { color:var(--red); }
+.tag-filled { color:var(--green); }
+.tag-cancelled { color:var(--red); }
+.tag-open { color:var(--yellow); }
+.cancel-btn { background:var(--red-bg); color:var(--red); border:1px solid var(--red); border-radius:2px; padding:1px 5px; font-size:9px; cursor:pointer; font-family:var(--font); }
+
+/* Queue indicator */
+.queue-bar { display:flex; align-items:center; gap:4px; padding:3px 8px; font-size:10px; }
+.queue-bar .bar-bg { flex:1; height:4px; background:var(--bg3); border-radius:2px; overflow:hidden; }
+.queue-bar .bar-fill { height:100%; background:var(--yellow); border-radius:2px; transition:width 0.3s; }
+
+/* Wallet table */
+.wallet-row { cursor:pointer; }
+.wallet-row:hover { background:var(--bg3) !important; }
+.wallet-addr { font-size:10px; color:var(--cyan); }
+.wallet-watched { background:rgba(86,212,221,0.08); }
+.watch-btn { background:transparent; border:1px solid var(--cyan); color:var(--cyan); border-radius:2px; padding:1px 5px; font-size:9px; cursor:pointer; font-family:var(--font); }
+.watch-btn.active { background:rgba(86,212,221,0.2); }
+
+/* Toast */
+.toast-container { position:fixed; bottom:12px; right:12px; z-index:1000; display:flex; flex-direction:column; gap:3px; }
+.toast { padding:6px 12px; border-radius:3px; font-size:10px; font-family:var(--font); animation:fadeIn 0.2s ease; max-width:320px; }
+.toast.fill { background:var(--green-bg); border:1px solid var(--green); color:var(--green); }
+.toast.snipe { background:rgba(210,153,34,0.15); border:1px solid var(--yellow); color:var(--yellow); }
+.toast.error { background:var(--red-bg); border:1px solid var(--red); color:var(--red); }
+.toast.info { background:rgba(88,166,255,0.15); border:1px solid var(--blue); color:var(--blue); }
+@keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+
+.empty-state { padding:16px; text-align:center; color:var(--text-dim); font-size:11px; }
+::-webkit-scrollbar { width:5px; }
+::-webkit-scrollbar-track { background:var(--bg); }
+::-webkit-scrollbar-thumb { background:var(--bg3); border-radius:3px; }
+
+/* Wallet input */
+.watch-input { display:flex; gap:4px; padding:4px 6px; }
+.watch-input input { flex:1; background:var(--bg3); border:1px solid var(--border); border-radius:3px; padding:3px 6px; color:var(--text); font-family:var(--font); font-size:10px; outline:none; }
+.watch-input button { background:var(--cyan); color:#000; border:none; border-radius:3px; padding:3px 8px; font-size:10px; cursor:pointer; font-family:var(--font); font-weight:600; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>POLYMARKET SIMULATOR</h1>
+  <div class="status">
+    <span><span class="dot" id="ws-dot"></span><span id="ws-status">Disconnected</span></span>
+    <span class="stat-badge" id="stat-trades">Trades: 0</span>
+    <span class="stat-badge" id="stat-wallets">Wallets: 0</span>
+    <span class="stat-badge" id="stat-volume">Vol: $0</span>
+    <span class="stat-badge" id="stat-recording" style="color:var(--red)">REC</span>
+  </div>
+</div>
+
+<div class="search-bar">
+  <input type="text" id="search-input" placeholder="Search markets... (e.g. 'Trump', 'Bitcoin', 'cricket')" />
+  <button onclick="searchMarkets()">Search</button>
+</div>
+<div class="search-results" id="search-results"></div>
+<div class="market-label" id="market-label">No market selected — search above</div>
+
+<div class="main">
+  <!-- LEFT: Order Book -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Order Book</span>
+      <span id="book-mid" style="color:var(--yellow)"></span>
+    </div>
+    <div class="tab-bar" id="outcome-tabs"></div>
+    <div class="panel-body" id="book-panel" style="padding:0">
+      <div class="empty-state">Select a market to see live order book</div>
+    </div>
+  </div>
+
+  <!-- CENTER: Order Entry + Position -->
+  <div class="panel" style="overflow-y:auto">
+    <div class="panel-header">Order Entry</div>
+    <div class="order-form">
+      <div><label>Token</label><select id="token-select"><option value="">Select market</option></select></div>
+      <div><label>Side</label>
+        <div class="side-btns">
+          <button class="buy-btn active" onclick="setSide('BUY')">BUY</button>
+          <button class="sell-btn" onclick="setSide('SELL')">SELL</button>
+        </div>
+      </div>
+      <div><label>Type</label><select id="order-type" onchange="onTypeChange()">
+        <option value="FAK">FAK (Fill-And-Kill)</option>
+        <option value="FOK">FOK (Fill-Or-Kill)</option>
+        <option value="GTC">GTC (Good-Til-Cancelled)</option>
+        <option value="GTD">GTD (Good-Til-Date)</option>
+      </select></div>
+      <div><label>Price</label><input type="number" id="order-price" step="0.01" min="0.01" max="0.99" placeholder="0.50" /></div>
+      <div><label>Size (tokens)</label><input type="number" id="order-size" step="1" min="1" placeholder="100" /></div>
+      <div id="gtd-expiry-row" style="display:none"><label>Expires in (minutes)</label><input type="number" id="order-expiry-mins" step="1" min="1" value="60" placeholder="60" /></div>
+      <div><label>Notional: <span id="order-notional">$0.00</span></label></div>
+      <button class="place-btn buy" id="place-btn" onclick="placeOrder()">BUY</button>
+    </div>
+
+    <!-- Queue Status -->
+    <div id="queue-section" style="display:none">
+      <div class="panel-header">GTC Queue Position</div>
+      <div id="queue-panel"></div>
+    </div>
+
+    <div class="panel-header" style="margin-top:4px">Position</div>
+    <div class="pos-grid">
+      <div class="pos-item"><div class="label">Cash</div><div class="value" id="pos-cash">$10,000</div></div>
+      <div class="pos-item"><div class="label">Exposure</div><div class="value" id="pos-exposure">$0</div></div>
+      <div class="pos-item"><div class="label">Realized</div><div class="value" id="pos-realized">$0</div></div>
+      <div class="pos-item"><div class="label">Unrealized</div><div class="value" id="pos-unrealized">$0</div></div>
+    </div>
+    <div style="padding:4px 8px">
+      <div class="pos-item"><div class="label">Total P&L</div><div class="value" id="pos-total" style="font-size:16px">$0.00</div></div>
+    </div>
+    <div id="token-positions" style="padding:2px 8px"></div>
+
+    <!-- My Orders/Fills -->
+    <div class="panel-header" style="margin-top:4px">
+      <span onclick="showMyTab('orders')" id="my-tab-orders" style="cursor:pointer" class="active">Orders</span>
+      <span onclick="showMyTab('fills')" id="my-tab-fills" style="cursor:pointer;margin-left:8px">Fills</span>
+      <span onclick="showMyTab('snipes')" id="my-tab-snipes" style="cursor:pointer;margin-left:8px">Snipes</span>
+    </div>
+    <div id="my-orders-panel">
+      <table class="data-table"><thead><tr><th>Side</th><th>Type</th><th>Px</th><th>Sz</th><th>Fill</th><th>St</th><th></th></tr></thead>
+      <tbody id="orders-tbody"></tbody></table>
+    </div>
+    <div id="my-fills-panel" style="display:none">
+      <table class="data-table"><thead><tr><th>Time</th><th>Side</th><th>Px</th><th>Sz</th><th>$</th></tr></thead>
+      <tbody id="fills-tbody"></tbody></table>
+    </div>
+    <div id="my-snipes-panel" style="display:none">
+      <table class="data-table"><thead><tr><th>Time</th><th>Side</th><th>Px</th><th>Sz</th><th>ms</th></tr></thead>
+      <tbody id="snipes-tbody"></tbody></table>
+    </div>
+  </div>
+
+  <!-- RIGHT: Wallet Tracker + Market Trades -->
+  <div class="panel">
+    <div class="panel-header">
+      <span>Live Wallet Tracker</span>
+      <span id="wallet-summary" style="color:var(--text-dim);font-weight:normal"></span>
+    </div>
+    <div class="tab-bar">
+      <button class="active" onclick="showWalletTab('wallets')" id="wt-tab-wallets">Wallets</button>
+      <button onclick="showWalletTab('watched')" id="wt-tab-watched">Watched</button>
+      <button onclick="showWalletTab('trades')" id="wt-tab-trades">Trades</button>
+      <button onclick="showWalletTab('wbooks')" id="wt-tab-wbooks">Books</button>
+      <button onclick="showWalletTab('inventory')" id="wt-tab-inventory">Graph</button>
+    </div>
+
+    <!-- Wallet list -->
+    <div id="wallets-panel" class="panel-body">
+      <div class="empty-state">Waiting for trade data...</div>
+    </div>
+
+    <!-- Watched wallets -->
+    <div id="watched-panel" class="panel-body" style="display:none">
+      <div class="watch-input">
+        <input type="text" id="watch-addr-input" placeholder="0x... wallet address" />
+        <button onclick="watchWallet()">Watch</button>
+      </div>
+      <div id="watched-list"></div>
+    </div>
+
+    <!-- Market trades feed -->
+    <div id="market-trades-panel" class="panel-body" style="display:none">
+      <table class="data-table">
+        <thead><tr><th>Time</th><th>Side</th><th>Out</th><th>Sz</th><th>Px</th><th>$</th><th>Wallet</th></tr></thead>
+        <tbody id="market-trades-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Wallet subset books -->
+    <div id="wbooks-panel" class="panel-body" style="display:none">
+      <div class="watch-input">
+        <input type="text" id="wbook-name" placeholder="Subset name" style="width:80px" />
+        <input type="text" id="wbook-wallets" placeholder="0xabc,0xdef,..." style="flex:2" />
+        <button onclick="createWalletBook()">Create</button>
+      </div>
+      <div id="wbook-list"></div>
+      <div id="wbook-books"></div>
+    </div>
+
+    <!-- Inventory graph for watched wallets -->
+    <div id="inventory-panel" class="panel-body" style="display:none">
+      <div style="padding:4px 6px">
+        <select id="inv-wallet-select" onchange="loadInventoryGraph()" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-size:10px;padding:4px;border-radius:3px">
+          <option value="">Select a watched wallet</option>
+        </select>
+      </div>
+      <div style="position:relative;padding:4px">
+        <canvas id="inv-canvas" width="400" height="200" style="width:100%;height:200px;background:var(--bg2);border-radius:4px"></canvas>
+        <div id="inv-tooltip" style="display:none;position:absolute;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:6px 10px;font-size:10px;pointer-events:none;z-index:10"></div>
+      </div>
+      <div id="inv-legend" style="padding:4px 6px;font-size:9px"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────
+let ws = null;
+let market = null;
+let activeTokenIdx = 0;
+let orderSide = 'BUY';
+let books = {};
+let allOrders = [];
+let allFills = [];
+let allSnipes = [];
+let walletData = { summary:{}, top_wallets:[], watched:[], recent_trades:[] };
+
+// ── WebSocket ──────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    document.getElementById('ws-dot').classList.add('connected');
+    document.getElementById('ws-status').textContent = 'Connected';
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-dot').classList.remove('connected');
+    document.getElementById('ws-status').textContent = 'Reconnecting...';
+    setTimeout(connectWS, 2000);
+  };
+  ws.onmessage = (evt) => handleMessage(JSON.parse(evt.data));
+}
+
+function handleMessage(msg) {
+  switch(msg.type) {
+    case 'market_changed': market = msg.data; onMarketChanged(); break;
+    case 'book': books[msg.data.token_id] = msg.data; renderBook(); break;
+    case 'position': renderPosition(msg.data); break;
+    case 'fill':
+      allFills.unshift(msg.data);
+      if (allFills.length > 200) allFills.length = 200;
+      renderFills();
+      showToast(`Fill: ${msg.data.side} ${msg.data.size} @ ${msg.data.price}`, 'fill');
+      break;
+    case 'order_update': updateOrder(msg.data); renderOrders(); break;
+    case 'snipe':
+      allSnipes.unshift(msg.data);
+      if (allSnipes.length > 200) allSnipes.length = 200;
+      renderSnipes();
+      showToast(`Snipe: ${msg.data.side} ${msg.data.size_disappeared} @ ${msg.data.price} (${msg.data.duration_ms}ms)`, 'snipe');
+      break;
+    case 'queue_info': renderQueue(msg.data); break;
+    case 'wallet_update':
+      walletData = msg.data;
+      renderWalletSummary();
+      renderWallets();
+      renderWatched();
+      renderMarketTrades();
+      break;
+    case 'wallet_books':
+      renderWalletBooks(msg.data);
+      break;
+  }
+}
+
+// ── Search ─────────────────────────────────────────────────────
+let searchTimeout = null;
+document.getElementById('search-input').addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => searchMarkets(), 300);
+});
+document.getElementById('search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') searchMarkets();
+  if (e.key === 'Escape') closeSearch();
+});
+
+async function searchMarkets() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) { closeSearch(); return; }
+  const resp = await fetch(`/api/markets/search?q=${encodeURIComponent(q)}&limit=15`);
+  const results = await resp.json();
+  const el = document.getElementById('search-results');
+  el.innerHTML = results.map(r => `
+    <div class="result" onclick="selectMarket('${r.slug}')">
+      <div class="q">${esc(r.question)}</div>
+      <div class="meta">${r.outcomes.join(' / ')} | Vol: $${fmt(r.volume)} | Liq: $${fmt(r.liquidity)}</div>
+    </div>`).join('');
+  el.style.display = results.length ? 'block' : 'none';
+}
+function closeSearch() { document.getElementById('search-results').style.display = 'none'; }
+
+async function selectMarket(slug) {
+  closeSearch();
+  document.getElementById('search-input').value = '';
+  document.getElementById('market-label').textContent = 'Loading...';
+  const resp = await fetch(`/api/market/select?slug=${encodeURIComponent(slug)}`, {method:'POST'});
+  const data = await resp.json();
+  if (data.error) document.getElementById('market-label').textContent = 'Error: ' + data.error;
+}
+
+function onMarketChanged() {
+  document.getElementById('market-label').textContent = market.question;
+  activeTokenIdx = 0; books = {}; allOrders = []; allFills = []; allSnipes = [];
+  walletData = { summary:{}, top_wallets:[], watched:[], recent_trades:[] };
+
+  document.getElementById('outcome-tabs').innerHTML = market.outcomes.map((name, i) =>
+    `<button class="${i===0?'active':''}" onclick="switchOutcome(${i})">${esc(name)}</button>`).join('');
+  document.getElementById('token-select').innerHTML = market.outcomes.map((name, i) =>
+    `<option value="${market.token_ids[i]}">${esc(name)}</option>`).join('');
+
+  renderBook(); renderOrders(); renderFills(); renderSnipes();
+}
+
+function switchOutcome(idx) {
+  activeTokenIdx = idx;
+  document.querySelectorAll('#outcome-tabs button').forEach((b,i) => b.classList.toggle('active', i===idx));
+  renderBook();
+}
+
+// ── Book ───────────────────────────────────────────────────────
+function renderBook() {
+  const panel = document.getElementById('book-panel');
+  if (!market || !market.token_ids.length) { panel.innerHTML = '<div class="empty-state">Select a market</div>'; return; }
+
+  const tid = market.token_ids[activeTokenIdx];
+  const book = books[tid];
+  if (!book) { panel.innerHTML = '<div class="empty-state">Waiting for data...</div>'; return; }
+
+  const asks = (book.asks||[]).slice().reverse();
+  const bids = book.bids||[];
+  const maxSize = Math.max(...asks.map(l=>l.size), ...bids.map(l=>l.size), 1);
+
+  const mid = book.mid_price != null ? book.mid_price.toFixed(4) : '-';
+  const spread = book.spread != null ? book.spread.toFixed(4) : '-';
+  document.getElementById('book-mid').textContent = `Mid: ${mid}`;
+
+  let h = '<div style="display:flex;flex-direction:column;height:100%">';
+  // Asks
+  h += '<div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;justify-content:flex-end"><div>';
+  h += '<div class="book-header"><span>Price</span><span style="text-align:right">Size</span><span style="text-align:right">Notional</span></div>';
+  for (const l of asks) {
+    const pct = (l.size/maxSize*100).toFixed(1);
+    h += `<div class="book-row ask" onclick="fillPrice(${l.price})"><div class="depth-bar" style="width:${pct}%"></div>
+      <span class="price">${l.price.toFixed(4)}</span><span class="size">${fmtI(l.size)}</span><span class="notional">$${fmt(l.price*l.size)}</span></div>`;
+  }
+  h += '</div></div>';
+  h += `<div class="spread-row">Spread: ${spread}</div>`;
+  // Bids
+  h += '<div style="flex:1;overflow-y:auto"><div>';
+  h += '<div class="book-header"><span>Price</span><span style="text-align:right">Size</span><span style="text-align:right">Notional</span></div>';
+  for (const l of bids) {
+    const pct = (l.size/maxSize*100).toFixed(1);
+    h += `<div class="book-row bid" onclick="fillPrice(${l.price})"><div class="depth-bar" style="width:${pct}%"></div>
+      <span class="price">${l.price.toFixed(4)}</span><span class="size">${fmtI(l.size)}</span><span class="notional">$${fmt(l.price*l.size)}</span></div>`;
+  }
+  h += '</div></div></div>';
+  panel.innerHTML = h;
+}
+
+function fillPrice(p) { document.getElementById('order-price').value = p.toFixed(2); updateNotional(); }
+
+// ── Order Entry ────────────────────────────────────────────────
+function setSide(s) {
+  orderSide = s;
+  document.querySelector('.buy-btn').classList.toggle('active', s==='BUY');
+  document.querySelector('.sell-btn').classList.toggle('active', s==='SELL');
+  const btn = document.getElementById('place-btn');
+  btn.textContent = s; btn.className = 'place-btn '+(s==='BUY'?'buy':'sell');
+}
+document.getElementById('order-price').addEventListener('input', updateNotional);
+document.getElementById('order-size').addEventListener('input', updateNotional);
+function updateNotional() {
+  const p = parseFloat(document.getElementById('order-price').value)||0;
+  const s = parseFloat(document.getElementById('order-size').value)||0;
+  document.getElementById('order-notional').textContent = '$'+fmt(p*s);
+}
+
+function onTypeChange() {
+  const t = document.getElementById('order-type').value;
+  document.getElementById('gtd-expiry-row').style.display = t === 'GTD' ? '' : 'none';
+}
+
+async function placeOrder() {
+  if (!market) { showToast('Select a market first','error'); return; }
+  const tokenId = document.getElementById('token-select').value;
+  const orderType = document.getElementById('order-type').value;
+  const price = parseFloat(document.getElementById('order-price').value);
+  const size = parseFloat(document.getElementById('order-size').value);
+  if (!tokenId||!size) { showToast('Fill all fields','error'); return; }
+  if (!price||price<=0||price>=1) { showToast('Price: 0.01-0.99','error'); return; }
+
+  const body = { token_id:tokenId, side:orderSide, order_type:orderType, size, price };
+  if (orderType === 'GTD') {
+    const mins = parseInt(document.getElementById('order-expiry-mins').value) || 60;
+    body.expiration = Math.floor(Date.now()/1000) + 60 + (mins * 60); // +1min security threshold per docs
+  }
+
+  const resp = await fetch('/api/orders', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (data.error) showToast(data.error,'error');
+  else showToast(`${data.order_id}: ${data.status} (filled ${data.filled_size})`, data.filled_size > 0 ? 'fill' : 'info');
+}
+
+// ── Queue ──────────────────────────────────────────────────────
+function renderQueue(entries) {
+  const section = document.getElementById('queue-section');
+  const panel = document.getElementById('queue-panel');
+  if (!entries || !entries.length) { section.style.display='none'; return; }
+  section.style.display='';
+  panel.innerHTML = entries.map(e => {
+    const pct = e.initial_queue > 0 ? Math.max(0, 100 - e.queue_pct) : 100;
+    return `<div class="queue-bar">
+      <span class="tag-${e.side==='BUY'?'buy':'sell'}">${e.side}</span>
+      <span>${e.price.toFixed(4)}</span>
+      <span>${fmtI(e.filled)}/${fmtI(e.size)}</span>
+      <div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div>
+      <span style="color:var(--text-dim)">${fmtI(e.queue_ahead)} ahead</span>
+    </div>`;
+  }).join('');
+}
+
+// ── Position ───────────────────────────────────────────────────
+function renderPosition(pos) {
+  document.getElementById('pos-cash').textContent = '$'+fmt(pos.cash);
+  document.getElementById('pos-exposure').textContent = '$'+fmt(pos.exposure);
+  setPnl('pos-realized', pos.realized_pnl);
+  setPnl('pos-unrealized', pos.unrealized_pnl);
+  setPnl('pos-total', pos.total_pnl);
+
+  const td = document.getElementById('token-positions');
+  if (pos.token_balances && Object.keys(pos.token_balances).length) {
+    td.innerHTML = Object.entries(pos.token_balances).map(([tid,bal]) => {
+      const name = market ? (market.outcomes[market.token_ids.indexOf(tid)]||tid.slice(0,8)) : tid.slice(0,8);
+      return `<div style="font-size:10px;color:${bal>0?'var(--green)':'var(--red)'}">${esc(name)}: ${fmtI(bal)}</div>`;
+    }).join('');
+  } else td.innerHTML = '';
+}
+function setPnl(id, val) {
+  const el = document.getElementById(id);
+  el.textContent = (val>=0?'+$':'-$')+fmt(Math.abs(val));
+  el.className = 'value '+(val>=0?'positive':'negative');
+}
+
+// ── My Orders / Fills / Snipes ─────────────────────────────────
+function showMyTab(t) {
+  ['orders','fills','snipes'].forEach(x => {
+    document.getElementById('my-'+x+'-panel').style.display = x===t?'':'none';
+    document.getElementById('my-tab-'+x).classList.toggle('active', x===t);
+  });
+}
+function updateOrder(o) {
+  const idx = allOrders.findIndex(x => x.id === o.id);
+  if (idx>=0) Object.assign(allOrders[idx], o); else allOrders.unshift(o);
+  if (allOrders.length > 100) allOrders.length = 100;
+}
+function renderOrders() {
+  document.getElementById('orders-tbody').innerHTML = allOrders.map(o => {
+    const sc = o.side==='BUY'?'tag-buy':'tag-sell';
+    const stc = o.status==='FILLED'?'tag-filled':o.status==='CANCELLED'?'tag-cancelled':'tag-open';
+    const cb = (o.status==='OPEN'||o.status==='PARTIALLY_FILLED')?`<button class="cancel-btn" onclick="cancelOrder('${o.id}')">X</button>`:'';
+    return `<tr><td class="${sc}">${o.side[0]}</td><td>${(o.order_type||'').replace('LIMIT_','')}</td>
+      <td>${o.price!=null?o.price.toFixed(2):'MKT'}</td><td>${fmtI(o.size)}</td>
+      <td>${fmtI(o.filled_size)}</td><td class="${stc}">${o.status}</td><td>${cb}</td></tr>`;
+  }).join('');
+}
+function renderFills() {
+  document.getElementById('fills-tbody').innerHTML = allFills.map(f => {
+    const t = new Date(f.timestamp*1000).toLocaleTimeString();
+    return `<tr><td>${t}</td><td class="tag-${f.side==='BUY'?'buy':'sell'}">${f.side[0]}</td>
+      <td>${f.price.toFixed(4)}</td><td>${fmtI(f.size)}</td><td>$${fmt(f.notional)}</td></tr>`;
+  }).join('');
+}
+function renderSnipes() {
+  document.getElementById('snipes-tbody').innerHTML = allSnipes.map(s => {
+    const t = new Date(s.timestamp*1000).toLocaleTimeString();
+    return `<tr><td>${t}</td><td>${s.side}</td><td>${s.price.toFixed(4)}</td>
+      <td>${fmtI(s.size_disappeared)}</td><td style="color:var(--yellow)">${s.duration_ms.toFixed(0)}</td></tr>`;
+  }).join('');
+}
+async function cancelOrder(id) { await fetch(`/api/orders/${id}`,{method:'DELETE'}); }
+
+// ── Wallet Tracker ─────────────────────────────────────────────
+function showWalletTab(t) {
+  ['wallets','watched','trades','wbooks','inventory'].forEach(x => {
+    const panelId = x==='trades'?'market-trades-panel':x+'-panel';
+    document.getElementById(panelId).style.display = x===t?'':'none';
+    document.getElementById('wt-tab-'+x).classList.toggle('active', x===t);
+  });
+  if (t==='inventory') updateInvWalletSelect();
+}
+
+function renderWalletSummary() {
+  const s = walletData.summary||{};
+  document.getElementById('stat-trades').textContent = `Trades: ${s.total_trades||0}`;
+  document.getElementById('stat-wallets').textContent = `Wallets: ${s.unique_wallets||0}`;
+  document.getElementById('stat-volume').textContent = `Vol: $${fmt(s.total_volume||0)}`;
+}
+
+function renderWallets() {
+  const panel = document.getElementById('wallets-panel');
+  const ws = walletData.top_wallets||[];
+  if (!ws.length) { panel.innerHTML = '<div class="empty-state">Waiting for trades...</div>'; return; }
+
+  let h = '<table class="data-table"><thead><tr><th>Wallet</th><th>Trades</th><th>Bought</th><th>Sold</th><th>P&L</th><th>Rot</th><th></th></tr></thead><tbody>';
+  for (const w of ws) {
+    const addr = w.address.slice(0,6)+'...'+w.address.slice(-4);
+    const pnlCls = w.net_pnl>=0?'tag-buy':'tag-sell';
+    const isWatched = walletData.watched && walletData.watched.some(x=>x.address===w.address);
+    h += `<tr class="wallet-row ${isWatched?'wallet-watched':''}">
+      <td class="wallet-addr" title="${w.address}">${addr}</td>
+      <td>${w.trade_count}</td>
+      <td>$${fmt(w.total_bought)}</td>
+      <td>$${fmt(w.total_sold)}</td>
+      <td class="${pnlCls}">${w.net_pnl>=0?'+':''}$${fmt(w.net_pnl)}</td>
+      <td>${w.rotation.toFixed(1)}x</td>
+      <td><button class="watch-btn ${isWatched?'active':''}" onclick="toggleWatch('${w.address}')">${isWatched?'*':'+'}</button></td>
+    </tr>`;
+  }
+  h += '</tbody></table>';
+  panel.innerHTML = h;
+}
+
+function renderWatched() {
+  const list = document.getElementById('watched-list');
+  const ws = walletData.watched||[];
+  if (!ws.length) { list.innerHTML = '<div class="empty-state">No watched wallets</div>'; return; }
+
+  let h = '<table class="data-table"><thead><tr><th>Wallet</th><th>Trades</th><th>Bought</th><th>Sold</th><th>P&L</th><th></th></tr></thead><tbody>';
+  for (const w of ws) {
+    const addr = w.address.slice(0,6)+'...'+w.address.slice(-4);
+    const pnl = w.net_pnl||0;
+    h += `<tr class="wallet-watched"><td class="wallet-addr">${addr}</td>
+      <td>${w.trade_count||0}</td><td>$${fmt(w.total_bought||0)}</td><td>$${fmt(w.total_sold||0)}</td>
+      <td class="${pnl>=0?'tag-buy':'tag-sell'}">${pnl>=0?'+':''}$${fmt(pnl)}</td>
+      <td><button class="cancel-btn" onclick="unwatchWallet('${w.address}')">X</button></td></tr>`;
+  }
+  h += '</tbody></table>';
+
+  // Net positions for watched
+  for (const w of ws) {
+    if (w.net_pos && Object.keys(w.net_pos).length) {
+      const addr = w.address.slice(0,6)+'..';
+      h += `<div style="padding:4px 6px;font-size:9px;color:var(--text-dim)">${addr}: `;
+      h += Object.entries(w.net_pos).map(([o,q]) =>
+        `<span style="color:${q>0?'var(--green)':'var(--red)'}"> ${esc(o)}: ${fmtI(q)}</span>`).join('');
+      h += '</div>';
+    }
+  }
+  list.innerHTML = h;
+}
+
+function renderMarketTrades() {
+  const tbody = document.getElementById('market-trades-tbody');
+  const trades = walletData.recent_trades||[];
+  tbody.innerHTML = trades.slice().reverse().map(t => {
+    const addr = t.wallet ? t.wallet.slice(0,6)+'..' : '?';
+    const isWatched = walletData.watched && walletData.watched.some(w=>w.address===t.wallet);
+    return `<tr ${isWatched?'class="wallet-watched"':''}>
+      <td>${t.time_str||''}</td>
+      <td class="tag-${t.side==='BUY'?'buy':'sell'}">${t.side[0]}</td>
+      <td>${esc((t.outcome||'').slice(0,8))}</td>
+      <td>${fmtI(t.size)}</td><td>${t.price.toFixed(4)}</td>
+      <td>$${fmt(t.notional)}</td>
+      <td class="wallet-addr" style="cursor:pointer" onclick="toggleWatch('${t.wallet}')" title="${t.wallet}">${isWatched?'*':''}${addr}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function watchWallet() {
+  const addr = document.getElementById('watch-addr-input').value.trim();
+  if (!addr) return;
+  await fetch(`/api/wallets/watch?address=${encodeURIComponent(addr)}`, {method:'POST'});
+  document.getElementById('watch-addr-input').value = '';
+  showToast(`Watching ${addr.slice(0,10)}...`, 'info');
+}
+async function unwatchWallet(addr) {
+  await fetch(`/api/wallets/watch?address=${encodeURIComponent(addr)}`, {method:'DELETE'});
+}
+async function toggleWatch(addr) {
+  const isWatched = walletData.watched && walletData.watched.some(w=>w.address===addr);
+  if (isWatched) await unwatchWallet(addr);
+  else {
+    await fetch(`/api/wallets/watch?address=${encodeURIComponent(addr)}`, {method:'POST'});
+    showToast(`Watching ${addr.slice(0,8)}...`, 'info');
+  }
+}
+
+// ── Toast ──────────────────────────────────────────────────────
+function showToast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast '+type; el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── Utils ──────────────────────────────────────────────────────
+function fmt(n) { return Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtI(n) { return Number(n||0).toLocaleString('en-US',{maximumFractionDigits:0}); }
+function esc(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+document.addEventListener('click', e => { if (!e.target.closest('.search-bar,.search-results')) closeSearch(); });
+
+// ── Wallet Subset Books ────────────────────────────────────────
+async function createWalletBook() {
+  const name = document.getElementById('wbook-name').value.trim();
+  const wallets = document.getElementById('wbook-wallets').value.trim();
+  if (!name || !wallets) { showToast('Name and wallets required','error'); return; }
+  const resp = await fetch(`/api/wallet-books?name=${encodeURIComponent(name)}&wallets=${encodeURIComponent(wallets)}`,{method:'POST'});
+  const data = await resp.json();
+  if (data.ok) { showToast(`Subset "${name}" created (${data.wallet_count} wallets)`,'info'); refreshWalletBookList(); }
+  else showToast(data.error||'Error','error');
+  document.getElementById('wbook-name').value='';
+  document.getElementById('wbook-wallets').value='';
+}
+async function refreshWalletBookList() {
+  const resp = await fetch('/api/wallet-books');
+  const subsets = await resp.json();
+  const el = document.getElementById('wbook-list');
+  if (!subsets.length) { el.innerHTML='<div class="empty-state">No subsets — create one above</div>'; return; }
+  el.innerHTML = subsets.map(s => `
+    <div style="padding:4px 6px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span><strong style="color:var(--cyan)">${esc(s.name)}</strong> (${s.wallet_count} wallets) — Bid: $${fmt(s.total_bid_depth)} Ask: $${fmt(s.total_ask_depth)}</span>
+      <button class="cancel-btn" onclick="deleteWalletBook('${esc(s.name)}')">X</button>
+    </div>`).join('');
+}
+async function deleteWalletBook(name) {
+  await fetch(`/api/wallet-books/${encodeURIComponent(name)}`,{method:'DELETE'});
+  refreshWalletBookList();
+}
+function renderWalletBooks(snapshots) {
+  const el = document.getElementById('wbook-books');
+  if (!snapshots || !snapshots.length) return;
+  el.innerHTML = snapshots.map(s => {
+    const maxSz = Math.max(...(s.bids||[]).map(l=>l.size),...(s.asks||[]).map(l=>l.size),1);
+    let h = `<div style="padding:4px 6px;font-size:10px;color:var(--cyan);border-top:1px solid var(--border)">${esc(s.name)} (${s.wallet_count} wallets)</div>`;
+    h += '<div style="display:flex;gap:2px">';
+    // Bids
+    h += '<div style="flex:1"><div style="font-size:9px;color:var(--text-dim);padding:1px 4px">BIDS</div>';
+    for (const l of (s.bids||[]).slice(0,8)) {
+      const pct = (l.size/maxSz*100).toFixed(0);
+      h += `<div style="font-size:10px;padding:1px 4px;position:relative"><div style="position:absolute;top:0;bottom:0;right:0;width:${pct}%;background:var(--green);opacity:0.1"></div><span style="color:var(--green)">${l.price.toFixed(4)}</span> <span style="float:right">${fmtI(l.size)}</span></div>`;
+    }
+    h += '</div>';
+    // Asks
+    h += '<div style="flex:1"><div style="font-size:9px;color:var(--text-dim);padding:1px 4px">ASKS</div>';
+    for (const l of (s.asks||[]).slice(0,8)) {
+      const pct = (l.size/maxSz*100).toFixed(0);
+      h += `<div style="font-size:10px;padding:1px 4px;position:relative"><div style="position:absolute;top:0;bottom:0;right:0;width:${pct}%;background:var(--red);opacity:0.1"></div><span style="color:var(--red)">${l.price.toFixed(4)}</span> <span style="float:right">${fmtI(l.size)}</span></div>`;
+    }
+    h += '</div></div>';
+    return h;
+  }).join('');
+}
+
+// ── Inventory Graph ────────────────────────────────────────────
+let invData = null;
+
+function updateInvWalletSelect() {
+  const sel = document.getElementById('inv-wallet-select');
+  const watched = walletData.watched||[];
+  const opts = watched.map(w => `<option value="${w.address}">${w.address.slice(0,8)}... (${w.trade_count||0} trades)</option>`);
+  sel.innerHTML = '<option value="">Select a watched wallet</option>' + opts.join('');
+}
+
+async function loadInventoryGraph() {
+  const addr = document.getElementById('inv-wallet-select').value;
+  if (!addr) return;
+  const resp = await fetch(`/api/wallets/${addr}/inventory`);
+  invData = await resp.json();
+  drawInventoryGraph();
+}
+
+function drawInventoryGraph() {
+  const canvas = document.getElementById('inv-canvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!invData || !invData.timeline || !invData.timeline.length) {
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('No inventory data yet', W/2, H/2);
+    return;
+  }
+
+  const tl = invData.timeline;
+  const outcomes = [...new Set(tl.flatMap(t => Object.keys(t.positions)))];
+  const colors = ['#3fb950','#f85149','#58a6ff','#d29922','#bc8cff','#56d4dd'];
+
+  // Find min/max values
+  let allVals = [];
+  for (const t of tl) for (const o of outcomes) allVals.push(t.positions[o]||0);
+  let minVal = Math.min(0, ...allVals);
+  let maxVal = Math.max(1, ...allVals);
+  const range = maxVal - minVal || 1;
+
+  const pad = {top:10, bottom:20, left:40, right:10};
+  const gW = W - pad.left - pad.right;
+  const gH = H - pad.top - pad.bottom;
+
+  // Grid
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + (gH * i / 4);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W-pad.right, y); ctx.stroke();
+    const val = maxVal - (range * i / 4);
+    ctx.fillStyle = '#8b949e'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+    ctx.fillText(fmtI(val), pad.left-4, y+3);
+  }
+
+  // Zero line
+  if (minVal < 0) {
+    const zeroY = pad.top + gH * (maxVal / range);
+    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(W-pad.right, zeroY); ctx.stroke();
+  }
+
+  // Lines
+  for (let oi = 0; oi < outcomes.length; oi++) {
+    const o = outcomes[oi];
+    const color = colors[oi % colors.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < tl.length; i++) {
+      const x = pad.left + (i / Math.max(tl.length-1, 1)) * gW;
+      const val = tl[i].positions[o] || 0;
+      const y = pad.top + gH * (1 - (val - minVal) / range);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Legend
+  const legend = document.getElementById('inv-legend');
+  legend.innerHTML = outcomes.map((o, i) =>
+    `<span style="color:${colors[i%colors.length]}">● ${esc(o)}: ${fmtI(invData.current[o]||0)}</span>`
+  ).join(' &nbsp; ');
+
+  // Hover tooltip
+  canvas.onmousemove = (e) => {
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const idx = Math.round(((mx - pad.left) / gW) * (tl.length - 1));
+    if (idx < 0 || idx >= tl.length) { document.getElementById('inv-tooltip').style.display='none'; return; }
+
+    const t = tl[idx];
+    const tip = document.getElementById('inv-tooltip');
+    // Convert timestamp to IST
+    let timeStr = t.time_str || '';
+    if (t.timestamp) {
+      const d = new Date(typeof t.timestamp === 'number' && t.timestamp > 1e12 ? t.timestamp : t.timestamp * 1000);
+      timeStr = d.toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+    }
+    let html = `<div style="color:var(--text-dim)">${timeStr} IST</div>`;
+    for (const o of outcomes) {
+      const val = t.positions[o]||0;
+      html += `<div style="color:${val>=0?'var(--green)':'var(--red)'}">${esc(o)}: ${fmtI(val)}</div>`;
+    }
+    if (t.trade) html += `<div style="color:var(--yellow);margin-top:2px">${t.trade.side} ${fmtI(t.trade.size)} ${esc(t.trade.outcome)} @ ${t.trade.price.toFixed(4)}</div>`;
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    tip.style.left = Math.min(mx + 10, W - 150) + 'px';
+    tip.style.top = '10px';
+  };
+  canvas.onmouseleave = () => { document.getElementById('inv-tooltip').style.display='none'; };
+}
+
+// ── Recording status check ─────────────────────────────────────
+async function checkRecording() {
+  try {
+    const resp = await fetch('/api/recorder/status');
+    const s = await resp.json();
+    const el = document.getElementById('stat-recording');
+    if (s.recording) {
+      el.textContent = `REC ${fmtI(s.event_count)}`;
+      el.style.color = 'var(--red)';
+      el.style.animation = 'blink 1s infinite';
+    } else {
+      el.textContent = 'REC OFF';
+      el.style.color = 'var(--text-dim)';
+      el.style.animation = '';
+    }
+  } catch(e) {}
+}
+
+// ── Init ───────────────────────────────────────────────────────
+connectWS();
+setInterval(() => { if (ws && ws.readyState===1) ws.send('ping'); }, 30000);
+setInterval(checkRecording, 5000);
+setInterval(() => { if (document.getElementById('wt-tab-wbooks').classList.contains('active')) refreshWalletBookList(); }, 10000);
+</script>
+</body>
+</html>

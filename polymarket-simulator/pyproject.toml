@@ -1,0 +1,15 @@
+[project]
+name = "polymarket-simulator"
+version = "0.1.0"
+description = "Live Polymarket trading simulator with real orderbook data"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "websockets>=13.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+polymarket-sim = "simulator.__main__:main"

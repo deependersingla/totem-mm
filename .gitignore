@@ -23,6 +23,8 @@ data/
 test.py
 
 extras
+.ssh/
+.claudeRules/
 
 # polymarket-taker (Rust)
 polymarket-taker/target/
