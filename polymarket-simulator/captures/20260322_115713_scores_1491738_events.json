@@ -1,0 +1,794 @@
+[
+  {
+    "ist": "2026-03-22 11:58:23.749856000 IST",
+    "innings": "SA batting",
+    "over": "2.3",
+    "event": "SIX",
+    "score_before": "14/1",
+    "score_after": "20/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "11:56:28",
+      "market_move_end": "11:56:28",
+      "price_before": 0.61,
+      "price_after": 0.52,
+      "ticks": 9,
+      "latency_sec": 115,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:02:47.624070000 IST",
+    "innings": "SA batting",
+    "over": "3.3",
+    "event": "FOUR",
+    "score_before": "21/1",
+    "score_after": "25/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:01:47",
+      "market_move_end": "12:01:47",
+      "price_before": 0.53,
+      "price_after": 0.44,
+      "ticks": 9,
+      "latency_sec": 60,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:03:53.419409000 IST",
+    "innings": "SA batting",
+    "over": "3.4",
+    "event": "SIX",
+    "score_before": "25/1",
+    "score_after": "31/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:02:12",
+      "market_move_end": "12:02:12",
+      "price_before": 0.51,
+      "price_after": 0.44,
+      "ticks": 7,
+      "latency_sec": 101,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:07:41.919949000 IST",
+    "innings": "SA batting",
+    "over": "4.3",
+    "event": "SIX",
+    "score_before": "40/1",
+    "score_after": "46/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:06:12",
+      "market_move_end": "12:06:12",
+      "price_before": 0.42,
+      "price_after": 0.36,
+      "ticks": 6,
+      "latency_sec": 89,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:17:26.370529000 IST",
+    "innings": "SA batting",
+    "over": "7.1",
+    "event": "SIX",
+    "score_before": "58/1",
+    "score_after": "64/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:16:06",
+      "market_move_end": "12:16:06",
+      "price_before": 0.42,
+      "price_after": 0.37,
+      "ticks": 5,
+      "latency_sec": 80,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:22:34.614861000 IST",
+    "innings": "SA batting",
+    "over": "8.3",
+    "event": "FOUR",
+    "score_before": "67/1",
+    "score_after": "71/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:21:28",
+      "market_move_end": "12:21:28",
+      "price_before": 0.41,
+      "price_after": 0.38,
+      "ticks": 3,
+      "latency_sec": 66,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:24:47.321795000 IST",
+    "innings": "SA batting",
+    "over": "9.1",
+    "event": "FOUR",
+    "score_before": "73/1",
+    "score_after": "77/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:23:32",
+      "market_move_end": "12:23:32",
+      "price_before": 0.4,
+      "price_after": 0.37,
+      "ticks": 3,
+      "latency_sec": 75,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:25:54.419113000 IST",
+    "innings": "SA batting",
+    "over": "9.3",
+    "event": "FOUR",
+    "score_before": "77/1",
+    "score_after": "81/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:25:33",
+      "market_move_end": "12:25:33",
+      "price_before": 0.45,
+      "price_after": 0.41,
+      "ticks": 4,
+      "latency_sec": 21,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:28:36.839095000 IST",
+    "innings": "SA batting",
+    "over": "9.4",
+    "event": "WICKET",
+    "score_before": "81/1",
+    "score_after": "81/2",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "12:26:55",
+      "market_move_end": "12:26:55",
+      "price_before": 0.42,
+      "price_after": 0.44,
+      "ticks": 2,
+      "latency_sec": 101,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:32:26.296922000 IST",
+    "innings": "SA batting",
+    "over": "10.2",
+    "event": "WICKET",
+    "score_before": "83/2",
+    "score_after": "83/3",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "12:31:10",
+      "market_move_end": "12:31:10",
+      "price_before": 0.46,
+      "price_after": 0.55,
+      "ticks": 9,
+      "latency_sec": 76,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:35:43.324567000 IST",
+    "innings": "SA batting",
+    "over": "11.1",
+    "event": "SIX",
+    "score_before": "85/3",
+    "score_after": "91/3",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:34:45",
+      "market_move_end": "12:34:45",
+      "price_before": 0.54,
+      "price_after": 0.48,
+      "ticks": 6,
+      "latency_sec": 58,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:41:47.043593000 IST",
+    "innings": "SA batting",
+    "over": "12.3",
+    "event": "SIX",
+    "score_before": "97/3",
+    "score_after": "103/3",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:40:21",
+      "market_move_end": "12:40:21",
+      "price_before": 0.51,
+      "price_after": 0.44,
+      "ticks": 7,
+      "latency_sec": 86,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:44:59.749671000 IST",
+    "innings": "SA batting",
+    "over": "13.2",
+    "event": "FOUR",
+    "score_before": "105/3",
+    "score_after": "109/3",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:43:57",
+      "market_move_end": "12:43:57",
+      "price_before": 0.46,
+      "price_after": 0.41,
+      "ticks": 5,
+      "latency_sec": 62,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:50:30.665849000 IST",
+    "innings": "SA batting",
+    "over": "14.4",
+    "event": "SIX",
+    "score_before": "115/3",
+    "score_after": "121/3",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:48:50",
+      "market_move_end": "12:48:50",
+      "price_before": 0.44,
+      "price_after": 0.4,
+      "ticks": 4,
+      "latency_sec": 100,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:53:04.799719000 IST",
+    "innings": "SA batting",
+    "over": "15.0",
+    "event": "WICKET",
+    "score_before": "121/3",
+    "score_after": "121/4",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "12:51:27",
+      "market_move_end": "12:51:27",
+      "price_before": 0.43,
+      "price_after": 0.48,
+      "ticks": 5,
+      "latency_sec": 97,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 12:59:55.715690000 IST",
+    "innings": "SA batting",
+    "over": "16.2",
+    "event": "FOUR",
+    "score_before": "123/4",
+    "score_after": "127/4",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:58:23",
+      "market_move_end": "12:58:23",
+      "price_before": 0.58,
+      "price_after": 0.5,
+      "ticks": 8,
+      "latency_sec": 92,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:00:18.143013000 IST",
+    "innings": "SA batting",
+    "over": "16.3",
+    "event": "SIX",
+    "score_before": "127/4",
+    "score_after": "133/4",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "12:58:29",
+      "market_move_end": "12:58:29",
+      "price_before": 0.56,
+      "price_after": 0.5,
+      "ticks": 6,
+      "latency_sec": 109,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:03:04.580795000 IST",
+    "innings": "SA batting",
+    "over": "17.0",
+    "event": "FOUR",
+    "score_before": "134/4",
+    "score_after": "138/4",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:01:18",
+      "market_move_end": "13:01:18",
+      "price_before": 0.5,
+      "price_after": 0.49,
+      "ticks": 1,
+      "latency_sec": 106,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:06:15.180882000 IST",
+    "innings": "SA batting",
+    "over": "17.5",
+    "event": "FOUR",
+    "score_before": "142/4",
+    "score_after": "146/4",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:04:21",
+      "market_move_end": "13:04:21",
+      "price_before": 0.52,
+      "price_after": 0.48,
+      "ticks": 4,
+      "latency_sec": 114,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:07:20.958457000 IST",
+    "innings": "SA batting",
+    "over": "17.6",
+    "event": "WICKET",
+    "score_before": "146/4",
+    "score_after": "146/5",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:05:59",
+      "market_move_end": "13:05:59",
+      "price_before": 0.53,
+      "price_after": 0.57,
+      "ticks": 4,
+      "latency_sec": 81,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:11:12.620165000 IST",
+    "innings": "SA batting",
+    "over": "18.3",
+    "event": "FOUR",
+    "score_before": "150/5",
+    "score_after": "154/5",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:10:54",
+      "market_move_end": "13:10:54",
+      "price_before": 0.53,
+      "price_after": 0.5,
+      "ticks": 3,
+      "latency_sec": 18,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:13:12.720765000 IST",
+    "innings": "SA batting",
+    "over": "18.6",
+    "event": "FOUR",
+    "score_before": "158/5",
+    "score_after": "162/5",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:11:49",
+      "market_move_end": "13:11:49",
+      "price_before": 0.51,
+      "price_after": 0.47,
+      "ticks": 4,
+      "latency_sec": 83,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:32:47.452469000 IST",
+    "innings": "NZ batting",
+    "over": "0.4",
+    "event": "FOUR",
+    "score_before": "7/0",
+    "score_after": "11/0",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:30:56",
+      "market_move_end": "13:30:56",
+      "price_before": 0.66,
+      "price_after": 0.77,
+      "ticks": 11,
+      "latency_sec": 111,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:33:54.842622000 IST",
+    "innings": "NZ batting",
+    "over": "0.5",
+    "event": "FOUR",
+    "score_before": "11/0",
+    "score_after": "15/0",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:32:17",
+      "market_move_end": "13:32:17",
+      "price_before": 0.72,
+      "price_after": 0.78,
+      "ticks": 6,
+      "latency_sec": 97,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:35:36.918167000 IST",
+    "innings": "NZ batting",
+    "over": "1.1",
+    "event": "SIX",
+    "score_before": "15/0",
+    "score_after": "21/0",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:33:45",
+      "market_move_end": "13:33:45",
+      "price_before": 0.75,
+      "price_after": 0.83,
+      "ticks": 8,
+      "latency_sec": 111,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:36:31.209906000 IST",
+    "innings": "NZ batting",
+    "over": "1.3",
+    "event": "FOUR",
+    "score_before": "21/0",
+    "score_after": "25/0",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:35:31",
+      "market_move_end": "13:35:31",
+      "price_before": 0.8,
+      "price_after": 0.84,
+      "ticks": 4,
+      "latency_sec": 60,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:41:55.679495000 IST",
+    "innings": "NZ batting",
+    "over": "2.3",
+    "event": "WICKET",
+    "score_before": "28/0",
+    "score_after": "28/1",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:40:22",
+      "market_move_end": "13:40:22",
+      "price_before": 0.81,
+      "price_after": 0.72,
+      "ticks": 9,
+      "latency_sec": 93,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:46:31.078593000 IST",
+    "innings": "NZ batting",
+    "over": "3.1",
+    "event": "FOUR",
+    "score_before": "32/1",
+    "score_after": "36/1",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:44:58",
+      "market_move_end": "13:44:58",
+      "price_before": 0.73,
+      "price_after": 0.79,
+      "ticks": 6,
+      "latency_sec": 93,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:50:11.600781000 IST",
+    "innings": "NZ batting",
+    "over": "3.5",
+    "event": "FOUR",
+    "score_before": "38/1",
+    "score_after": "42/1",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:48:36",
+      "market_move_end": "13:48:36",
+      "price_before": 0.75,
+      "price_after": 0.78,
+      "ticks": 3,
+      "latency_sec": 95,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:53:56.341939000 IST",
+    "innings": "NZ batting",
+    "over": "4.4",
+    "event": "SIX",
+    "score_before": "44/1",
+    "score_after": "50/1",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:52:30",
+      "market_move_end": "13:52:30",
+      "price_before": 0.76,
+      "price_after": 0.81,
+      "ticks": 5,
+      "latency_sec": 86,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 13:57:09.554806000 IST",
+    "innings": "NZ batting",
+    "over": "5.2",
+    "event": "WICKET",
+    "score_before": "52/1",
+    "score_after": "52/2",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "13:55:41",
+      "market_move_end": "13:55:41",
+      "price_before": 0.81,
+      "price_after": 0.68,
+      "ticks": 13,
+      "latency_sec": 88,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:00:20.422247000 IST",
+    "innings": "NZ batting",
+    "over": "5.4",
+    "event": "FOUR",
+    "score_before": "53/2",
+    "score_after": "57/2",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:58:59",
+      "market_move_end": "13:58:59",
+      "price_before": 0.69,
+      "price_after": 0.81,
+      "ticks": 12,
+      "latency_sec": 81,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:00:53.949572000 IST",
+    "innings": "NZ batting",
+    "over": "5.5",
+    "event": "SIX",
+    "score_before": "57/2",
+    "score_after": "63/2",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "13:58:59",
+      "market_move_end": "13:58:59",
+      "price_before": 0.69,
+      "price_after": 0.81,
+      "ticks": 12,
+      "latency_sec": 114,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:05:51.759246000 IST",
+    "innings": "NZ batting",
+    "over": "7.0",
+    "event": "FOUR",
+    "score_before": "66/2",
+    "score_after": "70/2",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "14:04:51",
+      "market_move_end": "14:04:51",
+      "price_before": 0.82,
+      "price_after": 0.85,
+      "ticks": 3,
+      "latency_sec": 60,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:10:41.111539000 IST",
+    "innings": "NZ batting",
+    "over": "8.2",
+    "event": "WICKET",
+    "score_before": "76/2",
+    "score_after": "76/3",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:09:33",
+      "market_move_end": "14:09:33",
+      "price_before": 0.85,
+      "price_after": 0.73,
+      "ticks": 12,
+      "latency_sec": 68,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:17:42.634998000 IST",
+    "innings": "NZ batting",
+    "over": "10.0",
+    "event": "FOUR",
+    "score_before": "84/3",
+    "score_after": "88/3",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "14:15:58",
+      "market_move_end": "14:15:58",
+      "price_before": 0.71,
+      "price_after": 0.8,
+      "ticks": 9,
+      "latency_sec": 104,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:20:31.487806000 IST",
+    "innings": "NZ batting",
+    "over": "10.1",
+    "event": "WICKET",
+    "score_before": "88/3",
+    "score_after": "88/4",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:19:26",
+      "market_move_end": "14:19:26",
+      "price_before": 0.8,
+      "price_after": 0.68,
+      "ticks": 12,
+      "latency_sec": 65,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:29:44.268891000 IST",
+    "innings": "NZ batting",
+    "over": "11.5",
+    "event": "WICKET",
+    "score_before": "95/4",
+    "score_after": "95/5",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:28:12",
+      "market_move_end": "14:28:12",
+      "price_before": 0.59,
+      "price_after": 0.4,
+      "ticks": 20,
+      "latency_sec": 92,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:32:39.824618000 IST",
+    "innings": "NZ batting",
+    "over": "12.1",
+    "event": "FOUR",
+    "score_before": "96/5",
+    "score_after": "100/5",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "14:31:13",
+      "market_move_end": "14:31:13",
+      "price_before": 0.42,
+      "price_after": 0.54,
+      "ticks": 12,
+      "latency_sec": 86,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:34:30.331837000 IST",
+    "innings": "NZ batting",
+    "over": "12.3",
+    "event": "FOUR",
+    "score_before": "102/5",
+    "score_after": "106/5",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "14:32:38",
+      "market_move_end": "14:32:38",
+      "price_before": 0.53,
+      "price_after": 0.63,
+      "ticks": 10,
+      "latency_sec": 112,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:36:57.530972000 IST",
+    "innings": "NZ batting",
+    "over": "12.6",
+    "event": "FOUR",
+    "score_before": "107/5",
+    "score_after": "111/5",
+    "side": "NZ",
+    "market_movement": {
+      "market_move_start": "14:35:44",
+      "market_move_end": "14:35:44",
+      "price_before": 0.6,
+      "price_after": 0.69,
+      "ticks": 9,
+      "latency_sec": 73,
+      "direction": "NZ_UP"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:39:32.106021000 IST",
+    "innings": "NZ batting",
+    "over": "13.2",
+    "event": "WICKET",
+    "score_before": "111/5",
+    "score_after": "111/6",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:37:41",
+      "market_move_end": "14:37:41",
+      "price_before": 0.5,
+      "price_after": 0.4,
+      "ticks": 10,
+      "latency_sec": 111,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:47:45.560476000 IST",
+    "innings": "NZ batting",
+    "over": "13.5",
+    "event": "WICKET",
+    "score_before": "112/6",
+    "score_after": "112/7",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:45:53",
+      "market_move_end": "14:45:53",
+      "price_before": 0.19,
+      "price_after": 0.16,
+      "ticks": 3,
+      "latency_sec": 112,
+      "direction": "NZ_DOWN"
+    }
+  },
+  {
+    "ist": "2026-03-22 14:48:08.636216000 IST",
+    "innings": "NZ batting",
+    "over": "14.6",
+    "event": "WICKET",
+    "score_before": "120/7",
+    "score_after": "122/8",
+    "side": "SA",
+    "market_movement": {
+      "market_move_start": "14:47:43",
+      "market_move_end": "14:47:43",
+      "price_before": 0.18,
+      "price_after": 0.16,
+      "ticks": 2,
+      "latency_sec": 25,
+      "direction": "NZ_DOWN"
+    }
+  }
+]

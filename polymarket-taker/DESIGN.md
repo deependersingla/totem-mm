@@ -127,17 +127,17 @@ Polymarket CLOB uses API key authentication derived from the wallet:
 ```
 POST /auth/api-key  (derive or create API key)
 
-Headers for authenticated requests:
-  POLY-ADDRESS: <wallet_address>
-  POLY-SIGNATURE: <signature>
-  POLY-TIMESTAMP: <unix_ts>
-  POLY-NONCE: <nonce>
-  POLY-API-KEY: <api_key>
-  POLY-PASSPHRASE: <passphrase>
+L2 headers for trading (HMAC-signed; see [CLOB Authentication](https://docs.polymarket.com/developers/CLOB/authentication)):
+  POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_API_KEY, POLY_PASSPHRASE
 ```
 
 ### 5.2 Order Placement
 
+**Single order:** `POST /order`
+
+**Multiple orders (batch):** `POST /orders`
+
+**Single-order payload (POST /order):**
 ```
 POST /order
 
@@ -164,9 +164,9 @@ POST /order
 
 **orderType values:**
 - `"GTC"` — Good Till Cancelled (rests on book)
+- `"FOK"` — Fill or Kill (all or nothing)
 - `"GTD"` — Good Till Date (rests until expiration)
-- `"FOK"` — Fill or Kill (full fill or nothing)
-- For FAK/IOC semantics: use `"FOK"` with the order — it either fills fully or cancels
+- `"FAK"` — Fill and Kill (partial fills allowed; remainder cancelled) — used by this taker
 
 ### 5.3 Market WebSocket
 
