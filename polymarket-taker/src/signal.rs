@@ -1,12 +1,12 @@
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use crate::types::CricketSignal;
 
 /// Reads cricket signals from stdin, one per line.
 /// For testing: type "W", "4", "IO", "MO" etc. into the terminal.
 /// In production, this will be replaced by a telegram bot listener.
-pub async fn run_stdin(signal_tx: mpsc::Sender<CricketSignal>) {
+pub async fn run_stdin(signal_tx: broadcast::Sender<CricketSignal>) {
     tracing::info!("signal listener started (stdin mode)");
     tracing::info!("enter signals: 0-6, W, Wd, 1Wd, N, IO, MO");
 
@@ -26,11 +26,11 @@ pub async fn run_stdin(signal_tx: mpsc::Sender<CricketSignal>) {
                     Some(signal) => {
                         tracing::info!(signal = %signal, "signal received");
                         if signal == CricketSignal::MatchOver {
-                            let _ = signal_tx.send(signal).await;
+                            let _ = signal_tx.send(signal);
                             tracing::info!("match over — signal listener stopping");
                             return;
                         }
-                        if signal_tx.send(signal).await.is_err() {
+                        if signal_tx.send(signal).is_err() {
                             tracing::error!("signal channel closed");
                             return;
                         }

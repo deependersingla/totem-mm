@@ -10,6 +10,10 @@ pub mod state;
 pub mod strategy;
 pub mod types;
 pub mod web;
+pub mod heartbeat;
+pub mod latency;
+pub mod maker;
+pub mod user_ws;
 
 #[cfg(test)]
 mod tests;

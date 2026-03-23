@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use rust_decimal::Decimal;
 use serde::Serialize;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::clob_auth::ClobAuth;
-use crate::config::Config;
+use crate::config::{Config, MakerConfig};
+use crate::latency::LatencyTracker;
 use crate::position::{self, Position};
-use crate::types::{CricketSignal, MatchState, OrderBook, Team};
+use crate::types::{CricketSignal, FillEvent, MatchState, OrderBook, Team};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,7 +55,7 @@ pub struct AppState {
     pub position: Position,
     pub phase: RwLock<MatchPhase>,
     pub match_state: RwLock<MatchState>,
-    pub signal_tx: RwLock<Option<mpsc::Sender<CricketSignal>>>,
+    pub signal_tx: RwLock<Option<broadcast::Sender<CricketSignal>>>,
     pub book_rx: RwLock<Option<watch::Receiver<(OrderBook, OrderBook)>>>,
     pub book_tx: RwLock<Option<watch::Sender<(OrderBook, OrderBook)>>>,
     pub events: Mutex<VecDeque<EventEntry>>,
@@ -65,6 +66,10 @@ pub struct AppState {
     /// Which teams are enabled for trading. Default: both true.
     pub trade_team_a: RwLock<bool>,
     pub trade_team_b: RwLock<bool>,
+    pub latency: LatencyTracker,
+    pub fill_tx: RwLock<Option<mpsc::Sender<FillEvent>>>,
+    pub user_ws_cancel: RwLock<Option<CancellationToken>>,
+    pub maker_config: RwLock<MakerConfig>,
 }
 
 const MAX_EVENTS: usize = 200;
@@ -73,6 +78,7 @@ impl AppState {
     pub fn new(config: Config) -> Arc<Self> {
         let budget = config.total_budget_usdc;
         let first_batting = config.first_batting;
+        let maker_cfg = config.maker_config.clone();
         Arc::new(Self {
             config: RwLock::new(config),
             auth: RwLock::new(None),
@@ -89,6 +95,10 @@ impl AppState {
             ws_cancel: RwLock::new(None),
             trade_team_a: RwLock::new(true),
             trade_team_b: RwLock::new(true),
+            latency: LatencyTracker::new(),
+            fill_tx: RwLock::new(None),
+            user_ws_cancel: RwLock::new(None),
+            maker_config: RwLock::new(maker_cfg),
         })
     }
 

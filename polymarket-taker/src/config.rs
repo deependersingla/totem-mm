@@ -1,10 +1,46 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 
 use crate::types::Team;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MakerConfig {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub half_spread: Decimal,
+    pub quote_size: Decimal,
+    pub use_gtd: bool,
+    pub gtd_expiry_secs: u64,
+    pub refresh_interval_secs: u64,
+    pub skew_kappa: Decimal,
+    pub max_exposure: Decimal,
+    pub t1_pct: f64,
+    pub t2_pct: f64,
+    pub t3_pct: f64,
+}
+
+impl Default for MakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dry_run: true, // MUST start as true
+            half_spread: dec!(0.01),
+            quote_size: dec!(50),
+            use_gtd: true,
+            gtd_expiry_secs: 60,
+            refresh_interval_secs: 45,
+            skew_kappa: dec!(0.0005),
+            max_exposure: dec!(200),
+            t1_pct: 0.20,
+            t2_pct: 0.50,
+            t3_pct: 0.80,
+        }
+    }
+}
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -39,6 +75,8 @@ pub struct SavedSettings {
     pub edge_wicket: Option<f64>,
     pub edge_boundary_4: Option<f64>,
     pub edge_boundary_6: Option<f64>,
+    pub fill_ws_timeout_ms: Option<u64>,
+    pub maker: Option<MakerConfig>,
 }
 
 impl SavedSettings {
@@ -99,6 +137,8 @@ impl SavedSettings {
             edge_wicket: Some(config.edge_wicket),
             edge_boundary_4: Some(config.edge_boundary_4),
             edge_boundary_6: Some(config.edge_boundary_6),
+            fill_ws_timeout_ms: Some(config.fill_ws_timeout_ms),
+            maker: Some(config.maker_config.clone()),
         }
     }
 }
@@ -157,6 +197,9 @@ pub struct Config {
     pub edge_wicket: f64,
     pub edge_boundary_4: f64,
     pub edge_boundary_6: f64,
+
+    pub fill_ws_timeout_ms: u64,
+    pub maker_config: MakerConfig,
 }
 
 impl Config {
@@ -235,6 +278,10 @@ impl Config {
             edge_wicket: saved.edge_wicket.unwrap_or(2.0),
             edge_boundary_4: saved.edge_boundary_4.unwrap_or(1.0),
             edge_boundary_6: saved.edge_boundary_6.unwrap_or(1.0),
+
+            fill_ws_timeout_ms: saved.fill_ws_timeout_ms
+                .unwrap_or_else(|| env_or("FILL_WS_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
+            maker_config: saved.maker.unwrap_or_default(),
         })
     }
 
