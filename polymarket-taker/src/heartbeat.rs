@@ -9,42 +9,15 @@ use std::time::Duration;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
+use crate::clob_auth::ClobAuth;
 use crate::state::AppState;
 
 pub(crate) const HEARTBEAT_PATH: &str = "/heartbeats";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
-pub async fn run(state: Arc<AppState>, cancel: CancellationToken) {
-    tracing::info!("[HEARTBEAT] starting (interval={:?})", HEARTBEAT_INTERVAL);
-
-    let mut timer = interval(HEARTBEAT_INTERVAL);
-    timer.tick().await; // consume first immediate tick
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::info!("[HEARTBEAT] cancelled, stopping");
-                return;
-            }
-            _ = timer.tick() => {
-                if let Err(e) = send_heartbeat(&state).await {
-                    tracing::warn!("[HEARTBEAT] failed: {e}");
-                }
-            }
-        }
-    }
-}
-
-async fn send_heartbeat(state: &AppState) -> anyhow::Result<()> {
-    let auth = state.auth.read().unwrap().clone();
-    let auth = match auth {
-        Some(a) => a,
-        None => {
-            tracing::debug!("[HEARTBEAT] no auth configured, skipping");
-            return Ok(());
-        }
-    };
-
+/// Send a single heartbeat using the given auth.
+/// Standalone — no AppState dependency, usable by both taker and sweep.
+pub async fn send_heartbeat_with_auth(auth: &ClobAuth) -> anyhow::Result<()> {
     let url = format!("{}{}", auth.clob_http_url(), HEARTBEAT_PATH);
     let headers = auth.l2_headers("POST", HEARTBEAT_PATH, None)?;
 
@@ -64,4 +37,52 @@ async fn send_heartbeat(state: &AppState) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Heartbeat loop using AppState (taker/maker).
+pub async fn run(state: Arc<AppState>, cancel: CancellationToken) {
+    tracing::info!("[HEARTBEAT] starting (interval={:?})", HEARTBEAT_INTERVAL);
+
+    let mut timer = interval(HEARTBEAT_INTERVAL);
+    timer.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("[HEARTBEAT] cancelled, stopping");
+                return;
+            }
+            _ = timer.tick() => {
+                let auth = state.auth.read().unwrap().clone();
+                if let Some(ref a) = auth {
+                    if let Err(e) = send_heartbeat_with_auth(a).await {
+                        tracing::warn!("[HEARTBEAT] failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Standalone heartbeat loop — takes ClobAuth directly, no AppState.
+/// Used by the sweep binary.
+pub async fn run_standalone(auth: ClobAuth, cancel: CancellationToken) {
+    tracing::info!("[HEARTBEAT] starting standalone (interval={:?})", HEARTBEAT_INTERVAL);
+
+    let mut timer = interval(HEARTBEAT_INTERVAL);
+    timer.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("[HEARTBEAT] stopped");
+                return;
+            }
+            _ = timer.tick() => {
+                if let Err(e) = send_heartbeat_with_auth(&auth).await {
+                    tracing::warn!("[HEARTBEAT] failed: {e}");
+                }
+            }
+        }
+    }
 }

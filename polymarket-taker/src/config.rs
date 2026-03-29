@@ -77,6 +77,11 @@ pub struct SavedSettings {
     pub edge_boundary_6: Option<f64>,
     pub fill_ws_timeout_ms: Option<u64>,
     pub maker: Option<MakerConfig>,
+    /// Builder API credentials (from polymarket.com/settings?tab=builder).
+    /// Only used by the sweep engine for order attribution.
+    pub builder_api_key: Option<String>,
+    pub builder_api_secret: Option<String>,
+    pub builder_api_passphrase: Option<String>,
 }
 
 impl SavedSettings {
@@ -139,6 +144,9 @@ impl SavedSettings {
             edge_boundary_6: Some(config.edge_boundary_6),
             fill_ws_timeout_ms: Some(config.fill_ws_timeout_ms),
             maker: Some(config.maker_config.clone()),
+            builder_api_key: Some(config.builder_api_key.clone()).filter(|s| !s.is_empty()),
+            builder_api_secret: Some(config.builder_api_secret.clone()).filter(|s| !s.is_empty()),
+            builder_api_passphrase: Some(config.builder_api_passphrase.clone()).filter(|s| !s.is_empty()),
         }
     }
 }
@@ -200,6 +208,14 @@ pub struct Config {
 
     pub fill_ws_timeout_ms: u64,
     pub maker_config: MakerConfig,
+
+    /// Builder API credentials (sweep only). Separate from regular CLOB creds.
+    #[serde(skip)]
+    pub builder_api_key: String,
+    #[serde(skip)]
+    pub builder_api_secret: String,
+    #[serde(skip)]
+    pub builder_api_passphrase: String,
 }
 
 impl Config {
@@ -282,6 +298,10 @@ impl Config {
             fill_ws_timeout_ms: saved.fill_ws_timeout_ms
                 .unwrap_or_else(|| env_or("FILL_WS_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
             maker_config: saved.maker.unwrap_or_default(),
+
+            builder_api_key: saved.builder_api_key.unwrap_or_default(),
+            builder_api_secret: saved.builder_api_secret.unwrap_or_default(),
+            builder_api_passphrase: saved.builder_api_passphrase.unwrap_or_default(),
         })
     }
 

@@ -43,6 +43,9 @@ fn test_config(max_trade_usdc: &str, safe_percentage: u64) -> Config {
         edge_boundary_6: 1.0,
         fill_ws_timeout_ms: 5000,
         maker_config: crate::config::MakerConfig::default(),
+        builder_api_key: String::new(),
+        builder_api_secret: String::new(),
+        builder_api_passphrase: String::new(),
     }
 }
 

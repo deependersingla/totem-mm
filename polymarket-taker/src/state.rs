@@ -4,13 +4,43 @@ use std::sync::{Arc, Mutex, RwLock};
 use rust_decimal::Decimal;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio_util::sync::CancellationToken;
+pub use tokio_util::sync::CancellationToken;
 
 use crate::clob_auth::ClobAuth;
 use crate::config::{Config, MakerConfig};
 use crate::latency::LatencyTracker;
 use crate::position::{self, Position};
-use crate::types::{CricketSignal, FillEvent, MatchState, OrderBook, Team};
+use crate::types::{CricketSignal, FillEvent, MatchState, OrderBook, Side, Team};
+
+/// Sweep (endgame) mode state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SweepPhase {
+    Idle,
+    Active,
+}
+
+/// A resting order placed by the sweep engine.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepOrder {
+    pub order_id: String,
+    pub team: Team,
+    pub side: Side,
+    pub price: Decimal,
+    pub size: Decimal,
+}
+
+/// Configuration for the sweep engine.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepConfig {
+    pub winning_team: Team,
+    pub budget_usdc: Decimal,
+    pub dry_run: bool,
+    /// Number of price levels for the resting order grid.
+    pub grid_levels: usize,
+    /// Refresh interval for the resting order grid (seconds).
+    pub refresh_interval_secs: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +100,11 @@ pub struct AppState {
     pub fill_tx: RwLock<Option<mpsc::Sender<FillEvent>>>,
     pub user_ws_cancel: RwLock<Option<CancellationToken>>,
     pub maker_config: RwLock<MakerConfig>,
+    // ── Sweep (endgame) state ──────────────────────────────────────────────
+    pub sweep_phase: RwLock<SweepPhase>,
+    pub sweep_config: RwLock<Option<SweepConfig>>,
+    pub sweep_orders: Mutex<Vec<SweepOrder>>,
+    pub sweep_cancel: RwLock<Option<CancellationToken>>,
 }
 
 const MAX_EVENTS: usize = 200;
@@ -99,6 +134,10 @@ impl AppState {
             fill_tx: RwLock::new(None),
             user_ws_cancel: RwLock::new(None),
             maker_config: RwLock::new(maker_cfg),
+            sweep_phase: RwLock::new(SweepPhase::Idle),
+            sweep_config: RwLock::new(None),
+            sweep_orders: Mutex::new(Vec::new()),
+            sweep_cancel: RwLock::new(None),
         })
     }
 

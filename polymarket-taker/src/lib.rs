@@ -13,6 +13,11 @@ pub mod web;
 pub mod heartbeat;
 pub mod latency;
 pub mod maker;
+pub mod sweep;
+pub mod sweep_config;
+pub mod trading;
+pub mod sweep_server;
+pub mod sweep_state;
 pub mod user_ws;
 
 #[cfg(test)]
