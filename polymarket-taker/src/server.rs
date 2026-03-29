@@ -15,6 +15,7 @@ use futures_util::future;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
+use crate::sweep;
 
 /// How often to sync on-chain token balances into the position tracker
 /// while an innings is running.
@@ -100,6 +101,13 @@ pub fn build_router(state: S) -> Router {
         .route("/api/maker/status", get(get_maker_status))
         .route("/api/maker/config", post(post_maker_config))
         .route("/api/latency", get(get_latency))
+        // ── Sweep (endgame) ───────────────────────────────────────────────
+        .route("/sweep", get(serve_sweep_ui))
+        .route("/api/sweep/status", get(get_sweep_status))
+        .route("/api/sweep/start", post(post_sweep_start))
+        .route("/api/sweep/stop", post(post_sweep_stop))
+        .route("/api/sweep/balances", get(get_sweep_balances))
+        .route("/api/sweep/builder", post(post_sweep_builder))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -1512,4 +1520,210 @@ async fn post_maker_config(
 
 async fn get_latency(State(state): State<S>) -> Json<crate::latency::LatencySnapshot> {
     Json(state.latency.snapshot())
+}
+
+// ── Sweep (endgame) endpoints ──────────────────────────────────────────────
+
+async fn serve_sweep_ui() -> axum::response::Html<&'static str> {
+    axum::response::Html(crate::web::SWEEP_HTML)
+}
+
+async fn get_sweep_status(State(state): State<S>) -> Json<serde_json::Value> {
+    let phase = *state.sweep_phase.read().unwrap();
+    let sweep_cfg = state.sweep_config.read().unwrap().clone();
+    let orders = state.sweep_orders.lock().unwrap().clone();
+    let config = state.config.read().unwrap();
+
+    Json(serde_json::json!({
+        "phase": phase,
+        "config": sweep_cfg,
+        "resting_orders": orders.len(),
+        "orders": orders,
+        "builder_key_set": !config.builder_api_key.is_empty(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SweepStartRequest {
+    winning_team: String,   // "A" or "B"
+    budget_usdc: String,    // e.g. "100"
+    dry_run: Option<bool>,
+    grid_levels: Option<usize>,
+    refresh_interval_secs: Option<u64>,
+}
+
+async fn post_sweep_start(
+    State(state): State<S>,
+    Json(body): Json<SweepStartRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Guard: not already running
+    {
+        let phase = *state.sweep_phase.read().unwrap();
+        if phase == crate::state::SweepPhase::Active {
+            return Err((StatusCode::CONFLICT, "sweep already active".into()));
+        }
+    }
+
+    let config = state.config.read().unwrap().clone();
+    if !config.has_wallet() {
+        return Err((StatusCode::BAD_REQUEST, "wallet not configured".into()));
+    }
+    if !config.has_tokens() {
+        return Err((StatusCode::BAD_REQUEST, "token IDs not set — fetch market first".into()));
+    }
+
+    // Ensure auth
+    if state.auth.read().unwrap().is_none() {
+        match ClobAuth::derive(&config).await {
+            Ok(auth) => { *state.auth.write().unwrap() = Some(auth); }
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("auth failed: {e}"))),
+        }
+    }
+
+    let winning = match body.winning_team.to_uppercase().as_str() {
+        "A" => Team::TeamA,
+        "B" => Team::TeamB,
+        _ => return Err((StatusCode::BAD_REQUEST, "winning_team must be 'A' or 'B'".into())),
+    };
+
+    let budget: Decimal = body.budget_usdc.parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid budget_usdc".into()))?;
+
+    // Safety check: verify the losing team's price is < 5¢
+    {
+        let br = state.book_rx.read().unwrap();
+        if let Some(rx) = br.as_ref() {
+            let books = rx.borrow().clone();
+            let lose_book = match winning {
+                Team::TeamA => &books.1,
+                Team::TeamB => &books.0,
+            };
+            if let Some(best_ask) = lose_book.best_ask() {
+                let losing_name = config.team_name(winning.opponent());
+                if best_ask.price >= Decimal::new(5, 2) {
+                    return Err((StatusCode::BAD_REQUEST, format!(
+                        "BLOCKED: {} price is {:.2}¢ (>= 5¢) — too early to call winner",
+                        losing_name, best_ask.price * Decimal::from(100)
+                    )));
+                }
+                if best_ask.price >= Decimal::new(1, 2) {
+                    state.push_event("warn", &format!(
+                        "WARNING: {} still at {:.2}¢ — are you sure?",
+                        losing_name, best_ask.price * Decimal::from(100)
+                    ));
+                }
+            }
+        }
+    }
+
+    let sweep_cfg = crate::state::SweepConfig {
+        winning_team: winning,
+        budget_usdc: budget,
+        dry_run: body.dry_run.unwrap_or(true),
+        grid_levels: body.grid_levels.unwrap_or(4),
+        refresh_interval_secs: body.refresh_interval_secs.unwrap_or(30),
+    };
+
+    *state.sweep_config.write().unwrap() = Some(sweep_cfg);
+    *state.sweep_phase.write().unwrap() = crate::state::SweepPhase::Active;
+
+    // Start orderbook WS if not running
+    start_book_ws(&state);
+
+    // Sync balances
+    if config.has_tokens() {
+        let sync_config = config.clone();
+        let sync_state = state.clone();
+        tokio::spawn(async move {
+            if let Ok((a, b)) = crate::ctf::sync_balances(&sync_config).await {
+                let mut pos = sync_state.position.lock().unwrap();
+                pos.team_a_tokens = a;
+                pos.team_b_tokens = b;
+            }
+        });
+    }
+
+    // Spawn sweep loop
+    let cancel = tokio_util::sync::CancellationToken::new();
+    *state.sweep_cancel.write().unwrap() = Some(cancel.clone());
+
+    let sweep_state = state.clone();
+    tokio::spawn(async move {
+        // Wait a moment for balance sync
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        sweep::run(sweep_state, cancel).await;
+    });
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn post_sweep_stop(
+    State(state): State<S>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let phase = *state.sweep_phase.read().unwrap();
+    if phase != crate::state::SweepPhase::Active {
+        return Err((StatusCode::CONFLICT, "sweep not active".into()));
+    }
+
+    if let Some(cancel) = state.sweep_cancel.read().unwrap().clone() {
+        cancel.cancel();
+    }
+    *state.sweep_cancel.write().unwrap() = None;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn get_sweep_balances(State(state): State<S>) -> Json<serde_json::Value> {
+    let config = state.config.read().unwrap().clone();
+    let eoa_address = state.auth.read().unwrap().as_ref().map(|a| a.address().to_string());
+    let proxy_address = if config.polymarket_address.is_empty() { None } else { Some(config.polymarket_address.clone()) };
+
+    // Fetch balances sequentially (each is a quick RPC call, avoids Send issues)
+    let eoa_usdc = match &eoa_address {
+        Some(addr) => ctf::usdc_balance(&config.polygon_rpc, addr).await.ok(),
+        None => None,
+    };
+    let proxy_usdc = match &proxy_address {
+        Some(addr) => ctf::usdc_balance(&config.polygon_rpc, addr).await.ok(),
+        None => None,
+    };
+    let (token_a, token_b) = if config.has_tokens() {
+        let a = ctf::balance_of(&config, &config.team_a_token_id).await.ok();
+        let b = ctf::balance_of(&config, &config.team_b_token_id).await.ok();
+        (a, b)
+    } else {
+        (None, None)
+    };
+
+    Json(serde_json::json!({
+        "eoa_address": eoa_address,
+        "proxy_address": proxy_address,
+        "eoa_usdc": eoa_usdc.map(|v| v.to_string()),
+        "proxy_usdc": proxy_usdc.map(|v| v.to_string()),
+        "team_a_name": config.team_a_name,
+        "team_b_name": config.team_b_name,
+        "team_a_tokens": token_a.map(|v| v.to_string()),
+        "team_b_tokens": token_b.map(|v| v.to_string()),
+        "sig_type": config.signature_type,
+    }))
+}
+
+#[derive(Deserialize)]
+struct BuilderKeysRequest {
+    builder_api_key: Option<String>,
+    builder_api_secret: Option<String>,
+    builder_api_passphrase: Option<String>,
+}
+
+async fn post_sweep_builder(
+    State(state): State<S>,
+    Json(body): Json<BuilderKeysRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut config = state.config.write().unwrap();
+    if let Some(v) = body.builder_api_key { config.builder_api_key = v; }
+    if let Some(v) = body.builder_api_secret { config.builder_api_secret = v; }
+    if let Some(v) = body.builder_api_passphrase { config.builder_api_passphrase = v; }
+    config.persist();
+    state.push_event("sweep", "builder API keys updated");
+    Ok(Json(serde_json::json!({"ok": true})))
 }

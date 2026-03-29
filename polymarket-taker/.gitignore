@@ -1,5 +1,7 @@
 /target
 .env
+sweep.env
+sweep_settings.json
 *.pem
 *.key
 *.log

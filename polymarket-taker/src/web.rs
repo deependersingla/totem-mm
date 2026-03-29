@@ -1131,3 +1131,665 @@ setInterval(pollLatency, 3000);
 </body>
 </html>
 "##;
+
+pub const SWEEP_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TOTEM — Sweep</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;min-height:100vh;padding:12px}
+h1{font-size:20px;color:#58a6ff;margin-bottom:4px}
+h2{font-size:13px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:960px;margin:0 auto}
+.full{grid-column:1/-1}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
+.row{display:flex;gap:8px;align-items:center}
+.row>*{flex:1}
+input,select{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:6px 10px;border-radius:4px;font-size:13px;width:100%}
+input:focus{outline:none;border-color:#58a6ff}
+label{font-size:12px;color:#8b949e;display:block;margin-bottom:3px;margin-top:8px}
+button{padding:8px 14px;border:none;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s}
+button:hover{opacity:.85}
+button:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:#238636;color:#fff}
+.btn-warn{background:#d29922;color:#000}
+.btn-danger{background:#da3633;color:#fff}
+.btn-sm{padding:5px 10px;font-size:12px}
+.badge{padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:uppercase;display:inline-block}
+.badge-idle{background:#30363d;color:#8b949e}
+.badge-active{background:#238636;color:#fff}
+.badge-dry{background:#6e40c9;color:#fff;margin-left:6px}
+.stat{margin:4px 0}
+.stat span{color:#8b949e;font-size:12px}
+.stat strong{color:#e1e4e8;font-size:14px;margin-left:4px}
+.stat.good strong{color:#3fb950}
+.stat.warn strong{color:#d29922}
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace}
+th{color:#8b949e;font-weight:600;text-align:left;padding:4px 6px;border-bottom:1px solid #30363d;font-size:11px}
+td{padding:4px 6px;border-bottom:1px solid #21262d}
+.ask{color:#da3633}
+.bid{color:#3fb950}
+.events{max-height:240px;overflow-y:auto;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace}
+.ev{padding:3px 0;border-bottom:1px solid #21262d;display:flex;gap:8px}
+.ev-ts{color:#484f58;min-width:55px}
+.ev-kind{color:#58a6ff;min-width:50px;font-weight:600}
+.ev-detail{color:#c9d1d9;word-break:break-all}
+.tab-bar{display:flex;gap:4px;margin-bottom:12px}
+.tab{padding:6px 16px;border-radius:6px 6px 0 0;background:#21262d;color:#8b949e;cursor:pointer;font-size:13px;font-weight:600;border:none}
+.tab.active{background:#161b22;color:#58a6ff;border:1px solid #30363d;border-bottom-color:#161b22}
+.wallet-box{display:flex;gap:12px;align-items:center;padding:8px;background:#0d1117;border-radius:6px;margin:4px 0}
+.wallet-box .addr{font-family:monospace;font-size:11px;color:#8b949e;flex:1;overflow:hidden;text-overflow:ellipsis}
+.wallet-box .bal{font-size:14px;font-weight:600;color:#e1e4e8}
+.wallet-box .label{font-size:11px;color:#58a6ff;font-weight:600;min-width:50px}
+.nav{text-align:right;margin-bottom:8px}
+.nav a{color:#58a6ff;font-size:12px;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="nav"><a href="/">← Main Dashboard</a></div>
+<div class="grid">
+
+<!-- Header -->
+<div class="card full" style="display:flex;justify-content:space-between;align-items:center">
+  <div>
+    <h1>TOTEM SWEEP</h1>
+    <span style="color:#8b949e;font-size:12px">Endgame position resolution</span>
+  </div>
+  <div>
+    <span id="sweep-badge" class="badge badge-idle">IDLE</span>
+    <span id="dry-badge" class="badge badge-dry" style="display:none">DRY RUN</span>
+  </div>
+</div>
+
+<!-- Wallet Setup -->
+<div class="card">
+  <h2>Wallet</h2>
+  <div id="wallet-locked" style="display:none">
+    <div class="wallet-box">
+      <span class="label">EOA</span>
+      <span class="addr" id="wallet-eoa-display">—</span>
+      <span style="font-size:11px;color:#3fb950;font-weight:600">OK</span>
+    </div>
+    <div class="wallet-box">
+      <span class="label">Proxy</span>
+      <span class="addr" id="wallet-proxy-display">—</span>
+      <span style="font-size:11px;color:#8b949e" id="wallet-sig-display">sig=1</span>
+    </div>
+    <button class="btn-sm btn-warn" style="margin-top:6px" onclick="unlockWallet()">Edit Wallet</button>
+  </div>
+  <div id="wallet-form">
+    <label>Private Key (EOA) — proxy address is auto-derived</label>
+    <input type="password" id="pk" placeholder="0x...">
+    <div class="row" style="margin-top:8px">
+      <select id="sig-type">
+        <option value="0">EOA only (0)</option>
+        <option value="1">POLY_PROXY (1)</option>
+        <option value="2" selected>GNOSIS_SAFE (2)</option>
+      </select>
+      <button class="btn-primary btn-sm" onclick="saveWallet()">Save &amp; Derive</button>
+    </div>
+    <div id="wallet-status" style="font-size:11px;color:#8b949e;margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- Market Setup -->
+<div class="card">
+  <h2>Market</h2>
+  <label>Polymarket Slug</label>
+  <div class="row">
+    <input type="text" id="slug" placeholder="e.g. crint-ind-wst-2026-03-29">
+    <button class="btn-primary btn-sm" onclick="fetchMarket()">Fetch</button>
+  </div>
+  <div id="market-info" style="font-size:12px;color:#8b949e;margin-top:8px"></div>
+</div>
+
+<!-- Live Balances -->
+<div class="card full">
+  <h2>Balances <span style="font-size:10px;color:#484f58">(auto-refresh 10s)</span></h2>
+  <div class="wallet-box">
+    <span class="label">EOA</span>
+    <span class="addr" id="eoa-addr">—</span>
+    <span class="bal" id="eoa-usdc">—</span>
+    <span style="font-size:11px;color:#8b949e">USDC</span>
+  </div>
+  <div class="wallet-box">
+    <span class="label">Proxy</span>
+    <span class="addr" id="proxy-addr-display">—</span>
+    <span class="bal" id="proxy-usdc">—</span>
+    <span style="font-size:11px;color:#8b949e">USDC</span>
+  </div>
+  <div style="margin-top:8px;font-size:11px;color:#58a6ff;font-weight:600">Tokens in EOA <span style="color:#484f58;font-weight:400">(after split, before move)</span></div>
+  <div style="display:flex;gap:12px">
+    <div class="wallet-box" style="flex:1">
+      <span class="label" id="token-a-label">Team A</span>
+      <span class="bal" id="eoa-token-a">—</span>
+    </div>
+    <div class="wallet-box" style="flex:1">
+      <span class="label" id="token-b-label">Team B</span>
+      <span class="bal" id="eoa-token-b">—</span>
+    </div>
+  </div>
+  <div style="margin-top:4px;font-size:11px;color:#58a6ff;font-weight:600">Tokens in Proxy <span style="color:#484f58;font-weight:400">(available for CLOB trading)</span></div>
+  <div style="display:flex;gap:12px">
+    <div class="wallet-box" style="flex:1">
+      <span class="label" id="token-a-label-p">Team A</span>
+      <span class="bal" id="proxy-token-a">—</span>
+    </div>
+    <div class="wallet-box" style="flex:1">
+      <span class="label" id="token-b-label-p">Team B</span>
+      <span class="bal" id="proxy-token-b">—</span>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+    <span id="tick-display" style="font-size:11px;color:#484f58"></span>
+    <button class="btn-sm btn-primary" style="padding:2px 8px;font-size:10px" onclick="refreshTick()">Refresh Tick</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="btn-sm btn-primary" onclick="moveTokens('to_proxy')">Tokens → Proxy</button>
+    <button class="btn-sm btn-primary" onclick="moveTokens('to_eoa')">Tokens → EOA</button>
+    <button class="btn-sm btn-primary" onclick="moveUsdc('to_proxy')">USDC → Proxy</button>
+    <button class="btn-sm btn-primary" onclick="moveUsdc('to_eoa')">USDC → EOA</button>
+  </div>
+</div>
+
+<!-- Split Position -->
+<div class="card">
+  <h2>Split Position</h2>
+  <label>Amount USDC (= YES + NO tokens)</label>
+  <div class="row">
+    <input type="number" id="split-amount" placeholder="1000" value="100">
+    <button class="btn-primary btn-sm" onclick="doSplit()">Split</button>
+  </div>
+  <div id="split-status" style="font-size:11px;color:#8b949e;margin-top:6px"></div>
+</div>
+
+<!-- Builder Keys -->
+<div class="card">
+  <h2>Builder Keys <span style="font-size:10px;color:#484f58">(sweep only)</span></h2>
+  <div id="builder-locked" style="display:none">
+    <div class="wallet-box">
+      <span class="label">Key</span>
+      <span class="addr" id="builder-key-display">—</span>
+      <span style="font-size:11px;color:#3fb950;font-weight:600">SET</span>
+    </div>
+    <button class="btn-sm btn-warn" style="margin-top:6px" onclick="unlockBuilder()">Edit Builder Keys</button>
+  </div>
+  <div id="builder-form">
+    <label>Builder API Key</label>
+    <input type="password" id="builder-key" placeholder="from polymarket.com/settings?tab=builder">
+    <label>Builder Secret</label>
+    <input type="password" id="builder-secret" placeholder="secret">
+    <label>Builder Passphrase</label>
+    <input type="password" id="builder-pass" placeholder="passphrase">
+    <button class="btn-primary btn-sm" style="margin-top:8px" onclick="saveBuilder()">Save Builder Keys</button>
+    <div id="builder-status" style="font-size:11px;color:#8b949e;margin-top:4px"></div>
+  </div>
+</div>
+
+<!-- Order Book (5 levels) -->
+<div class="card full">
+  <h2>Order Book <span style="font-size:10px;color:#484f58">(5 levels, 500ms refresh)</span></h2>
+  <div class="row" style="gap:16px">
+    <div style="flex:1">
+      <div style="font-size:12px;font-weight:600;color:#58a6ff;margin-bottom:4px" id="book-a-title">Team A</div>
+      <table>
+        <thead><tr><th>Bid Sz</th><th>Bid</th><th>Ask</th><th>Ask Sz</th></tr></thead>
+        <tbody id="book-a-body"></tbody>
+      </table>
+    </div>
+    <div style="flex:1">
+      <div style="font-size:12px;font-weight:600;color:#58a6ff;margin-bottom:4px" id="book-b-title">Team B</div>
+      <table>
+        <thead><tr><th>Bid Sz</th><th>Bid</th><th>Ask</th><th>Ask Sz</th></tr></thead>
+        <tbody id="book-b-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Manual Trade -->
+<div class="card full">
+  <h2>Trade <span style="font-size:10px;color:#484f58">(GTC limit orders)</span></h2>
+  <div class="row" style="align-items:end">
+    <div>
+      <label>Token</label>
+      <select id="trade-team">
+        <option value="A" id="trade-team-a">Team A</option>
+        <option value="B" id="trade-team-b">Team B</option>
+      </select>
+    </div>
+    <div>
+      <label>Side</label>
+      <select id="trade-side">
+        <option value="BUY">BUY</option>
+        <option value="SELL">SELL</option>
+      </select>
+    </div>
+    <div>
+      <label>Price</label>
+      <input type="text" id="trade-price" placeholder="0.55">
+    </div>
+    <div>
+      <label>Size (tokens)</label>
+      <input type="number" id="trade-size" placeholder="100">
+    </div>
+    <div>
+      <button class="btn-primary" onclick="placeTrade()">Place Order</button>
+    </div>
+  </div>
+  <div id="trade-msg" style="font-size:12px;margin-top:6px;color:#8b949e"></div>
+</div>
+
+<!-- Sweep Controls -->
+<div class="card full">
+  <h2>Sweep Controls</h2>
+  <div class="row" style="align-items:end">
+    <div>
+      <label>Winning Team</label>
+      <select id="sweep-winner">
+        <option value="A" id="winner-opt-a">Team A</option>
+        <option value="B" id="winner-opt-b">Team B</option>
+      </select>
+    </div>
+    <div>
+      <label>Budget (USDC)</label>
+      <input type="number" id="sweep-budget" value="50" placeholder="50">
+    </div>
+    <div>
+      <label>Dry Run</label>
+      <select id="sweep-dry">
+        <option value="true" selected>Yes (safe)</option>
+        <option value="false">No (LIVE)</option>
+      </select>
+    </div>
+    <div>
+      <label style="display:flex;align-items:center;gap:4px;margin-top:0">
+        <input type="checkbox" id="sweep-absolute" style="width:auto">
+        <span>Absolute (0.995-0.999)</span>
+      </label>
+      <div style="font-size:10px;color:#484f58">Default: book-relative (2nd level + 4 ticks)</div>
+    </div>
+  </div>
+  <div id="sweep-preview" style="font-size:11px;color:#8b949e;margin-top:8px;font-family:monospace"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="btn-primary" id="btn-sweep-start" onclick="startSweep()">Start Sweep</button>
+    <button class="btn-danger" id="btn-sweep-stop" onclick="stopSweep()" disabled>Stop Sweep</button>
+    <button class="btn-danger" onclick="cancelAll()" style="background:#8b2500">Cancel ALL Orders</button>
+  </div>
+  <div id="sweep-msg" style="font-size:12px;color:#d29922;margin-top:8px"></div>
+  <div id="sweep-orders-info" style="font-size:11px;color:#8b949e;margin-top:4px"></div>
+</div>
+
+<!-- Events Log -->
+<div class="card full">
+  <h2>Events</h2>
+  <div class="events" id="events"></div>
+</div>
+
+</div><!-- /grid -->
+
+<script>
+const API = '';
+
+async function api(path, opts) {
+  try {
+    const r = await fetch(API + path, opts);
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch { return r.ok ? null : {ok:false, error: text}; }
+  } catch(e) {
+    console.error(path, e);
+    return {ok:false, error: e.message};
+  }
+}
+
+async function saveWallet() {
+  const pk = document.getElementById('pk').value.trim();
+  if (!pk) {
+    document.getElementById('wallet-status').textContent = 'Private key required';
+    document.getElementById('wallet-status').style.color = '#da3633';
+    return;
+  }
+  const sig = parseInt(document.getElementById('sig-type').value);
+  document.getElementById('wallet-status').textContent = 'Deriving addresses + API key...';
+  const r = await api('/api/wallet', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({private_key: pk, signature_type: sig})
+  });
+  if (r?.ok) {
+    document.getElementById('wallet-status').textContent = 'OK';
+    lockWallet(r.eoa_address, r.proxy_address, sig);
+  } else {
+    document.getElementById('wallet-status').textContent = r?.error || 'Error';
+    document.getElementById('wallet-status').style.color = '#da3633';
+  }
+  pollBalances();
+}
+
+function lockWallet(eoa, proxy, sig) {
+  document.getElementById('wallet-eoa-display').textContent = eoa || '(not derived)';
+  document.getElementById('wallet-proxy-display').textContent = proxy || '—';
+  document.getElementById('wallet-sig-display').textContent = 'sig=' + sig;
+  document.getElementById('wallet-locked').style.display = '';
+  document.getElementById('wallet-form').style.display = 'none';
+}
+
+function unlockWallet() {
+  document.getElementById('wallet-locked').style.display = 'none';
+  document.getElementById('wallet-form').style.display = '';
+  document.getElementById('wallet-status').textContent = '';
+}
+
+async function fetchMarket() {
+  const slug = document.getElementById('slug').value.trim();
+  if (!slug) return;
+  document.getElementById('market-info').textContent = 'Fetching...';
+  const r = await api('/api/fetch-market', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({slug})
+  });
+  if (r?.ok) {
+    document.getElementById('market-info').innerHTML =
+      `<strong>${r.team_a_name}</strong> vs <strong>${r.team_b_name}</strong><br>` +
+      `tick=${r.tick_size} min_size=${r.order_min_size} neg_risk=${r.neg_risk}` +
+      (r.restricted ? '<br><span style="color:#da3633">RESTRICTED MARKET</span>' : '');
+    document.getElementById('winner-opt-a').textContent = r.team_a_name;
+    document.getElementById('winner-opt-b').textContent = r.team_b_name;
+    document.getElementById('book-a-title').textContent = r.team_a_name;
+    document.getElementById('book-b-title').textContent = r.team_b_name;
+    document.getElementById('token-a-label').textContent = r.team_a_name;
+    document.getElementById('token-b-label').textContent = r.team_b_name;
+  } else {
+    document.getElementById('market-info').textContent = 'Error: ' + JSON.stringify(r);
+  }
+}
+
+async function pollBalances() {
+  const r = await api('/api/sweep/balances');
+  if (!r) return;
+  document.getElementById('eoa-addr').textContent = r.eoa_address || '—';
+  document.getElementById('proxy-addr-display').textContent = r.proxy_address || '—';
+  document.getElementById('eoa-usdc').textContent = r.eoa_usdc || '—';
+  document.getElementById('proxy-usdc').textContent = r.proxy_usdc || '—';
+  // EOA tokens (after split, before move)
+  document.getElementById('eoa-token-a').textContent = r.eoa_team_a_tokens || '0';
+  document.getElementById('eoa-token-b').textContent = r.eoa_team_b_tokens || '0';
+  // Proxy tokens (available for CLOB)
+  document.getElementById('proxy-token-a').textContent = r.proxy_team_a_tokens || '0';
+  document.getElementById('proxy-token-b').textContent = r.proxy_team_b_tokens || '0';
+  if (r.team_a_name) {
+    const setLabel = (id, name) => { const el = document.getElementById(id); if(el) el.textContent = name; };
+    setLabel('token-a-label', r.team_a_name);
+    setLabel('token-b-label', r.team_b_name);
+    setLabel('token-a-label-p', r.team_a_name);
+    setLabel('token-b-label-p', r.team_b_name);
+    setLabel('winner-opt-a', r.team_a_name);
+    setLabel('winner-opt-b', r.team_b_name);
+  }
+  if (r.tick_size) {
+    document.getElementById('tick-display').textContent = 'Live tick size: ' + r.tick_size;
+  }
+}
+
+async function pollBook() {
+  const r = await api('/api/book');
+  if (!r) return;
+  const render = (bids, asks, tbodyId) => {
+    const body = document.getElementById(tbodyId);
+    const rows = [];
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      const b = bids[i];
+      const a = asks[i];
+      rows.push(`<tr>
+        <td class="bid">${b ? parseFloat(b.size).toFixed(0) : ''}</td>
+        <td class="bid">${b ? b.price : ''}</td>
+        <td class="ask">${a ? a.price : ''}</td>
+        <td class="ask">${a ? parseFloat(a.size).toFixed(0) : ''}</td>
+      </tr>`);
+    }
+    body.innerHTML = rows.join('');
+  };
+  render(r.team_a_bids || [], r.team_a_asks || [], 'book-a-body');
+  render(r.team_b_bids || [], r.team_b_asks || [], 'book-b-body');
+  if (r.team_a_name) {
+    document.getElementById('book-a-title').textContent = r.team_a_name;
+    document.getElementById('book-b-title').textContent = r.team_b_name;
+  }
+}
+
+async function pollSweepStatus() {
+  const r = await api('/api/sweep/status');
+  if (!r) return;
+  const badge = document.getElementById('sweep-badge');
+  const dryBadge = document.getElementById('dry-badge');
+  const btnStart = document.getElementById('btn-sweep-start');
+  const btnStop = document.getElementById('btn-sweep-stop');
+  const info = document.getElementById('sweep-orders-info');
+  if (r.phase === 'active') {
+    badge.className = 'badge badge-active';
+    badge.textContent = 'ACTIVE';
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    dryBadge.style.display = r.dry_run ? '' : 'none';
+    info.textContent = `Resting orders: ${r.resting_orders} | Budget: $${r.budget}`;
+  } else {
+    badge.className = 'badge badge-idle';
+    badge.textContent = 'IDLE';
+    dryBadge.style.display = 'none';
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    info.textContent = '';
+  }
+}
+
+async function pollEvents() {
+  const r = await api('/api/events');
+  if (!r || !Array.isArray(r)) return;
+  const el = document.getElementById('events');
+  el.innerHTML = r.slice(-50).reverse().map(e =>
+    `<div class="ev"><span class="ev-ts">${e.ts}</span><span class="ev-kind">${e.kind}</span><span class="ev-detail">${e.detail}</span></div>`
+  ).join('');
+}
+
+async function startSweep() {
+  const msg = document.getElementById('sweep-msg');
+  const dry = document.getElementById('sweep-dry').value === 'true';
+  const absolute = document.getElementById('sweep-absolute').checked;
+  if (!dry && !confirm('LIVE MODE — real money will be used. Continue?')) return;
+  msg.textContent = 'Placing 10 GTC orders...';
+  msg.style.color = '#8b949e';
+  const r = await api('/api/sweep/start', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      winning_team: document.getElementById('sweep-winner').value,
+      budget_usdc: document.getElementById('sweep-budget').value,
+      dry_run: dry,
+      absolute: absolute,
+    })
+  });
+  if (r?.ok) {
+    const info = `${r.mode} | ${r.orders} orders` + (r.batch_ms ? ` | ${r.batch_ms}ms` : '');
+    msg.textContent = 'Sweep placed: ' + info;
+    msg.style.color = '#3fb950';
+    if (r.buy_prices) {
+      document.getElementById('sweep-preview').textContent =
+        'BUY @ [' + r.buy_prices.join(', ') + '] | SELL @ [' + r.sell_prices.join(', ') + ']';
+    }
+  } else {
+    msg.textContent = r?.error || JSON.stringify(r) || 'Error';
+    msg.style.color = '#da3633';
+  }
+}
+
+async function stopSweep() {
+  const r = await api('/api/sweep/stop', {method:'POST'});
+  document.getElementById('sweep-msg').textContent = r?.ok ? 'Sweep stopped' : 'Error';
+}
+
+async function cancelAll() {
+  if (!confirm('Cancel ALL open orders?')) return;
+  await api('/api/cancel-all', {method:'POST'});
+}
+
+async function placeTrade() {
+  const msg = document.getElementById('trade-msg');
+  const team = document.getElementById('trade-team').value;
+  const side = document.getElementById('trade-side').value;
+  const price = document.getElementById('trade-price').value.trim();
+  const size = document.getElementById('trade-size').value.trim();
+  if (!price || !size) { msg.textContent = 'Price and size required'; msg.style.color = '#da3633'; return; }
+  msg.textContent = 'Placing...'; msg.style.color = '#8b949e';
+  const r = await api('/api/trade', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({team, side, price, size})
+  });
+  if (r?.ok) {
+    msg.textContent = `${side} placed: ${r.order_id} (${r.latency_ms}ms)`;
+    msg.style.color = '#3fb950';
+  } else {
+    msg.textContent = r?.error || JSON.stringify(r) || 'Error';
+    msg.style.color = '#da3633';
+  }
+}
+
+async function refreshTick() {
+  const r = await api('/api/refresh-tick', {method:'POST'});
+  if (r?.ok) {
+    document.getElementById('tick-display').textContent = 'Live tick: ' + r.tick_size + (r.changed ? ' (CHANGED!)' : '');
+    document.getElementById('tick-display').style.color = r.changed ? '#d29922' : '#484f58';
+  }
+}
+
+async function moveTokens(dir) {
+  const r = await api('/api/move-tokens', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({direction: dir})
+  });
+  if (r?.ok) pollBalances();
+  else alert('Move failed: ' + JSON.stringify(r));
+}
+
+async function moveUsdc(dir) {
+  const amt = prompt('Amount USDC to move:');
+  if (!amt) return;
+  const r = await api('/api/move-usdc', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({amount_usdc: parseInt(amt), direction: dir})
+  });
+  if (r?.ok) pollBalances();
+  else alert('Move failed: ' + JSON.stringify(r));
+}
+
+async function doSplit() {
+  const amt = parseInt(document.getElementById('split-amount').value);
+  if (!amt) return;
+  document.getElementById('split-status').textContent = 'Splitting... (on-chain tx, may take 30s)';
+  const r = await api('/api/ctf-split', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({amount_usdc: amt})
+  });
+  document.getElementById('split-status').textContent = r?.ok ? 'Split done! tx=' + r.tx_hash : 'Error: ' + JSON.stringify(r);
+  if (r?.ok) pollBalances();
+}
+
+async function saveBuilder() {
+  const key = document.getElementById('builder-key').value.trim();
+  const secret = document.getElementById('builder-secret').value.trim();
+  const pass = document.getElementById('builder-pass').value.trim();
+  if (!key || !secret || !pass) {
+    document.getElementById('builder-status').textContent = 'All 3 fields required';
+    document.getElementById('builder-status').style.color = '#da3633';
+    return;
+  }
+  const r = await api('/api/sweep/builder', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      builder_api_key: key,
+      builder_api_secret: secret,
+      builder_api_passphrase: pass,
+    })
+  });
+  if (r?.ok) {
+    document.getElementById('builder-status').textContent = 'Builder keys saved';
+    document.getElementById('builder-status').style.color = '#3fb950';
+    lockBuilder(key);
+  } else {
+    document.getElementById('builder-status').textContent = r?.error || 'Error';
+    document.getElementById('builder-status').style.color = '#da3633';
+  }
+}
+
+function lockBuilder(keyOrMasked) {
+  const masked = keyOrMasked.length > 12 ? keyOrMasked.slice(0,8) + '...' + keyOrMasked.slice(-4) : keyOrMasked;
+  document.getElementById('builder-key-display').textContent = masked;
+  document.getElementById('builder-locked').style.display = '';
+  document.getElementById('builder-form').style.display = 'none';
+}
+
+function unlockBuilder() {
+  // Don't clear existing values — they're still in the inputs from last save
+  document.getElementById('builder-locked').style.display = 'none';
+  document.getElementById('builder-form').style.display = '';
+  document.getElementById('builder-status').textContent = '';
+}
+
+// Load saved config on page load
+async function loadConfig() {
+  const r = await api('/api/config');
+  if (!r) return;
+  if (r.polymarket_address) document.getElementById('proxy-addr').value = r.polymarket_address;
+  if (r.signature_type !== undefined) document.getElementById('sig-type').value = r.signature_type;
+  if (r.market_slug) document.getElementById('slug').value = r.market_slug;
+
+  // Set team names everywhere
+  function setTeamNames(a, b) {
+    const set = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+    set('winner-opt-a', a); set('winner-opt-b', b);
+    set('book-a-title', a); set('book-b-title', b);
+    set('token-a-label', a); set('token-b-label', b);
+    set('token-a-label-p', a); set('token-b-label-p', b);
+    set('trade-team-a', a); set('trade-team-b', b);
+  }
+  if (r.team_a_name && r.team_a_name !== 'TEAM_A') {
+    setTeamNames(r.team_a_name, r.team_b_name);
+    document.getElementById('market-info').innerHTML =
+      `<strong>${r.team_a_name}</strong> vs <strong>${r.team_b_name}</strong>`;
+  }
+
+  // Lock wallet if already configured
+  if (r.wallet_set || r.private_key_set) {
+    lockWallet(r.eoa_address || '', r.polymarket_address || '', r.signature_type || 1);
+  }
+
+  // Lock builder keys if already set
+  if (r.builder_key_set && r.builder_api_key_masked) {
+    lockBuilder(r.builder_api_key_masked);
+  }
+}
+
+loadConfig();
+pollBalances();
+pollBook();
+pollSweepStatus();
+pollEvents();
+
+setInterval(pollBalances, 10000);
+setInterval(pollBook, 500);
+setInterval(pollSweepStatus, 2000);
+setInterval(pollEvents, 1500);
+</script>
+</body>
+</html>
+"##;

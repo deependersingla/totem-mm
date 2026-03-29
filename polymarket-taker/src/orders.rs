@@ -444,6 +444,65 @@ pub async fn post_fak_orders_batch(
     Ok(results)
 }
 
+/// Post multiple GTC orders in a single HTTP call (POST /orders). Max 15 per batch.
+pub async fn post_gtc_orders_batch(
+    config: &Config,
+    auth: &ClobAuth,
+    orders: &[(FakOrder, &str)],
+) -> Result<Vec<BatchOrderResult>> {
+    let mut items = Vec::with_capacity(orders.len());
+    for (order, tag) in orders {
+        tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
+            price = %order.price, size = %order.size, "batch GTC order");
+        let signed = build_signed_order(config, auth, order)?;
+        items.push(BatchOrderItem {
+            order: PostOrderBody::from(&signed),
+            owner: auth.api_key.clone(),
+            order_type: "GTC".to_string(),
+            tick_size: config.tick_size.clone(),
+            defer_exec: false,
+        });
+    }
+    let body_json = serde_json::to_string(&items)?;
+    let path = "/orders";
+    let headers = auth.l2_headers("POST", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth
+        .http_client()
+        .post(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json.clone())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "batch GTC HTTP error");
+        anyhow::bail!("batch GTC HTTP {status}: {resp_body}");
+    }
+
+    let results: Vec<BatchOrderResult> = serde_json::from_str(&resp_body).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, body = resp_body, "failed to parse batch GTC response");
+        Vec::new()
+    });
+
+    for (i, r) in results.iter().enumerate() {
+        let tag = orders.get(i).map(|(_, t)| *t).unwrap_or("?");
+        let err = r.error_msg.as_deref().unwrap_or("");
+        if !err.is_empty() {
+            tracing::warn!(tag, error = err, "batch GTC rejected");
+        } else if let Some(oid) = r.order_id.as_deref().filter(|s| !s.is_empty()) {
+            tracing::info!(tag, order_id = oid, status = ?r.status, "batch GTC accepted");
+        }
+    }
+
+    Ok(results)
+}
+
 pub async fn post_limit_order(
     config: &Config,
     auth: &ClobAuth,
