@@ -41,6 +41,8 @@ fn test_config(max_trade_usdc: &str, safe_percentage: u64) -> Config {
         edge_wicket: 2.0,
         edge_boundary_4: 1.0,
         edge_boundary_6: 1.0,
+        fill_ws_timeout_ms: 5000,
+        maker_config: crate::config::MakerConfig::default(),
     }
 }
 

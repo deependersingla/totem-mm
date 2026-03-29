@@ -213,7 +213,14 @@ pub struct PostOrderResponse {
     pub status: Option<String>,
 }
 
-fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
+/// Internal helper that builds and signs a CLOB order with a given expiration.
+/// `expiration` should be "0" for GTC/FAK or a unix timestamp string for GTD.
+fn build_signed_order_inner(
+    config: &Config,
+    auth: &ClobAuth,
+    order: &FakOrder,
+    expiration: &str,
+) -> Result<ClobOrder> {
     // Salt must fit in IEEE 754 double precision (backend parses as float).
     // Mask to <= 2^53 - 1 to avoid precision loss.
     let salt: u64 = rand::thread_rng().gen::<u64>() & ((1u64 << 53) - 1);
@@ -248,7 +255,7 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
         maker_amount,
         taker_amount,
         side: side_to_u8(order.side),
-        expiration: "0".to_string(),
+        expiration: expiration.to_string(),
         nonce: "0".to_string(),
         fee_rate_bps: fee_rate_bps.to_string(),
         signature_type: config.signature_type,
@@ -279,6 +286,25 @@ fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Res
     clob_order.signature = signature;
 
     Ok(clob_order)
+}
+
+fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
+    build_signed_order_inner(config, auth, order, "0")
+}
+
+/// Build a signed order with a GTD expiration (unix timestamp = now + expiry_secs).
+fn build_signed_order_with_expiry(
+    config: &Config,
+    auth: &ClobAuth,
+    order: &FakOrder,
+    expiry_secs: u64,
+) -> Result<ClobOrder> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expiration = (now_unix + expiry_secs).to_string();
+    build_signed_order_inner(config, auth, order, &expiration)
 }
 
 async fn post_order(
@@ -609,4 +635,106 @@ pub async fn get_user_orders(
     let orders: Vec<serde_json::Value> = serde_json::from_str(&body)
         .unwrap_or_default();
     Ok(orders)
+}
+
+/// Post a GTD (Good-Till-Date) order with an explicit expiration.
+pub async fn post_gtd_order(
+    config: &Config,
+    auth: &ClobAuth,
+    order: &FakOrder,
+    expiry_secs: u64,
+    tag: &str,
+) -> Result<PostOrderResponse> {
+    tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
+        price = %order.price, size = %order.size, expiry_secs, "posting GTD order");
+
+    let signed = build_signed_order_with_expiry(config, auth, order, expiry_secs)?;
+    post_order(config, auth, &signed, "GTD", tag).await
+}
+
+/// Response from DELETE /orders or DELETE /cancel-market-orders.
+#[derive(Debug, Deserialize)]
+pub struct CancelResponse {
+    pub canceled: Option<Vec<String>>,
+    pub not_canceled: Option<serde_json::Value>,
+}
+
+/// Cancel a batch of orders by ID.  DELETE /orders with body as JSON array.
+pub async fn cancel_orders_batch(
+    auth: &ClobAuth,
+    order_ids: &[String],
+) -> Result<CancelResponse> {
+    let body_json = serde_json::to_string(order_ids)?;
+    let path = "/orders";
+    let headers = auth.l2_headers("DELETE", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth
+        .http_client()
+        .delete(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "cancel_orders_batch HTTP error");
+        anyhow::bail!("cancel_orders_batch failed: {status} {resp_body}");
+    }
+
+    let result: CancelResponse = serde_json::from_str(&resp_body).unwrap_or(CancelResponse {
+        canceled: None,
+        not_canceled: Some(serde_json::Value::String(resp_body)),
+    });
+
+    tracing::info!(canceled = ?result.canceled, "cancel_orders_batch done");
+    Ok(result)
+}
+
+/// Cancel all orders for a given market/asset.  DELETE /cancel-market-orders.
+pub async fn cancel_market_orders(
+    auth: &ClobAuth,
+    condition_id: Option<&str>,
+    asset_id: Option<&str>,
+) -> Result<CancelResponse> {
+    let mut body_map = serde_json::Map::new();
+    if let Some(cid) = condition_id {
+        body_map.insert("market".to_string(), serde_json::Value::String(cid.to_string()));
+    }
+    if let Some(aid) = asset_id {
+        body_map.insert("asset_id".to_string(), serde_json::Value::String(aid.to_string()));
+    }
+    let body_json = serde_json::to_string(&body_map)?;
+    let path = "/cancel-market-orders";
+    let headers = auth.l2_headers("DELETE", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth
+        .http_client()
+        .delete(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "cancel_market_orders HTTP error");
+        anyhow::bail!("cancel_market_orders failed: {status} {resp_body}");
+    }
+
+    let result: CancelResponse = serde_json::from_str(&resp_body).unwrap_or(CancelResponse {
+        canceled: None,
+        not_canceled: Some(serde_json::Value::String(resp_body)),
+    });
+
+    tracing::info!(canceled = ?result.canceled, "cancel_market_orders done");
+    Ok(result)
 }

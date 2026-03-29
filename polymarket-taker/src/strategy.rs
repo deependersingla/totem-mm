@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rust_decimal::Decimal;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, watch};
 
 use rand::Rng;
 
@@ -25,7 +25,7 @@ fn random_tag(prefix: &str) -> String {
 pub async fn run(
     config: &Config,
     auth: &ClobAuth,
-    mut signal_rx: mpsc::Receiver<CricketSignal>,
+    mut signal_rx: broadcast::Receiver<CricketSignal>,
     book_rx: watch::Receiver<(OrderBook, OrderBook)>,
     position: Position,
     app: Arc<AppState>,
@@ -41,7 +41,7 @@ pub async fn run(
         "strategy engine started"
     );
 
-    while let Some(signal) = signal_rx.recv().await {
+    while let Ok(signal) = signal_rx.recv().await {
         let config = app.config.read().unwrap().clone();
 
         match signal {

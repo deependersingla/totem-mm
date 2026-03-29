@@ -19,10 +19,13 @@ use crate::market_ws;
 /// How often to sync on-chain token balances into the position tracker
 /// while an innings is running.
 const CHAIN_SYNC_INTERVAL_SECS: u64 = 30;
+use crate::config::MakerConfig;
+use crate::heartbeat;
+use crate::maker;
 use crate::orders;
 use crate::state::{AppState, MatchPhase};
 use crate::strategy;
-use crate::types::{CricketSignal, OrderBook, Team};
+use crate::types::{CricketSignal, FillEvent, OrderBook, Team};
 use crate::web;
 
 type S = Arc<AppState>;
@@ -94,6 +97,9 @@ pub fn build_router(state: S) -> Router {
         .route("/api/wallets", get(get_wallets))
         .route("/api/move-tokens", post(post_move_tokens))
         .route("/api/move-usdc", post(post_move_usdc))
+        .route("/api/maker/status", get(get_maker_status))
+        .route("/api/maker/config", post(post_maker_config))
+        .route("/api/latency", get(get_latency))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -784,7 +790,7 @@ async fn post_start_innings(
         None => return Err((StatusCode::INTERNAL_SERVER_ERROR, "auth not initialized".into())),
     };
 
-    let (signal_tx, signal_rx) = mpsc::channel::<CricketSignal>(64);
+    let (signal_tx, signal_rx) = tokio::sync::broadcast::channel::<CricketSignal>(64);
 
     *state.signal_tx.write().unwrap() = Some(signal_tx);
     *state.phase.write().unwrap() = MatchPhase::InningsRunning;
@@ -894,6 +900,34 @@ async fn post_start_innings(
         strategy::run(&config, &auth_snapshot, signal_rx, book_rx, st.position.clone(), st.clone()).await;
     });
 
+    // If maker is enabled, spawn maker::run with its own signal subscriber and fill channel.
+    {
+        let maker_cfg = state.maker_config.read().unwrap().clone();
+        if maker_cfg.enabled {
+            let maker_signal_rx = state.signal_tx.read().unwrap().as_ref()
+                .expect("signal_tx must be set").subscribe();
+            let (maker_fill_tx, maker_fill_rx) = mpsc::channel::<FillEvent>(64);
+            // Store the maker fill_tx so user_ws or poll can forward fills
+            *state.fill_tx.write().unwrap() = Some(maker_fill_tx);
+
+            let maker_state = state.clone();
+            let maker_cancel = cancel.clone();
+            tokio::spawn(async move {
+                maker::run(maker_state, maker_signal_rx, maker_fill_rx, maker_cancel).await;
+            });
+
+            // Also spawn heartbeat to keep GTC/GTD orders alive
+            let hb_state = state.clone();
+            let hb_cancel = cancel.clone();
+            tokio::spawn(async move {
+                heartbeat::run(hb_state, hb_cancel).await;
+            });
+
+            state.push_event("maker", "maker engine spawned");
+            tracing::info!("[MAKER] spawned maker + heartbeat tasks");
+        }
+    }
+
     let ms = state.match_state.read().unwrap();
     state.push_event("innings", &format!(
         "innings {} started — {} batting",
@@ -926,7 +960,7 @@ async fn post_stop_innings(
     // innings counter and batting team will be toggled twice (double-switch bug).
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
-        let _ = tx.send(CricketSignal::InningsOver).await;
+        let _ = tx.send(CricketSignal::InningsOver);
     }
     *state.signal_tx.write().unwrap() = None;
 
@@ -972,7 +1006,6 @@ async fn post_signal(
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
         tx.send(parsed.clone())
-            .await
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
     } else {
         return Err((StatusCode::CONFLICT, "signal channel not ready".into()));
@@ -1018,7 +1051,7 @@ async fn post_match_over(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
-        let _ = tx.send(CricketSignal::MatchOver).await;
+        let _ = tx.send(CricketSignal::MatchOver);
     }
 
     if let Some(cancel) = state.ws_cancel.read().unwrap().clone() {
@@ -1401,4 +1434,82 @@ async fn post_mega_resolve(
         "failed": failed,
         "total_conditions": condition_ids.len(),
     })))
+}
+
+// ── Maker endpoints ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct MakerStatusResponse {
+    #[serde(flatten)]
+    config: MakerConfig,
+}
+
+async fn get_maker_status(State(state): State<S>) -> Json<MakerStatusResponse> {
+    let config = state.maker_config.read().unwrap().clone();
+    Json(MakerStatusResponse { config })
+}
+
+async fn post_maker_config(
+    State(state): State<S>,
+    Json(update): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut cfg = state.maker_config.write().unwrap();
+
+    if let Some(v) = update.get("enabled").and_then(|v| v.as_bool()) {
+        cfg.enabled = v;
+    }
+    if let Some(v) = update.get("dry_run").and_then(|v| v.as_bool()) {
+        cfg.dry_run = v;
+    }
+    if let Some(v) = update.get("half_spread").and_then(|v| v.as_str()) {
+        if let Ok(d) = v.parse::<Decimal>() {
+            cfg.half_spread = d;
+        }
+    }
+    if let Some(v) = update.get("quote_size").and_then(|v| v.as_str()) {
+        if let Ok(d) = v.parse::<Decimal>() {
+            cfg.quote_size = d;
+        }
+    }
+    if let Some(v) = update.get("use_gtd").and_then(|v| v.as_bool()) {
+        cfg.use_gtd = v;
+    }
+    if let Some(v) = update.get("gtd_expiry_secs").and_then(|v| v.as_u64()) {
+        cfg.gtd_expiry_secs = v;
+    }
+    if let Some(v) = update.get("refresh_interval_secs").and_then(|v| v.as_u64()) {
+        cfg.refresh_interval_secs = v;
+    }
+    if let Some(v) = update.get("skew_kappa").and_then(|v| v.as_str()) {
+        if let Ok(d) = v.parse::<Decimal>() {
+            cfg.skew_kappa = d;
+        }
+    }
+    if let Some(v) = update.get("max_exposure").and_then(|v| v.as_str()) {
+        if let Ok(d) = v.parse::<Decimal>() {
+            cfg.max_exposure = d;
+        }
+    }
+    if let Some(v) = update.get("t1_pct").and_then(|v| v.as_f64()) {
+        cfg.t1_pct = v;
+    }
+    if let Some(v) = update.get("t2_pct").and_then(|v| v.as_f64()) {
+        cfg.t2_pct = v;
+    }
+    if let Some(v) = update.get("t3_pct").and_then(|v| v.as_f64()) {
+        cfg.t3_pct = v;
+    }
+
+    // Also persist to the main config's saved settings
+    let mut main_config = state.config.write().unwrap();
+    main_config.maker_config = cfg.clone();
+    main_config.persist();
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Latency endpoint ─────────────────────────────────────────────────────────
+
+async fn get_latency(State(state): State<S>) -> Json<crate::latency::LatencySnapshot> {
+    Json(state.latency.snapshot())
 }

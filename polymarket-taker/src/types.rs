@@ -176,3 +176,14 @@ impl OrderBook {
         self.asks.best()
     }
 }
+
+/// A fill/trade event received from the user WebSocket or REST polling.
+#[derive(Debug, Clone)]
+pub struct FillEvent {
+    pub order_id: String,
+    pub filled_size: Decimal,
+    pub avg_price: Decimal,
+    pub status: String,
+    pub asset_id: String,
+    pub side: Side,
+}

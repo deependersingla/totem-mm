@@ -9,24 +9,26 @@ and exports a multi-sheet Excel workbook.
 Usage:  python match_analytics.py
 """
 
+import os
+
 # ══════════════════════════════════════════════════════════
 # CONFIGURATION — Change these for each match
 # ══════════════════════════════════════════════════════════
 
-SLUG = "crint-nzl-zaf-2026-03-20"
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data", SLUG)
+SLUG = "crint-nzl-zaf-2026-03-25"
+DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", SLUG)
 os.makedirs(DATA_DIR, exist_ok=True)
 OUTPUT = os.path.join(DATA_DIR, f"match_analytics_{SLUG}.xlsx")
 
 TEAM_A = "New Zealand"
 TEAM_B = "South Africa"
-WINNER = "New Zealand"
+WINNER = "South Africa"
 
-MATCH_DATE = "2026-03-20"
+MATCH_DATE = "2026-03-25"
 INN1_START = "11:45"
-INN1_END   = "13:15"
-INN2_START = "13:30"
-MATCH_END  = "14:45"
+INN1_END   = "13:22"
+INN2_START = "13:32"
+MATCH_END  = "15:04"
 
 REDEMPTION_FEE = 0.0
 

@@ -1,5 +1,9 @@
 mod ctf_tests;
+mod heartbeat_tests;
+mod latency_tests;
+mod maker_tests;
 mod orders_tests;
 mod position_tests;
 mod signal_tests;
 mod strategy_tests;
+mod user_ws_tests;
