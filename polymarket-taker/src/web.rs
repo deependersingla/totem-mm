@@ -3,16 +3,16 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Totem Taker</title>
+<title>TOTEM</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;min-height:100vh;padding:16px}
-h1{font-size:20px;margin-bottom:12px;color:#58a6ff}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;min-height:100vh;padding:0;padding-bottom:70px}
+h1{font-size:20px;color:#58a6ff}
 h2{font-size:14px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:900px;margin:0 auto}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:900px;margin:0 auto;padding:16px}
 .full{grid-column:1/-1}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
-.status-bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+.status-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .badge{padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;text-transform:uppercase}
 .badge-idle{background:#30363d;color:#8b949e}
 .badge-running{background:#238636;color:#fff}
@@ -52,54 +52,67 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .book-bid{color:#3fb950}
 .book-ask{color:#f85149}
 .locked-notice{font-size:11px;color:#d29922;margin-top:4px}
+
+/* Sticky header */
+.sticky-header{position:sticky;top:0;z-index:50;background:#0f1117;border-bottom:1px solid #30363d;padding:10px 16px}
+.header-inner{max-width:900px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+
+/* Bottom tab bar */
+.bottom-bar{position:fixed;bottom:0;left:0;right:0;background:#161b22;border-top:1px solid #30363d;display:flex;justify-content:center;gap:0;padding:8px 16px;z-index:100}
+.tab-btn{flex:1;max-width:200px;padding:10px 16px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;background:transparent;color:#8b949e;transition:all 0.2s}
+.tab-btn.tab-active{background:#238636;color:#fff}
+.tab-btn:hover:not(.tab-active){background:#21262d;color:#e1e4e8}
+
+/* Signal buttons */
+.signal-btn{padding:14px 32px;border:none;border-radius:10px;font-size:18px;font-weight:700;cursor:pointer;min-width:120px;transition:all 0.15s;text-transform:uppercase;letter-spacing:1px}
+.signal-btn:disabled{opacity:0.3;cursor:not-allowed}
+.signal-btn.wicket{background:#da3633;color:#fff}
+.signal-btn.wicket:hover:not(:disabled){background:#f85149}
+.signal-btn.boundary{background:#1f6feb;color:#fff}
+.signal-btn.boundary:hover:not(:disabled){background:#388bfd}
+.signal-btn.boundary-6{background:#1158c7;color:#fff}
+.signal-btn.boundary-6:hover:not(:disabled){background:#1f6feb}
+
+/* Latency bar */
+.latency-bar{font-size:12px;color:#8b949e;font-family:'SF Mono',Monaco,Consolas,monospace;padding:8px 12px;background:#0d1117;border-radius:6px;text-align:center}
 </style>
 </head>
 <body>
 
-<div class="grid">
-
-<div class="card full">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <h1>Totem Taker</h1>
+<!-- Sticky Header -->
+<div class="sticky-header">
+  <div class="header-inner">
+    <h1>TOTEM</h1>
     <div class="status-bar">
       <span id="phaseBadge" class="badge badge-idle">IDLE</span>
       <span id="dryBadge" class="badge badge-dry" style="display:none">DRY RUN</span>
+      <span id="headerTeams" style="font-size:13px;color:#c9d1d9;font-weight:600"></span>
+      <span id="headerBatting" style="font-size:12px;color:#8b949e"></span>
+      <span id="headerInnings" style="font-size:12px;color:#8b949e"></span>
     </div>
   </div>
 </div>
 
-<!-- Position -->
-<div class="card">
-  <h2>Position</h2>
-  <div class="stat"><span id="teamALabel">TEAM_A</span> <strong id="teamATokens">0</strong></div>
-  <div class="stat"><span id="teamBLabel">TEAM_B</span> <strong id="teamBTokens">0</strong></div>
-  <div class="stat"><span>Spent</span> <strong id="spent">0</strong> / <strong id="budget">100</strong></div>
-  <div class="stat"><span>Remaining</span> <strong id="remaining">100</strong></div>
-  <div class="stat"><span>Trades</span> <strong id="trades">0</strong></div>
-  <div class="stat"><span>Live Orders</span> <strong id="liveOrders">0</strong></div>
-</div>
+<!-- Main Content -->
+<div class="grid">
 
-<!-- Book -->
-<div class="card">
-  <h2>Order Book</h2>
-  <div style="margin-bottom:8px">
-    <div style="font-size:12px;color:#8b949e" id="bookALabel">Team A</div>
-    <div class="book-row"><span class="book-bid" id="aBid">—</span><span class="book-ask" id="aAsk">—</span></div>
-  </div>
-  <div>
-    <div style="font-size:12px;color:#8b949e" id="bookBLabel">Team B</div>
-    <div class="book-row"><span class="book-bid" id="bBid">—</span><span class="book-ask" id="bAsk">—</span></div>
-  </div>
-  <div style="margin-top:10px">
-    <div class="stat"><span>Batting</span> <strong id="batting">—</strong></div>
-    <div class="stat"><span>Bowling</span> <strong id="bowling">—</strong></div>
-    <div class="stat"><span>Innings</span> <strong id="innings">1</strong></div>
-  </div>
-</div>
+<!-- ======================== SHARED SECTIONS ======================== -->
 
-<!-- Live Order Book -->
-<div class="card full">
-  <h2>Live Order Book <span id="bookUpdated" style="font-size:10px;color:#484f58;font-weight:normal;margin-left:8px"></span></h2>
+<!-- Order Book (BBO + L2 depth) -->
+<div class="card full shared-section">
+  <h2>Order Book <span id="bookUpdated" style="font-size:10px;color:#484f58;font-weight:normal;margin-left:8px"></span></h2>
+  <!-- BBO summary -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:10px">
+    <div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:4px" id="bookALabel">Team A</div>
+      <div class="book-row"><span class="book-bid" id="aBid">--</span><span class="book-ask" id="aAsk">--</span></div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:#8b949e;margin-bottom:4px" id="bookBLabel">Team B</div>
+      <div class="book-row"><span class="book-bid" id="bBid">--</span><span class="book-ask" id="bAsk">--</span></div>
+    </div>
+  </div>
+  <!-- L2 depth -->
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
     <div>
       <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600" id="bookLabelA">Team A</div>
@@ -130,176 +143,9 @@ button:disabled{opacity:.4;cursor:not-allowed}
   </div>
 </div>
 
-<!-- Setup -->
-<div class="card">
-  <h2>Match Setup</h2>
-  <div id="setupLock">
-    <div class="row" style="margin-bottom:6px">
-      <div style="flex:3"><label>Polymarket Slug</label><input id="sSlug" value="" placeholder="e.g. crint-ind-zwe-2026-02-26"></div>
-      <div style="flex:1;display:flex;align-items:flex-end"><button class="btn-primary" style="width:100%" onclick="fetchMarket()">Fetch</button></div>
-    </div>
-    <div class="row">
-      <div><label>Team A</label><input id="sTeamA" value=""></div>
-      <div><label>Team B</label><input id="sTeamB" value=""></div>
-    </div>
-    <label>Team A Token ID</label><input id="sTokenA" value="" style="font-size:10px">
-    <label>Team B Token ID</label><input id="sTokenB" value="" style="font-size:10px">
-    <label>Condition ID</label><input id="sCondition" value="" placeholder="0x..." style="font-size:10px">
-    <div class="row">
-      <div><label>First Batting</label>
-        <select id="sBatFirst"><option value="A">A</option><option value="B">B</option></select>
-      </div>
-      <div><label>Neg Risk</label>
-        <select id="sNegRisk"><option value="false">No</option><option value="true">Yes</option></select>
-      </div>
-    </div>
-    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveSetup()">Save Setup</button>
-  </div>
-  <div id="setupLockedMsg" class="locked-notice" style="display:none">Setup locked while match is running</div>
-</div>
-
-<!-- Wallet -->
-<div class="card">
-  <h2>Wallet</h2>
-  <div id="walletLock">
-    <label>MetaMask Private Key (signs everything, pays gas)</label>
-    <input id="wKey" type="password" placeholder="0x... (your MetaMask private key)">
-    <label style="color:#58a6ff">↳ EOA Address (derived)</label>
-    <input id="wEoa" readonly placeholder="set private key and save" style="font-size:10px;color:#58a6ff;cursor:default">
-    <label>Polymarket Proxy Wallet Address (holds USDC, maker of CLOB trades)</label>
-    <input id="wAddr" placeholder="0x... (your Polymarket proxy — NOT MetaMask address)">
-    <div class="row">
-      <div><label>Sig Type</label>
-        <select id="wSigType">
-          <option value="1">POLY_PROXY (1) — MetaMask + Polymarket proxy ✓</option>
-          <option value="0">EOA (0) — no proxy, direct wallet</option>
-          <option value="2">GNOSIS_SAFE (2)</option>
-        </select>
-      </div>
-    </div>
-    <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.5">
-      <b>Most users:</b> Private Key = MetaMask key · Address = Polymarket proxy (shown at polymarket.com when logged in) · Sig Type = POLY_PROXY (1)
-    </div>
-    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveWallet()">Save Wallet</button>
-    <div id="wDeriveStatus" style="margin-top:8px;font-size:12px;display:none">
-      <div style="color:#3fb950;font-weight:600">API Key derived via EIP-712 signing</div>
-      <div style="color:#8b949e;font-size:11px;margin-top:2px">Key: <span id="wDerivedKey" style="color:#58a6ff;font-family:monospace"></span></div>
-    </div>
-  </div>
-  <div id="walletLockedMsg" class="locked-notice" style="display:none">Wallet locked while match is running</div>
-  <div class="stat" style="margin-top:6px"><span>Status</span> <strong id="walletStatus">Not Set</strong></div>
-</div>
-
-<!-- Wallets & Balances -->
-<div class="card">
-  <h2>Wallets &amp; Balances <button class="btn-primary" style="font-size:11px;padding:3px 10px;float:right" onclick="refreshWallets()">Refresh</button></h2>
-  <div style="margin-bottom:8px">
-    <div style="font-size:11px;color:#8b949e;margin-bottom:4px">EOA (MetaMask — signs, pays gas)</div>
-    <div style="font-size:10px;color:#58a6ff;word-break:break-all;font-family:monospace" id="wBalEoa">—</div>
-    <div class="stat"><span>USDC (EOA)</span> <strong id="wBalEoaUsdc">—</strong></div>
-  </div>
-  <div>
-    <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Proxy (Polymarket — holds USDC, maker of trades)</div>
-    <div style="font-size:10px;color:#3fb950;word-break:break-all;font-family:monospace" id="wBalProxy">—</div>
-    <div class="stat"><span>USDC (Proxy)</span> <strong id="wBalProxyUsdc">—</strong></div>
-  </div>
-  <div id="wPositions" style="margin-top:8px;font-size:11px"></div>
-</div>
-
-<!-- Limits -->
-<div class="card">
-  <h2>Limits</h2>
-  <div class="row">
-    <div><label>Budget ($)</label><input id="lBudget" type="number" value="100"></div>
-    <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
-  </div>
-  <div class="row">
-    <div><label>Safe % (cents)</label><input id="lSafePct" type="number" value="2" min="1" max="49"></div>
-    <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
-  </div>
-  <div class="row">
-    <div><label>Fill Poll (ms)</label><input id="lPollInterval" type="number" value="500" min="100"></div>
-    <div><label>Poll Timeout (ms)</label><input id="lPollTimeout" type="number" value="5000" min="1000"></div>
-  </div>
-  <div class="row">
-    <div><label>Dry Run</label>
-      <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
-    </div>
-  </div>
-  <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
-    <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Revert Edge (profit margin on GTC limit orders)</div>
-    <div class="row">
-      <div><label>Wicket W (%)</label><input id="lEdgeW" type="number" value="2" min="0" max="50" step="0.1"></div>
-      <div><label>Boundary 4 (%)</label><input id="lEdge4" type="number" value="1" min="0" max="50" step="0.1"></div>
-      <div><label>Boundary 6 (%)</label><input id="lEdge6" type="number" value="1" min="0" max="50" step="0.1"></div>
-    </div>
-    <div style="font-size:11px;color:#8b949e;margin-top:4px">SELL revert: limit = buy_price × (1 + edge%). BUY revert: limit = sell_price × (1 - edge%). Higher edge = more profit per fill but slower to fill.</div>
-  </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
-  <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
-</div>
-
-<!-- Controls -->
-<div class="card">
-  <h2>Match Controls</h2>
-  <div class="row" style="margin-bottom:8px">
-    <button id="btnStart" class="btn-primary" onclick="startInnings()">Start Innings</button>
-    <button id="btnStop" class="btn-warn" onclick="stopInnings()" disabled>Stop Innings</button>
-  </div>
-  <div class="row">
-    <button id="btnMO" class="btn-danger" onclick="matchOver()">Match Over</button>
-    <button class="btn-danger" onclick="cancelAll()">Cancel All Orders</button>
-  </div>
-  <button class="btn-warn" style="margin-top:8px;width:100%" onclick="resetMatch()">Reset (New Match)</button>
-</div>
-
-<!-- CTF Split / Merge / Redeem / Move -->
-<div class="card full">
-  <h2>CTF On-Chain</h2>
-  <div class="row" style="margin-bottom:8px">
-    <div style="flex:2">
-      <label>CTF Amount (USDC / tokens)</label>
-      <input id="ctfAmount" type="number" value="10" min="1" step="1">
-    </div>
-    <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
-      <button class="btn-primary" style="flex:1" onclick="ctfSplit()">Split USDC → Tokens</button>
-      <button class="btn-warn" style="flex:1" onclick="ctfMerge()">Merge Tokens → USDC</button>
-      <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
-    </div>
-  </div>
-  <div style="border-top:1px solid #21262d;padding-top:8px;margin-top:4px">
-    <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600">Move Funds (EOA ↔ Proxy)</div>
-    <div class="row" style="margin-bottom:6px">
-      <button class="btn-primary" style="flex:1" onclick="moveTokens('to_proxy')">Move All Tokens → Proxy</button>
-      <button class="btn-warn" style="flex:1" onclick="moveTokens('to_eoa')">Move All Tokens → EOA</button>
-    </div>
-    <div class="row" style="margin-top:6px">
-      <div style="flex:2">
-        <label>USDC Amount ($)</label>
-        <input id="moveUsdcAmt" type="number" value="50" min="1" step="1">
-      </div>
-      <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
-        <button class="btn-primary" style="flex:1" onclick="moveUsdc('to_proxy')">USDC → Proxy</button>
-        <button class="btn-warn" style="flex:1" onclick="moveUsdc('to_eoa')">USDC → EOA</button>
-      </div>
-    </div>
-  </div>
-  <div style="margin-top:8px;display:flex;gap:8px">
-    <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
-    <button class="btn-primary" style="background:#6e40c9" onclick="megaResolve()">Mega Resolve (All Positions)</button>
-  </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.6">
-    <b>Split:</b> $X USDC → X YES + X NO &nbsp;|&nbsp;
-    <b>Merge:</b> X YES + X NO → $X USDC &nbsp;|&nbsp;
-    <b>Redeem:</b> winning tokens → USDC (post-resolve) &nbsp;|&nbsp;
-    <b>Tokens→Proxy:</b> move YES+NO from your MetaMask wallet into the proxy for CLOB trading &nbsp;|&nbsp;
-    <b>USDC→Proxy:</b> deposit USDC into proxy before splitting
-  </div>
-</div>
-
 <!-- Signals -->
-<div class="card full">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+<div class="card full shared-section">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
     <h2 style="margin-bottom:0">Signals</h2>
     <div style="display:flex;gap:14px;align-items:center">
       <span style="font-size:11px;color:#8b949e;font-weight:600">Trade on:</span>
@@ -313,72 +159,70 @@ button:disabled{opacity:.4;cursor:not-allowed}
       </label>
     </div>
   </div>
-  <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Runs — <span style="color:#1f6feb">blue=boundary (sell bowling/buy batting + revert)</span></div>
-  <div class="signal-grid">
-    <button class="btn-signal" onclick="sendSignal('0')">0</button>
-    <button class="btn-signal" onclick="sendSignal('1')">1</button>
-    <button class="btn-signal" onclick="sendSignal('2')">2</button>
-    <button class="btn-signal" onclick="sendSignal('3')">3</button>
-    <button class="btn-signal boundary" onclick="sendSignal('4')">4</button>
-    <button class="btn-signal" onclick="sendSignal('5')">5</button>
-    <button class="btn-signal boundary" onclick="sendSignal('6')">6</button>
+  <!-- Big 3 signal buttons -->
+  <div style="display:flex;gap:12px;justify-content:center;margin-bottom:12px">
+    <button class="signal-btn wicket" onclick="sendSignal('W')">WICKET</button>
+    <button class="signal-btn boundary" onclick="sendSignal('4')">FOUR</button>
+    <button class="signal-btn boundary-6" onclick="sendSignal('6')">SIX</button>
   </div>
-  <div style="font-size:11px;color:#f85149;margin-top:8px;margin-bottom:6px">Wicket (+ runs on that ball)</div>
-  <div class="signal-grid">
-    <button class="btn-signal wicket" onclick="sendSignal('W')">W</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W1')">W1</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W2')">W2</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W3')">W3</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W4')">W4</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W5')">W5</button>
-    <button class="btn-signal wicket" onclick="sendSignal('W6')">W6</button>
+  <!-- Toggle for advanced signals -->
+  <div style="text-align:center;margin-bottom:8px">
+    <button style="background:transparent;color:#58a6ff;border:none;font-size:12px;cursor:pointer;text-decoration:underline" onclick="toggleAdvancedSignals()">
+      <span id="advSignalToggleText">Show all signals</span>
+    </button>
   </div>
-  <div style="font-size:11px;color:#d29922;margin-top:8px;margin-bottom:6px">Wide (+ extra runs) — Wd4/Wd6 = boundary</div>
-  <div class="signal-grid">
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd0')">Wd0</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd1')">Wd1</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd2')">Wd2</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd3')">Wd3</button>
-    <button class="btn-signal boundary" onclick="sendSignal('Wd4')">Wd4</button>
-    <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd5')">Wd5</button>
-    <button class="btn-signal boundary" onclick="sendSignal('Wd6')">Wd6</button>
-  </div>
-  <div style="font-size:11px;color:#8b949e;margin-top:8px;margin-bottom:6px">No Ball (+ runs) — N4/N6 = boundary</div>
-  <div class="signal-grid">
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N0')">N0</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N1')">N1</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N2')">N2</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N3')">N3</button>
-    <button class="btn-signal boundary" onclick="sendSignal('N4')">N4</button>
-    <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N5')">N5</button>
-    <button class="btn-signal boundary" onclick="sendSignal('N6')">N6</button>
+  <!-- Advanced signal grid (hidden by default) -->
+  <div id="advancedSignals" style="display:none">
+    <div style="font-size:11px;color:#8b949e;margin-bottom:6px">Runs -- <span style="color:#1f6feb">blue=boundary (sell bowling/buy batting + revert)</span></div>
+    <div class="signal-grid">
+      <button class="btn-signal" onclick="sendSignal('0')">0</button>
+      <button class="btn-signal" onclick="sendSignal('1')">1</button>
+      <button class="btn-signal" onclick="sendSignal('2')">2</button>
+      <button class="btn-signal" onclick="sendSignal('3')">3</button>
+      <button class="btn-signal boundary" onclick="sendSignal('4')">4</button>
+      <button class="btn-signal" onclick="sendSignal('5')">5</button>
+      <button class="btn-signal boundary" onclick="sendSignal('6')">6</button>
+    </div>
+    <div style="font-size:11px;color:#f85149;margin-top:8px;margin-bottom:6px">Wicket (+ runs on that ball)</div>
+    <div class="signal-grid">
+      <button class="btn-signal wicket" onclick="sendSignal('W')">W</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W1')">W1</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W2')">W2</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W3')">W3</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W4')">W4</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W5')">W5</button>
+      <button class="btn-signal wicket" onclick="sendSignal('W6')">W6</button>
+    </div>
+    <div style="font-size:11px;color:#d29922;margin-top:8px;margin-bottom:6px">Wide (+ extra runs) -- Wd4/Wd6 = boundary</div>
+    <div class="signal-grid">
+      <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd0')">Wd0</button>
+      <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd1')">Wd1</button>
+      <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd2')">Wd2</button>
+      <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd3')">Wd3</button>
+      <button class="btn-signal boundary" onclick="sendSignal('Wd4')">Wd4</button>
+      <button class="btn-signal" style="background:#3d2d00;color:#d29922" onclick="sendSignal('Wd5')">Wd5</button>
+      <button class="btn-signal boundary" onclick="sendSignal('Wd6')">Wd6</button>
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-top:8px;margin-bottom:6px">No Ball (+ runs) -- N4/N6 = boundary</div>
+    <div class="signal-grid">
+      <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N0')">N0</button>
+      <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N1')">N1</button>
+      <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N2')">N2</button>
+      <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N3')">N3</button>
+      <button class="btn-signal boundary" onclick="sendSignal('N4')">N4</button>
+      <button class="btn-signal" style="background:#1c2333;color:#58a6ff" onclick="sendSignal('N5')">N5</button>
+      <button class="btn-signal boundary" onclick="sendSignal('N6')">N6</button>
+    </div>
   </div>
 </div>
 
-<!-- Trade Log (from Polymarket API) -->
-<div class="card full">
-  <h2>Trade Log <span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:6px">(from Polymarket CLOB)</span></h2>
-  <div id="tradeSummary" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px"></div>
-  <div style="max-height:300px;overflow-y:auto">
-    <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
-      <thead><tr style="border-bottom:2px solid #30363d">
-        <th style="text-align:left;padding:4px 6px;color:#8b949e">Time</th>
-        <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
-        <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
-        <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
-        <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
-        <th style="text-align:right;padding:4px 6px;color:#8b949e">Cost</th>
-        <th style="text-align:left;padding:4px 6px;color:#8b949e">Type</th>
-        <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
-      </tr></thead>
-      <tbody id="tradeBody"></tbody>
-    </table>
-  </div>
-  <div id="tradeEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No trades yet</div>
+<!-- Latency Bar -->
+<div class="card full shared-section">
+  <div id="latBar" class="latency-bar">Sig-Dec: -- | Sign-Post: -- | Post-Resp: -- | Fill(WS): -- | E2E: --</div>
 </div>
 
 <!-- Live Price Chart -->
-<div class="card full" id="chartCard" style="display:none">
+<div class="card full shared-section" id="chartCard" style="display:none">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
     <h2 style="margin-bottom:0">Live Odds</h2>
     <div style="display:flex;gap:12px;align-items:center">
@@ -398,16 +242,307 @@ button:disabled{opacity:.4;cursor:not-allowed}
 </div>
 
 <!-- Event Log -->
-<div class="card full">
+<div class="card full shared-section">
   <h2>Event Log</h2>
   <div class="events" id="eventLog"></div>
 </div>
 
+<!-- ======================== TAKER TAB ======================== -->
+<div id="tab-taker" class="tab-content">
+
+  <!-- Taker Position Card -->
+  <div class="card full">
+    <h2>Position</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="stat"><span id="teamALabel">TEAM_A</span> <strong id="teamATokens">0</strong></div>
+      <div class="stat"><span id="teamBLabel">TEAM_B</span> <strong id="teamBTokens">0</strong></div>
+      <div class="stat"><span>Spent</span> <strong id="spent">0</strong> / <strong id="budget">100</strong></div>
+      <div class="stat"><span>Remaining</span> <strong id="remaining">100</strong></div>
+      <div class="stat"><span>Trades</span> <strong id="trades">0</strong></div>
+      <div class="stat"><span>Live Orders</span> <strong id="liveOrders">0</strong></div>
+      <div class="stat"><span>Batting</span> <strong id="batting">--</strong></div>
+      <div class="stat"><span>Bowling</span> <strong id="bowling">--</strong></div>
+      <div class="stat"><span>Innings</span> <strong id="innings">1</strong></div>
+    </div>
+  </div>
+
+  <!-- Taker Limits Card -->
+  <div class="card full">
+    <h2>Limits</h2>
+    <div class="row">
+      <div><label>Budget ($)</label><input id="lBudget" type="number" value="100"></div>
+      <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
+    </div>
+    <div class="row">
+      <div><label>Safe % (cents)</label><input id="lSafePct" type="number" value="2" min="1" max="49"></div>
+      <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
+    </div>
+    <div class="row">
+      <div><label>Fill Poll (ms)</label><input id="lPollInterval" type="number" value="500" min="100"></div>
+      <div><label>Poll Timeout (ms)</label><input id="lPollTimeout" type="number" value="5000" min="1000"></div>
+    </div>
+    <div class="row">
+      <div><label>Dry Run</label>
+        <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
+      </div>
+    </div>
+    <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
+      <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Revert Edge (profit margin on GTC limit orders)</div>
+      <div class="row">
+        <div><label>Wicket W (%)</label><input id="lEdgeW" type="number" value="2" min="0" max="50" step="0.1"></div>
+        <div><label>Boundary 4 (%)</label><input id="lEdge4" type="number" value="1" min="0" max="50" step="0.1"></div>
+        <div><label>Boundary 6 (%)</label><input id="lEdge6" type="number" value="1" min="0" max="50" step="0.1"></div>
+      </div>
+      <div style="font-size:11px;color:#8b949e;margin-top:4px">SELL revert: limit = buy_price x (1 + edge%). BUY revert: limit = sell_price x (1 - edge%). Higher edge = more profit per fill but slower to fill.</div>
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
+    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
+  </div>
+
+  <!-- Match Controls Card -->
+  <div class="card full">
+    <h2>Match Controls</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="btnStart" class="btn-primary" onclick="startInnings()">Start Innings</button>
+      <button id="btnStop" class="btn-warn" onclick="stopInnings()" disabled>Stop Innings</button>
+    </div>
+    <div class="row">
+      <button id="btnMO" class="btn-danger" onclick="matchOver()">Match Over</button>
+      <button class="btn-danger" onclick="cancelAll()">Cancel All Orders</button>
+    </div>
+    <button class="btn-warn" style="margin-top:8px;width:100%" onclick="resetMatch()">Reset (New Match)</button>
+  </div>
+
+  <!-- Taker Trade Log -->
+  <div class="card full">
+    <h2>Trade Log <span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:6px">(from Polymarket CLOB)</span></h2>
+    <div id="tradeSummary" style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;font-size:12px"></div>
+    <div style="max-height:300px;overflow-y:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <thead><tr style="border-bottom:2px solid #30363d">
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Time</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Cost</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Type</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
+        </tr></thead>
+        <tbody id="tradeBody"></tbody>
+      </table>
+    </div>
+    <div id="tradeEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No trades yet</div>
+  </div>
+
+</div>
+
+<!-- ======================== MAKER TAB ======================== -->
+<div id="tab-maker" class="tab-content" style="display:none">
+
+  <!-- Maker Status Card -->
+  <div class="card full">
+    <h2>Maker Status</h2>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <span id="mkEnabled" class="badge badge-idle">DISABLED</span>
+      <span id="mkDryRunBadge" class="badge badge-dry" style="display:none">DRY RUN</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="stat"><span>Half Spread</span> <strong id="mkSpread">--</strong></div>
+      <div class="stat"><span>Quote Size</span> <strong id="mkQuoteSize">--</strong></div>
+      <div class="stat"><span>Inventory Tier</span> <strong id="mkTier">--</strong></div>
+    </div>
+  </div>
+
+  <!-- Maker Config Card -->
+  <div class="card full">
+    <h2>Maker Config</h2>
+    <div class="row">
+      <div><label>Enabled</label>
+        <select id="mkCfgEnabled"><option value="false">No</option><option value="true">Yes</option></select>
+      </div>
+      <div><label>Dry Run <span style="color:#d29922;font-size:10px">(REQUIRED for first use)</span></label>
+        <select id="mkCfgDryRun"><option value="true">Yes</option><option value="false">No</option></select>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>Half Spread</label><input id="mkCfgSpread" type="text" value="0.02"></div>
+      <div><label>Quote Size</label><input id="mkCfgSize" type="text" value="10"></div>
+    </div>
+    <div class="row">
+      <div><label>Use GTD</label>
+        <select id="mkCfgGtd"><option value="true">Yes</option><option value="false">No</option></select>
+      </div>
+      <div><label>GTD Expiry (secs)</label><input id="mkCfgExpiry" type="number" value="30"></div>
+    </div>
+    <div class="row">
+      <div><label>Refresh Interval (secs)</label><input id="mkCfgRefresh" type="number" value="10"></div>
+      <div><label>Skew Kappa</label><input id="mkCfgKappa" type="text" value="0.5"></div>
+    </div>
+    <div class="row">
+      <div><label>Max Exposure</label><input id="mkCfgExposure" type="text" value="100"></div>
+    </div>
+    <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
+      <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Inventory Tier Thresholds</div>
+      <div class="row">
+        <div><label>T1 %</label><input id="mkCfgT1" type="number" value="25" step="1"></div>
+        <div><label>T2 %</label><input id="mkCfgT2" type="number" value="50" step="1"></div>
+        <div><label>T3 %</label><input id="mkCfgT3" type="number" value="75" step="1"></div>
+      </div>
+    </div>
+    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveMakerConfig()">Save Maker Config</button>
+  </div>
+
+  <!-- Maker Info Box -->
+  <div class="card full">
+    <h2>How Maker Works</h2>
+    <div style="font-size:12px;color:#8b949e;line-height:1.6">
+      Maker places 4 resting orders (BUY+SELL on both tokens). On events, dangerous legs are cancelled instantly.
+      DRY RUN mode logs quotes without submitting. Enable Dry Run first to verify quotes look correct before going live.
+    </div>
+  </div>
+
+</div>
+
+<!-- ======================== SETTINGS TAB ======================== -->
+<div id="tab-settings" class="tab-content" style="display:none">
+
+  <!-- Match Setup Card -->
+  <div class="card full">
+    <h2>Match Setup</h2>
+    <div id="setupLock">
+      <div class="row" style="margin-bottom:6px">
+        <div style="flex:3"><label>Polymarket Slug</label><input id="sSlug" value="" placeholder="e.g. crint-ind-zwe-2026-02-26"></div>
+        <div style="flex:1;display:flex;align-items:flex-end"><button class="btn-primary" style="width:100%" onclick="fetchMarket()">Fetch</button></div>
+      </div>
+      <div class="row">
+        <div><label>Team A</label><input id="sTeamA" value=""></div>
+        <div><label>Team B</label><input id="sTeamB" value=""></div>
+      </div>
+      <label>Team A Token ID</label><input id="sTokenA" value="" style="font-size:10px">
+      <label>Team B Token ID</label><input id="sTokenB" value="" style="font-size:10px">
+      <label>Condition ID</label><input id="sCondition" value="" placeholder="0x..." style="font-size:10px">
+      <div class="row">
+        <div><label>First Batting</label>
+          <select id="sBatFirst"><option value="A">A</option><option value="B">B</option></select>
+        </div>
+        <div><label>Neg Risk</label>
+          <select id="sNegRisk"><option value="false">No</option><option value="true">Yes</option></select>
+        </div>
+      </div>
+      <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveSetup()">Save Setup</button>
+    </div>
+    <div id="setupLockedMsg" class="locked-notice" style="display:none">Setup locked while match is running</div>
+  </div>
+
+  <!-- Wallet Card -->
+  <div class="card full">
+    <h2>Wallet</h2>
+    <div id="walletLock">
+      <label>MetaMask Private Key (signs everything, pays gas)</label>
+      <input id="wKey" type="password" placeholder="0x... (your MetaMask private key)">
+      <label style="color:#58a6ff">EOA Address (derived)</label>
+      <input id="wEoa" readonly placeholder="set private key and save" style="font-size:10px;color:#58a6ff;cursor:default">
+      <label>Polymarket Proxy Wallet Address (holds USDC, maker of CLOB trades)</label>
+      <input id="wAddr" placeholder="0x... (your Polymarket proxy -- NOT MetaMask address)">
+      <div class="row">
+        <div><label>Sig Type</label>
+          <select id="wSigType">
+            <option value="1">POLY_PROXY (1) -- MetaMask + Polymarket proxy</option>
+            <option value="0">EOA (0) -- no proxy, direct wallet</option>
+            <option value="2">GNOSIS_SAFE (2)</option>
+          </select>
+        </div>
+      </div>
+      <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.5">
+        <b>Most users:</b> Private Key = MetaMask key . Address = Polymarket proxy (shown at polymarket.com when logged in) . Sig Type = POLY_PROXY (1)
+      </div>
+      <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveWallet()">Save Wallet</button>
+      <div id="wDeriveStatus" style="margin-top:8px;font-size:12px;display:none">
+        <div style="color:#3fb950;font-weight:600">API Key derived via EIP-712 signing</div>
+        <div style="color:#8b949e;font-size:11px;margin-top:2px">Key: <span id="wDerivedKey" style="color:#58a6ff;font-family:monospace"></span></div>
+      </div>
+    </div>
+    <div id="walletLockedMsg" class="locked-notice" style="display:none">Wallet locked while match is running</div>
+    <div class="stat" style="margin-top:6px"><span>Status</span> <strong id="walletStatus">Not Set</strong></div>
+  </div>
+
+  <!-- Wallets & Balances Card -->
+  <div class="card full">
+    <h2>Wallets &amp; Balances <button class="btn-primary" style="font-size:11px;padding:3px 10px;float:right" onclick="refreshWallets()">Refresh</button></h2>
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">EOA (MetaMask -- signs, pays gas)</div>
+      <div style="font-size:10px;color:#58a6ff;word-break:break-all;font-family:monospace" id="wBalEoa">--</div>
+      <div class="stat"><span>USDC (EOA)</span> <strong id="wBalEoaUsdc">--</strong></div>
+    </div>
+    <div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Proxy (Polymarket -- holds USDC, maker of trades)</div>
+      <div style="font-size:10px;color:#3fb950;word-break:break-all;font-family:monospace" id="wBalProxy">--</div>
+      <div class="stat"><span>USDC (Proxy)</span> <strong id="wBalProxyUsdc">--</strong></div>
+    </div>
+    <div id="wPositions" style="margin-top:8px;font-size:11px"></div>
+  </div>
+
+  <!-- CTF On-Chain Card -->
+  <div class="card full">
+    <h2>CTF On-Chain</h2>
+    <div class="row" style="margin-bottom:8px">
+      <div style="flex:2">
+        <label>CTF Amount (USDC / tokens)</label>
+        <input id="ctfAmount" type="number" value="10" min="1" step="1">
+      </div>
+      <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
+        <button class="btn-primary" style="flex:1" onclick="ctfSplit()">Split USDC Tokens</button>
+        <button class="btn-warn" style="flex:1" onclick="ctfMerge()">Merge Tokens USDC</button>
+        <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
+      </div>
+    </div>
+    <div style="border-top:1px solid #21262d;padding-top:8px;margin-top:4px">
+      <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600">Move Funds (EOA / Proxy)</div>
+      <div class="row" style="margin-bottom:6px">
+        <button class="btn-primary" style="flex:1" onclick="moveTokens('to_proxy')">Move All Tokens to Proxy</button>
+        <button class="btn-warn" style="flex:1" onclick="moveTokens('to_eoa')">Move All Tokens to EOA</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:2">
+          <label>USDC Amount ($)</label>
+          <input id="moveUsdcAmt" type="number" value="50" min="1" step="1">
+        </div>
+        <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
+          <button class="btn-primary" style="flex:1" onclick="moveUsdc('to_proxy')">USDC to Proxy</button>
+          <button class="btn-warn" style="flex:1" onclick="moveUsdc('to_eoa')">USDC to EOA</button>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px">
+      <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
+      <button class="btn-primary" style="background:#6e40c9" onclick="megaResolve()">Mega Resolve (All Positions)</button>
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.6">
+      <b>Split:</b> $X USDC into X YES + X NO |
+      <b>Merge:</b> X YES + X NO into $X USDC |
+      <b>Redeem:</b> winning tokens into USDC (post-resolve) |
+      <b>Tokens to Proxy:</b> move YES+NO from your MetaMask wallet into the proxy for CLOB trading |
+      <b>USDC to Proxy:</b> deposit USDC into proxy before splitting
+    </div>
+  </div>
+
+</div>
+
+</div><!-- end .grid -->
+
+<!-- Bottom Tab Bar -->
+<div class="bottom-bar">
+  <button class="tab-btn tab-active" data-tab="taker" onclick="switchTab('taker')">&#9889; TAKER</button>
+  <button class="tab-btn" data-tab="maker" onclick="switchTab('maker')">&#9776; MAKER</button>
+  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">&#9881; SETTINGS</button>
 </div>
 
 <script>
 const API = '';
 let pollTimer = null;
+let activeTab = 'taker';
+let advancedSignalsVisible = false;
 
 async function api(path, opts) {
   try {
@@ -429,6 +564,26 @@ function showToast(msg) {
   setTimeout(() => d.remove(), 4000);
 }
 
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+  document.getElementById('tab-' + tab).style.display = '';
+
+  // Show/hide shared sections (visible on taker+maker, hidden on settings)
+  const showShared = tab !== 'settings';
+  document.querySelectorAll('.shared-section').forEach(el => el.style.display = showShared ? '' : 'none');
+
+  // Update tab bar active state
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('tab-active'));
+  document.querySelector('[data-tab="' + tab + '"]').classList.add('tab-active');
+}
+
+function toggleAdvancedSignals() {
+  advancedSignalsVisible = !advancedSignalsVisible;
+  document.getElementById('advancedSignals').style.display = advancedSignalsVisible ? '' : 'none';
+  document.getElementById('advSignalToggleText').textContent = advancedSignalsVisible ? 'Hide all signals' : 'Show all signals';
+}
+
 async function pollStatus() {
   try {
     const s = await api('/api/status');
@@ -442,6 +597,11 @@ async function pollStatus() {
     const db = el('dryBadge');
     db.style.display = s.dry_run ? '' : 'none';
 
+    // header info
+    el('headerTeams').textContent = s.team_a_name && s.team_b_name ? s.team_a_name + ' vs ' + s.team_b_name : '';
+    el('headerBatting').textContent = s.batting ? 'Bat: ' + s.batting : '';
+    el('headerInnings').textContent = s.innings ? 'Inn ' + s.innings : '';
+
     el('teamALabel').textContent = s.team_a_name;
     el('teamBLabel').textContent = s.team_b_name;
     el('teamATokens').textContent = s.team_a_tokens;
@@ -454,10 +614,10 @@ async function pollStatus() {
 
     el('bookALabel').textContent = s.team_a_name;
     el('bookBLabel').textContent = s.team_b_name;
-    el('aBid').textContent = s.book_a_bid != null ? s.book_a_bid+'¢' : '—';
-    el('aAsk').textContent = s.book_a_ask != null ? s.book_a_ask+'¢' : '—';
-    el('bBid').textContent = s.book_b_bid != null ? s.book_b_bid+'¢' : '—';
-    el('bAsk').textContent = s.book_b_ask != null ? s.book_b_ask+'¢' : '—';
+    el('aBid').textContent = s.book_a_bid != null ? s.book_a_bid+'c' : '--';
+    el('aAsk').textContent = s.book_a_ask != null ? s.book_a_ask+'c' : '--';
+    el('bBid').textContent = s.book_b_bid != null ? s.book_b_bid+'c' : '--';
+    el('bAsk').textContent = s.book_b_ask != null ? s.book_b_ask+'c' : '--';
 
     el('batting').textContent = s.batting;
     el('bowling').textContent = s.bowling;
@@ -477,6 +637,7 @@ async function pollStatus() {
 
     // disable signal buttons when not running
     document.querySelectorAll('.btn-signal').forEach(b => b.disabled = !running);
+    document.querySelectorAll('.signal-btn').forEach(b => b.disabled = !running);
 
     // sync trade-on checkboxes
     el('chkTeamA').checked = s.trade_team_a;
@@ -497,7 +658,7 @@ async function pollEvents() {
       else if (e.kind === 'warn') cls += ' ev-warn';
       else if (e.kind === 'trade') cls += ' ev-trade';
       else if (e.kind === 'wicket') cls += ' ev-wicket';
-      return `<div class="${cls}"><span class="ev-ts">${e.ts}</span><span class="ev-kind">${e.kind}</span><span class="ev-detail">${e.detail}</span></div>`;
+      return '<div class="' + cls + '"><span class="ev-ts">' + e.ts + '</span><span class="ev-kind">' + e.kind + '</span><span class="ev-detail">' + e.detail + '</span></div>';
     }).reverse().join('');
   } catch(e) {}
 }
@@ -544,10 +705,10 @@ async function loadConfig() {
 async function refreshWallets() {
   try {
     const w = await api('/api/wallets');
-    document.getElementById('wBalEoa').textContent = w.eoa_address || '—';
-    document.getElementById('wBalProxy').textContent = w.proxy_address || '—';
-    document.getElementById('wBalEoaUsdc').textContent = w.eoa_usdc != null ? '$' + parseFloat(w.eoa_usdc).toFixed(2) : '—';
-    document.getElementById('wBalProxyUsdc').textContent = w.proxy_usdc != null ? '$' + parseFloat(w.proxy_usdc).toFixed(2) : '—';
+    document.getElementById('wBalEoa').textContent = w.eoa_address || '--';
+    document.getElementById('wBalProxy').textContent = w.proxy_address || '--';
+    document.getElementById('wBalEoaUsdc').textContent = w.eoa_usdc != null ? '$' + parseFloat(w.eoa_usdc).toFixed(2) : '--';
+    document.getElementById('wBalProxyUsdc').textContent = w.proxy_usdc != null ? '$' + parseFloat(w.proxy_usdc).toFixed(2) : '--';
     // Render positions
     const pos = document.getElementById('wPositions');
     const positions = Array.isArray(w.positions) ? w.positions : [];
@@ -560,10 +721,7 @@ async function refreshWallets() {
           const outcome = p.outcome || p.side || '?';
           const size = parseFloat(p.size || 0).toFixed(2);
           const val = p.currentValue != null ? ' ($' + parseFloat(p.currentValue).toFixed(2) + ')' : '';
-          return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #21262d">
-            <span style="color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">${slug}</span>
-            <span style="color:#3fb950;white-space:nowrap">${outcome} ${size}${val}</span>
-          </div>`;
+          return '<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #21262d"><span style="color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">' + slug + '</span><span style="color:#3fb950;white-space:nowrap">' + outcome + ' ' + size + val + '</span></div>';
         }).join('');
     }
     if (w.eoa_address) document.getElementById('wEoa').value = w.eoa_address;
@@ -649,21 +807,21 @@ async function ctfSyncBalance() {
   await api('/api/ctf-balance', {method:'POST'});
 }
 async function moveTokens(direction) {
-  const label = direction === 'to_proxy' ? 'EOA → Proxy' : 'Proxy → EOA';
-  if (!confirm(`Move ALL YES + NO tokens (${label})?\nThis transfers your full token balance.`)) return;
+  const label = direction === 'to_proxy' ? 'EOA to Proxy' : 'Proxy to EOA';
+  if (!confirm('Move ALL YES + NO tokens (' + label + ')?\nThis transfers your full token balance.')) return;
   await api('/api/move-tokens', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({direction})});
+    body: JSON.stringify({direction: direction})});
 }
 async function moveUsdc(direction) {
   const amt = parseInt(document.getElementById('moveUsdcAmt').value);
   if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
-  const label = direction === 'to_proxy' ? 'EOA → Proxy' : 'Proxy → EOA';
-  if (!confirm(`Move $${amt} USDC (${label})?`)) return;
+  const label = direction === 'to_proxy' ? 'EOA to Proxy' : 'Proxy to EOA';
+  if (!confirm('Move $' + amt + ' USDC (' + label + ')?')) return;
   await api('/api/move-usdc', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({amount_usdc: amt, direction})});
+    body: JSON.stringify({amount_usdc: amt, direction: direction})});
 }
 async function toggleTeam(team, enabled) {
-  await api('/api/toggle-team', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({team, enabled})});
+  await api('/api/toggle-team', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({team: team, enabled: enabled})});
 }
 
 async function megaResolve() {
@@ -674,7 +832,7 @@ async function megaResolve() {
 async function fetchMarket() {
   const slug = document.getElementById('sSlug').value.trim();
   if (!slug) { showToast('enter a market slug'); return; }
-  const r = await api('/api/fetch-market', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({slug})});
+  const r = await api('/api/fetch-market', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({slug: slug})});
   if (r && r.ok) {
     document.getElementById('sTeamA').value = r.team_a_name;
     document.getElementById('sTeamB').value = r.team_b_name;
@@ -704,16 +862,16 @@ async function pollTrades() {
       const sideColor = t.side === 'BUY' ? '#3fb950' : '#f85149';
       const cost = parseFloat(t.cost).toFixed(2);
       const statusColor = t.status === 'MATCHED' ? '#3fb950' : t.status === 'LIVE' ? '#58a6ff' : '#8b949e';
-      return `<tr style="border-bottom:1px solid #21262d">
-        <td style="padding:3px 6px;color:#484f58">${t.ts}</td>
-        <td style="padding:3px 6px;color:${sideColor};font-weight:600">${t.side}</td>
-        <td style="padding:3px 6px;color:#e1e4e8">${t.team}</td>
-        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">${t.size}</td>
-        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">${t.price}</td>
-        <td style="padding:3px 6px;text-align:right;color:#e1e4e8">$${cost}</td>
-        <td style="padding:3px 6px;color:#8b949e">${t.order_type}</td>
-        <td style="padding:3px 6px;color:${statusColor}">${t.status}</td>
-      </tr>`;
+      return '<tr style="border-bottom:1px solid #21262d">' +
+        '<td style="padding:3px 6px;color:#484f58">' + t.ts + '</td>' +
+        '<td style="padding:3px 6px;color:' + sideColor + ';font-weight:600">' + t.side + '</td>' +
+        '<td style="padding:3px 6px;color:#e1e4e8">' + t.team + '</td>' +
+        '<td style="padding:3px 6px;text-align:right;color:#e1e4e8">' + t.size + '</td>' +
+        '<td style="padding:3px 6px;text-align:right;color:#e1e4e8">' + t.price + '</td>' +
+        '<td style="padding:3px 6px;text-align:right;color:#e1e4e8">$' + cost + '</td>' +
+        '<td style="padding:3px 6px;color:#8b949e">' + t.order_type + '</td>' +
+        '<td style="padding:3px 6px;color:' + statusColor + '">' + t.status + '</td>' +
+        '</tr>';
     }).join('');
     // Render summary
     const s = d.summary;
@@ -721,24 +879,24 @@ async function pollTrades() {
     const pnlColor = v => parseFloat(v) >= 0 ? '#3fb950' : '#f85149';
     const fmt = v => parseFloat(v).toFixed(2);
     const fmtPnl = v => (parseFloat(v) >= 0 ? '+$' : '-$') + Math.abs(parseFloat(v)).toFixed(2);
-    document.getElementById('tradeSummary').innerHTML = `
-      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">
-        <div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">${a.name}</div>
-        <div>Bought: <strong>${a.bought}</strong> @ avg <strong>${fmt(a.avg_buy)}</strong> = $${fmt(a.buy_cost)}</div>
-        <div>Sold: <strong>${a.sold}</strong> @ avg <strong>${fmt(a.avg_sell)}</strong> = $${fmt(a.sell_revenue)}</div>
-        <div>Net tokens: <strong>${a.net_tokens}</strong></div>
-        <div>P&L: <strong style="color:${pnlColor(a.realized_pnl)}">${fmtPnl(a.realized_pnl)}</strong></div>
-      </div>
-      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">
-        <div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">${b.name}</div>
-        <div>Bought: <strong>${b.bought}</strong> @ avg <strong>${fmt(b.avg_buy)}</strong> = $${fmt(b.buy_cost)}</div>
-        <div>Sold: <strong>${b.sold}</strong> @ avg <strong>${fmt(b.avg_sell)}</strong> = $${fmt(b.sell_revenue)}</div>
-        <div>Net tokens: <strong>${b.net_tokens}</strong></div>
-        <div>P&L: <strong style="color:${pnlColor(b.realized_pnl)}">${fmtPnl(b.realized_pnl)}</strong></div>
-      </div>
-      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;display:flex;align-items:center">
-        <div>Total P&L: <strong style="color:${pnlColor(s.total_pnl)};font-size:16px">${fmtPnl(s.total_pnl)}</strong></div>
-      </div>`;
+    document.getElementById('tradeSummary').innerHTML =
+      '<div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">' +
+        '<div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">' + a.name + '</div>' +
+        '<div>Bought: <strong>' + a.bought + '</strong> @ avg <strong>' + fmt(a.avg_buy) + '</strong> = $' + fmt(a.buy_cost) + '</div>' +
+        '<div>Sold: <strong>' + a.sold + '</strong> @ avg <strong>' + fmt(a.avg_sell) + '</strong> = $' + fmt(a.sell_revenue) + '</div>' +
+        '<div>Net tokens: <strong>' + a.net_tokens + '</strong></div>' +
+        '<div>P&L: <strong style="color:' + pnlColor(a.realized_pnl) + '">' + fmtPnl(a.realized_pnl) + '</strong></div>' +
+      '</div>' +
+      '<div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;flex:1;min-width:200px">' +
+        '<div style="font-weight:600;color:#e1e4e8;margin-bottom:4px">' + b.name + '</div>' +
+        '<div>Bought: <strong>' + b.bought + '</strong> @ avg <strong>' + fmt(b.avg_buy) + '</strong> = $' + fmt(b.buy_cost) + '</div>' +
+        '<div>Sold: <strong>' + b.sold + '</strong> @ avg <strong>' + fmt(b.avg_sell) + '</strong> = $' + fmt(b.sell_revenue) + '</div>' +
+        '<div>Net tokens: <strong>' + b.net_tokens + '</strong></div>' +
+        '<div>P&L: <strong style="color:' + pnlColor(b.realized_pnl) + '">' + fmtPnl(b.realized_pnl) + '</strong></div>' +
+      '</div>' +
+      '<div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;display:flex;align-items:center">' +
+        '<div>Total P&L: <strong style="color:' + pnlColor(s.total_pnl) + ';font-size:16px">' + fmtPnl(s.total_pnl) + '</strong></div>' +
+      '</div>';
   } catch(e) {}
 }
 
@@ -852,11 +1010,11 @@ function drawChart(dataA, dataB, nameA, nameB) {
   endLabel(dataB, colorB, nameB);
 
   // Legend
-  const lastA = dataA.length ? (dataA[dataA.length-1].p * 100).toFixed(0) + '%' : '—';
-  const lastB = dataB.length ? (dataB[dataB.length-1].p * 100).toFixed(0) + '%' : '—';
+  const lastA = dataA.length ? (dataA[dataA.length-1].p * 100).toFixed(0) + '%' : '--';
+  const lastB = dataB.length ? (dataB[dataB.length-1].p * 100).toFixed(0) + '%' : '--';
   document.getElementById('chartLegend').innerHTML =
-    `<span style="color:${colorA}">● ${nameA} ${lastA}</span>` +
-    `<span style="color:${colorB}">● ${nameB} ${lastB}</span>`;
+    '<span style="color:' + colorA + '">&#9679; ' + nameA + ' ' + lastA + '</span>' +
+    '<span style="color:' + colorB + '">&#9679; ' + nameB + ' ' + lastB + '</span>';
 }
 
 function renderBookTable(bodyId, bids, asks) {
@@ -864,13 +1022,13 @@ function renderBookTable(bodyId, bids, asks) {
   let html = '';
   for (let i = 0; i < rows; i++) {
     const bid = bids[i], ask = asks[i];
-    html += `<tr>
-      <td style="text-align:left;color:#3fb950;padding:3px 6px">${bid ? parseFloat(bid.price).toFixed(2) : '—'}</td>
-      <td style="text-align:right;color:#3fb950;padding:3px 6px">${bid ? parseFloat(bid.size).toFixed(1) : ''}</td>
-      <td style="border-left:1px solid #21262d"></td>
-      <td style="text-align:left;color:#f85149;padding:3px 6px">${ask ? parseFloat(ask.price).toFixed(2) : '—'}</td>
-      <td style="text-align:right;color:#f85149;padding:3px 6px">${ask ? parseFloat(ask.size).toFixed(1) : ''}</td>
-    </tr>`;
+    html += '<tr>' +
+      '<td style="text-align:left;color:#3fb950;padding:3px 6px">' + (bid ? parseFloat(bid.price).toFixed(2) : '--') + '</td>' +
+      '<td style="text-align:right;color:#3fb950;padding:3px 6px">' + (bid ? parseFloat(bid.size).toFixed(1) : '') + '</td>' +
+      '<td style="border-left:1px solid #21262d"></td>' +
+      '<td style="text-align:left;color:#f85149;padding:3px 6px">' + (ask ? parseFloat(ask.price).toFixed(2) : '--') + '</td>' +
+      '<td style="text-align:right;color:#f85149;padding:3px 6px">' + (ask ? parseFloat(ask.size).toFixed(1) : '') + '</td>' +
+      '</tr>';
   }
   document.getElementById(bodyId).innerHTML = html;
 }
@@ -886,17 +1044,89 @@ async function pollBook() {
   } catch(e) {}
 }
 
+// Maker polling
+async function pollMakerStatus() {
+  try {
+    const m = await api('/api/maker/status');
+    const en = document.getElementById('mkEnabled');
+    en.textContent = m.enabled ? 'ENABLED' : 'DISABLED';
+    en.className = 'badge ' + (m.enabled ? 'badge-running' : 'badge-idle');
+    const dr = document.getElementById('mkDryRunBadge');
+    dr.style.display = m.dry_run ? '' : 'none';
+    document.getElementById('mkSpread').textContent = m.half_spread != null ? m.half_spread : '--';
+    document.getElementById('mkQuoteSize').textContent = m.quote_size != null ? m.quote_size : '--';
+    document.getElementById('mkTier').textContent = m.inventory_tier || '--';
+  } catch(e) {}
+}
+
+// Latency polling
+async function pollLatency() {
+  try {
+    const l = await api('/api/latency');
+    const fmt = (p) => p && p.count > 0 ? (p.p50_us / 1000).toFixed(1) + 'ms' : '--';
+    document.getElementById('latBar').innerHTML =
+      'Sig&#8594;Dec: ' + fmt(l.signal_to_decision) + ' | ' +
+      'Sign&#8594;Post: ' + fmt(l.sign_to_post) + ' | ' +
+      'Post&#8594;Resp: ' + fmt(l.post_to_response) + ' | ' +
+      'Fill(WS): ' + fmt(l.fill_detect_ws) + ' | ' +
+      'E2E: ' + fmt(l.e2e_signal_to_fill);
+  } catch(e) {}
+}
+
+// Save maker config
+async function saveMakerConfig() {
+  await api('/api/maker/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    enabled: document.getElementById('mkCfgEnabled').value === 'true',
+    dry_run: document.getElementById('mkCfgDryRun').value === 'true',
+    half_spread: document.getElementById('mkCfgSpread').value,
+    quote_size: document.getElementById('mkCfgSize').value,
+    use_gtd: document.getElementById('mkCfgGtd').value === 'true',
+    gtd_expiry_secs: parseInt(document.getElementById('mkCfgExpiry').value),
+    refresh_interval_secs: parseInt(document.getElementById('mkCfgRefresh').value),
+    skew_kappa: document.getElementById('mkCfgKappa').value,
+    max_exposure: document.getElementById('mkCfgExposure').value,
+    t1_pct: parseFloat(document.getElementById('mkCfgT1').value),
+    t2_pct: parseFloat(document.getElementById('mkCfgT2').value),
+    t3_pct: parseFloat(document.getElementById('mkCfgT3').value),
+  })});
+}
+
+// Load maker config
+async function loadMakerConfig() {
+  try {
+    const c = await api('/api/maker/config');
+    if (c.half_spread != null) document.getElementById('mkCfgSpread').value = c.half_spread;
+    if (c.quote_size != null) document.getElementById('mkCfgSize').value = c.quote_size;
+    if (c.enabled != null) document.getElementById('mkCfgEnabled').value = String(c.enabled);
+    if (c.dry_run != null) document.getElementById('mkCfgDryRun').value = String(c.dry_run);
+    if (c.use_gtd != null) document.getElementById('mkCfgGtd').value = String(c.use_gtd);
+    if (c.gtd_expiry_secs != null) document.getElementById('mkCfgExpiry').value = c.gtd_expiry_secs;
+    if (c.refresh_interval_secs != null) document.getElementById('mkCfgRefresh').value = c.refresh_interval_secs;
+    if (c.skew_kappa != null) document.getElementById('mkCfgKappa').value = c.skew_kappa;
+    if (c.max_exposure != null) document.getElementById('mkCfgExposure').value = c.max_exposure;
+    if (c.t1_pct != null) document.getElementById('mkCfgT1').value = c.t1_pct;
+    if (c.t2_pct != null) document.getElementById('mkCfgT2').value = c.t2_pct;
+    if (c.t3_pct != null) document.getElementById('mkCfgT3').value = c.t3_pct;
+  } catch(e) {}
+}
+
+// Init
 loadConfig();
+loadMakerConfig();
 pollStatus();
 pollEvents();
 pollTrades();
 pollBook();
 pollPriceChart();
+pollMakerStatus();
+pollLatency();
 setInterval(pollStatus, 1500);
 setInterval(pollEvents, 1500);
 setInterval(pollTrades, 2000);
 setInterval(pollBook, 500);
 setInterval(pollPriceChart, 1000);
+setInterval(pollMakerStatus, 2000);
+setInterval(pollLatency, 3000);
 </script>
 </body>
 </html>

@@ -34,9 +34,12 @@ INITIAL_CAPITAL = 5000.0
 TOKEN_CONVERSION = 2500.0   # $2500 -> 2500 Yes + 2500 No
 TRADING_CASH = 2500.0
 MAX_TRADE_USDC = 500.0      # per leg
+SAFE_PRICE_MIN = 0.02       # skip trade if either side < 2c or > 98c
+SAFE_PRICE_MAX = 0.98
 
 REVERT_DELAY_S = 11          # seconds before placing revert
 REVERT_WINDOW_S = 120        # how long revert GTC stays active (check for fills)
+ORACLE_LEAD_S = 5            # oracle fires 5s before market reaction
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 
@@ -277,6 +280,8 @@ def build_orderbook_snapshots(events, jsonl_path, match_date, outcome_names):
     for e in events:
         mm = e["market_movement"]
         t = datetime.strptime(f"{match_date} {mm['market_move_start']}", "%Y-%m-%d %H:%M:%S")
+        # Oracle fires 5s before market reaction — snapshot book at that time
+        t = t - timedelta(seconds=ORACLE_LEAD_S)
         target_times.append(t)
 
     revert_end_times = [t + timedelta(seconds=REVERT_DELAY_S + REVERT_WINDOW_S) for t in target_times]
@@ -482,6 +487,14 @@ def run_backtest(events_path, jsonl_path, market_slug, t1_name, t2_name,
         t1_ref = mm["price_before"]
         t2_ref = 1.0 - t1_ref
 
+        # Safe price guard — match real Rust strategy behavior
+        if t1_ref < SAFE_PRICE_MIN or t1_ref > SAFE_PRICE_MAX or \
+           t2_ref < SAFE_PRICE_MIN or t2_ref > SAFE_PRICE_MAX:
+            print(f"\n--- Event #{i+1}: {evt_type} at {trade_time_str} | SKIPPED "
+                  f"(price {t1_name}={t1_ref:.3f} {t2_name}={t2_ref:.3f} outside "
+                  f"{SAFE_PRICE_MIN}-{SAFE_PRICE_MAX} safe range) ---")
+            continue
+
         print(f"\n--- Event #{i+1}: {evt_type} at {trade_time_str} | {event['innings']} "
               f"| over {event['over']} | side={side} | expected {mm['ticks']} ticks ---")
         print(f"  Market ref: {t1_name}={t1_ref:.3f} {t2_name}={t2_ref:.3f} tick={tick}")
@@ -610,13 +623,26 @@ def run_backtest(events_path, jsonl_path, market_slug, t1_name, t2_name,
             outcome = outcome_names[0] if team_in_action == t1_name else outcome_names[1]
 
             if revert_price is None:
-                print(f"  REVERT {revert_side} {team_in_action}: SKIP (price {avg_p:.3f} < 0.05, hold to settlement)")
+                # Price < 0.05: can't place meaningful revert, break-even exit at entry price
+                breakeven_usdc = tokens * avg_p
+                if revert_side == "SELL":
+                    if team_in_action == t1_name:
+                        pos.sell_t1(tokens, breakeven_usdc)
+                    else:
+                        pos.sell_t2(tokens, breakeven_usdc)
+                else:
+                    if team_in_action == t1_name:
+                        pos.buy_t1(tokens, breakeven_usdc)
+                    else:
+                        pos.buy_t2(tokens, breakeven_usdc)
+                print(f"  REVERT {revert_side} {team_in_action}: {tokens:.1f} @ {avg_p:.3f} "
+                      f"= ${breakeven_usdc:.2f} BREAK-EVEN EXIT (price < 0.05)")
                 revert_results.append({
                     "revert_action": f"{revert_side}_{team_in_action}",
-                    "revert_price": None,
-                    "filled": False,
+                    "revert_price": avg_p,
+                    "filled": True,
                     "edge_profit": 0,
-                    "reason": "price_too_low",
+                    "reason": "breakeven_exit",
                 })
                 continue
 
@@ -640,8 +666,20 @@ def run_backtest(events_path, jsonl_path, market_slug, t1_name, t2_name,
                 print(f"  REVERT {revert_side} {team_in_action}: {tokens:.1f} @ {revert_price:.3f} "
                       f"= ${revert_usdc:.2f} (edge ${edge_profit:.2f}) FILLED")
             else:
-                print(f"  REVERT {revert_side} {team_in_action}: {tokens:.1f} @ {revert_price:.3f} "
-                      f"— NOT FILLED (held to settlement)")
+                # Break-even exit: FAK at entry price after ~16s
+                breakeven_usdc = tokens * avg_p
+                if revert_side == "SELL":
+                    if team_in_action == t1_name:
+                        pos.sell_t1(tokens, breakeven_usdc)
+                    else:
+                        pos.sell_t2(tokens, breakeven_usdc)
+                else:
+                    if team_in_action == t1_name:
+                        pos.buy_t1(tokens, breakeven_usdc)
+                    else:
+                        pos.buy_t2(tokens, breakeven_usdc)
+                print(f"  REVERT {revert_side} {team_in_action}: {tokens:.1f} @ {avg_p:.3f} "
+                      f"= ${breakeven_usdc:.2f} BREAK-EVEN EXIT (edge revert not filled)")
 
             revert_results.append({
                 "revert_action": f"{revert_side}_{team_in_action}",
