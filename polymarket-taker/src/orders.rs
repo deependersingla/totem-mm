@@ -11,11 +11,10 @@ use crate::types::{FakOrder, Side};
 
 const USDC_DECIMALS: u64 = 1_000_000;
 
-/// Fee rate in basis points. Polymarket CLOB currently uses 0 for taker fees
-/// on the order struct (fees are handled separately). The fee_rate_bps field
-/// in the EIP-712 Order struct must match what the exchange expects (0).
-fn fee_rate_bps() -> u32 {
-    0
+/// Fee rate in basis points. Must match what the market expects.
+/// Sports markets use 1000 (10%). Fetched from Gamma API during market setup.
+fn fee_rate_bps(config: &Config) -> u32 {
+    config.fee_rate_bps
 }
 
 fn side_to_u8(side: Side) -> u8 {
@@ -234,7 +233,7 @@ fn build_signed_order_inner(
     //   type 2 (GNOSIS_SAFE): maker == funder/proxy wallet address
     let maker_addr = auth.funder_address().to_string();
 
-    let fee_rate_bps = fee_rate_bps();
+    let fee_rate_bps = fee_rate_bps(config);
 
     tracing::debug!(
         maker = %maker_addr,

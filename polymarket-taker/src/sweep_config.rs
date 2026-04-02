@@ -331,6 +331,7 @@ impl SweepAppConfig {
             fill_poll_timeout_ms: 10000,
             tick_size: self.tick_size.clone(),
             order_min_size: self.order_min_size,
+            fee_rate_bps: 0,
             ws_ping_interval_secs: 10,
             dry_run: self.dry_run,
             log_level: self.log_level.clone(),

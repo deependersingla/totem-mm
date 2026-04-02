@@ -1156,6 +1156,8 @@ async fn post_fetch_market(
         .unwrap_or_else(|| "0.01".to_string());
     let order_min_size = market["orderMinSize"].as_f64().unwrap_or(1.0);
     let order_min_size_dec = Decimal::from_str(&order_min_size.to_string()).unwrap_or(Decimal::ONE);
+    let taker_fee = market["takerBaseFee"].as_u64().unwrap_or(0) as u32;
+    let seconds_delay = market["secondsDelay"].as_u64().unwrap_or(3);
 
     if restricted {
         tracing::warn!("market is restricted — API trading may be blocked or limited");
@@ -1184,11 +1186,12 @@ async fn post_fetch_market(
         config.neg_risk = neg_risk;
         config.tick_size = tick_size.clone();
         config.order_min_size = order_min_size_dec;
+        config.fee_rate_bps = taker_fee;
         config.market_slug = body.slug.clone();
         config.persist();
     }
 
-    state.push_event("setup", &format!("fetched market: {} vs {} (tick={}, min_size={})", team_a_name, team_b_name, tick_size, order_min_size));
+    state.push_event("setup", &format!("fetched market: {} vs {} (tick={}, min_size={}, fee={}bps, delay={}s)", team_a_name, team_b_name, tick_size, order_min_size, taker_fee, seconds_delay));
 
     // Start/restart orderbook WS so book data shows before innings
     start_book_ws(&state);
@@ -1203,6 +1206,8 @@ async fn post_fetch_market(
         "neg_risk": neg_risk,
         "tick_size": tick_size,
         "order_min_size": order_min_size,
+        "fee_rate_bps": taker_fee,
+        "seconds_delay": seconds_delay,
         "restricted": restricted,
     })))
 }

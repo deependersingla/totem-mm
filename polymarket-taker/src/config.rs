@@ -75,6 +75,8 @@ pub struct SavedSettings {
     pub edge_wicket: Option<f64>,
     pub edge_boundary_4: Option<f64>,
     pub edge_boundary_6: Option<f64>,
+    pub fee_rate_bps: Option<u32>,
+    pub order_min_size: Option<String>,
     pub fill_ws_timeout_ms: Option<u64>,
     pub breakeven_timeout_ms: Option<u64>,
     pub maker: Option<MakerConfig>,
@@ -143,6 +145,8 @@ impl SavedSettings {
             edge_wicket: Some(config.edge_wicket),
             edge_boundary_4: Some(config.edge_boundary_4),
             edge_boundary_6: Some(config.edge_boundary_6),
+            fee_rate_bps: Some(config.fee_rate_bps),
+            order_min_size: Some(config.order_min_size.to_string()),
             fill_ws_timeout_ms: Some(config.fill_ws_timeout_ms),
             breakeven_timeout_ms: Some(config.breakeven_timeout_ms),
             maker: Some(config.maker_config.clone()),
@@ -182,6 +186,9 @@ pub struct Config {
     pub tick_size: String,
     /// Min order size from Gamma (orderMinSize); enforced when placing orders.
     pub order_min_size: Decimal,
+    /// Taker fee rate in basis points. Fetched from Gamma API (takerBaseFee).
+    /// Sports markets typically use 1000 (10%). Default 0 for non-sports.
+    pub fee_rate_bps: u32,
 
     pub ws_ping_interval_secs: u64,
     pub dry_run: bool,
@@ -285,7 +292,10 @@ impl Config {
             fill_poll_timeout_ms: saved.fill_poll_timeout_ms
                 .unwrap_or_else(|| env_or("FILL_POLL_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
             tick_size: env_or("TICK_SIZE", "0.01"),
-            order_min_size: Decimal::ONE,
+            order_min_size: saved.order_min_size.as_deref()
+                .and_then(|s| Decimal::from_str(s).ok())
+                .unwrap_or(Decimal::ONE),
+            fee_rate_bps: saved.fee_rate_bps.unwrap_or(0),
 
             ws_ping_interval_secs: env_or("WS_PING_INTERVAL_SECS", "10").parse()?,
             dry_run: saved.dry_run

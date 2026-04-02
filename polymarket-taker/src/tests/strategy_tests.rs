@@ -30,6 +30,7 @@ fn test_config(max_trade_usdc: &str, safe_percentage: u64) -> Config {
         fill_poll_timeout_ms: 5000,
         tick_size: "0.01".to_string(),
         order_min_size: Decimal::ONE,
+        fee_rate_bps: 0,
         ws_ping_interval_secs: 10,
         dry_run: true,
         log_level: "info".to_string(),
