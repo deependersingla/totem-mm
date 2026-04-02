@@ -316,7 +316,7 @@ impl Config {
             fill_ws_timeout_ms: saved.fill_ws_timeout_ms
                 .unwrap_or_else(|| env_or("FILL_WS_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
             breakeven_timeout_ms: saved.breakeven_timeout_ms
-                .unwrap_or_else(|| env_or("BREAKEVEN_TIMEOUT_MS", "3000").parse().unwrap_or(3000)),
+                .unwrap_or_else(|| env_or("BREAKEVEN_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
             maker_config: saved.maker.unwrap_or_default(),
 
             builder_api_key: saved.builder_api_key.unwrap_or_default(),

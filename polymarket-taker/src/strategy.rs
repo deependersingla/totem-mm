@@ -399,24 +399,32 @@ fn spawn_breakeven_monitor(
         }
 
         // Check order status on CLOB
-        let is_filled = match orders::get_order(&auth, &revert_order_id).await {
+        let should_exit = match orders::get_order(&auth, &revert_order_id).await {
             Ok(open_order) => {
                 let filled = open_order.filled_size();
-                if !filled.is_zero() {
-                    tracing::info!(order_id = %revert_order_id, filled = %filled, "revert filled before breakeven timeout");
+                let status = open_order.status.as_deref().unwrap_or("unknown").to_lowercase();
+                if !filled.is_zero() || status == "matched" {
+                    tracing::info!(order_id = %revert_order_id, filled = %filled, status, "revert already filled/matched");
                     app.remove_revert(&revert_order_id);
-                    true
-                } else {
+                    false // don't exit — revert worked
+                } else if status == "delayed" {
+                    // Sports market matching delay — order is being processed, don't cancel
+                    tracing::info!(order_id = %revert_order_id, "revert in delayed status, waiting");
+                    app.remove_revert(&revert_order_id);
                     false
+                } else {
+                    true // still live/open — proceed with cancel + breakeven
                 }
             }
             Err(e) => {
-                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: failed to check revert status, proceeding with cancel");
-                false
+                // Can't check status — order might already be gone (matched/cancelled)
+                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: can't check revert status");
+                app.remove_revert(&revert_order_id);
+                false // don't blindly cancel + exit, too risky
             }
         };
 
-        if is_filled {
+        if !should_exit {
             return;
         }
 
@@ -426,8 +434,10 @@ fn spawn_breakeven_monitor(
 
         if !config.dry_run {
             if let Err(e) = orders::cancel_order(&config, &auth, &revert_order_id).await {
-                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: cancel failed");
-                app.push_event("error", &format!("{label}: breakeven cancel failed — {e}"));
+                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: cancel failed (order may already be matched)");
+                app.push_event("warn", &format!("{label}: cancel failed — {e} (order likely already matched)"));
+                app.remove_revert(&revert_order_id);
+                return; // don't place breakeven if we couldn't cancel — order was likely filled
             }
         }
         app.remove_revert(&revert_order_id);
