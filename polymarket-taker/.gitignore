@@ -2,6 +2,12 @@
 .env
 sweep.env
 sweep_settings.json
+settings.json
 *.pem
 *.key
 *.log
+
+# Telegram bot
+telegram-bot/config.json
+telegram-bot/venv/
+telegram-bot/__pycache__/

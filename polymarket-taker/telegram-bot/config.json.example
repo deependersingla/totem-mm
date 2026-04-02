@@ -1,0 +1,6 @@
+{
+    "telegram_bot_token": "<from @BotFather>",
+    "telegram_admin_id": 0,
+    "taker_url": "http://localhost:3000",
+    "granted_users": []
+}
