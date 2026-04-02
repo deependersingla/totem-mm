@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
-use futures_util::future;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;

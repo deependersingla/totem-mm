@@ -27,6 +27,7 @@ pub struct ClobAuth {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct L1AuthBody {
     #[serde(rename = "address")]
     address: String,

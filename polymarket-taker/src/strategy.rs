@@ -181,6 +181,7 @@ struct FillInfo {
     filled_size: Decimal,
     avg_price: Decimal,
     order: FakOrder,
+    #[allow(dead_code)]
     tag: String,
     order_id: String,
 }
@@ -603,6 +604,7 @@ async fn fire_fak_batch(
     (sell_result, buy_result)
 }
 
+#[allow(dead_code)]
 async fn fire_fak(
     config: &Config,
     auth: &ClobAuth,

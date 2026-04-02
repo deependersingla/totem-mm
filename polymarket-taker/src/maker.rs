@@ -389,7 +389,7 @@ async fn refresh_quotes(
     let config = state.config.read().unwrap().clone();
 
     // Get orderbook snapshot
-    let (book_a, book_b) = {
+    let (book_a, _book_b) = {
         let br = state.book_rx.read().unwrap();
         match br.as_ref() {
             Some(rx) => rx.borrow().clone(),

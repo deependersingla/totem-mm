@@ -15,8 +15,6 @@ use serde::Deserialize;
 use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
 
-use tokio_util::sync::CancellationToken;
-
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::heartbeat;
@@ -320,6 +318,7 @@ async fn get_balances(State(state): State<S>) -> Json<serde_json::Value> {
 // ── Book ────────────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
+#[allow(dead_code)]
 struct BookLevel { price: Decimal, size: Decimal }
 
 async fn get_book(State(state): State<S>) -> Json<serde_json::Value> {
