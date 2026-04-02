@@ -76,6 +76,7 @@ pub struct SavedSettings {
     pub edge_boundary_4: Option<f64>,
     pub edge_boundary_6: Option<f64>,
     pub fill_ws_timeout_ms: Option<u64>,
+    pub breakeven_timeout_ms: Option<u64>,
     pub maker: Option<MakerConfig>,
     /// Builder API credentials (from polymarket.com/settings?tab=builder).
     /// Only used by the sweep engine for order attribution.
@@ -143,6 +144,7 @@ impl SavedSettings {
             edge_boundary_4: Some(config.edge_boundary_4),
             edge_boundary_6: Some(config.edge_boundary_6),
             fill_ws_timeout_ms: Some(config.fill_ws_timeout_ms),
+            breakeven_timeout_ms: Some(config.breakeven_timeout_ms),
             maker: Some(config.maker_config.clone()),
             builder_api_key: Some(config.builder_api_key.clone()).filter(|s| !s.is_empty()),
             builder_api_secret: Some(config.builder_api_secret.clone()).filter(|s| !s.is_empty()),
@@ -207,6 +209,12 @@ pub struct Config {
     pub edge_boundary_6: f64,
 
     pub fill_ws_timeout_ms: u64,
+
+    /// After placing a revert GTC, wait this long for it to fill.
+    /// If still unfilled, cancel it and FAK exit at entry price (break-even).
+    /// 0 = disabled (revert sits forever as GTC). Default: 3000ms.
+    pub breakeven_timeout_ms: u64,
+
     pub maker_config: MakerConfig,
 
     /// Builder API credentials (sweep only). Separate from regular CLOB creds.
@@ -271,7 +279,7 @@ impl Config {
             safe_percentage: saved.safe_percentage
                 .unwrap_or_else(|| env_or("SAFE_PERCENTAGE", "2").parse().unwrap_or(2)),
             revert_delay_ms: saved.revert_delay_ms
-                .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "3000").parse().unwrap_or(3000)),
+                .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "9500").parse().unwrap_or(9500)),
             fill_poll_interval_ms: saved.fill_poll_interval_ms
                 .unwrap_or_else(|| env_or("FILL_POLL_INTERVAL_MS", "500").parse().unwrap_or(500)),
             fill_poll_timeout_ms: saved.fill_poll_timeout_ms
@@ -297,6 +305,8 @@ impl Config {
 
             fill_ws_timeout_ms: saved.fill_ws_timeout_ms
                 .unwrap_or_else(|| env_or("FILL_WS_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
+            breakeven_timeout_ms: saved.breakeven_timeout_ms
+                .unwrap_or_else(|| env_or("BREAKEVEN_TIMEOUT_MS", "3000").parse().unwrap_or(3000)),
             maker_config: saved.maker.unwrap_or_default(),
 
             builder_api_key: saved.builder_api_key.unwrap_or_default(),

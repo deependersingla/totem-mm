@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -79,6 +80,27 @@ pub struct TradeRecord {
     pub order_id: String,
 }
 
+/// A GTC revert order that has been placed and is waiting to fill.
+/// Tracked so we can cancel stale reverts on opposite events and implement break-even exit.
+#[derive(Debug, Clone)]
+pub struct PendingRevert {
+    pub order_id: String,
+    pub team: Team,
+    pub side: Side,
+    pub size: Decimal,
+    pub entry_price: Decimal,
+    pub revert_limit_price: Decimal,
+    pub placed_at: Instant,
+    pub label: String,
+}
+
+impl PendingRevert {
+    /// For serialization in /api/status — Instant is not serializable.
+    pub fn age_secs(&self) -> f64 {
+        self.placed_at.elapsed().as_secs_f64()
+    }
+}
+
 pub struct AppState {
     pub config: RwLock<Config>,
     pub auth: RwLock<Option<ClobAuth>>,
@@ -100,6 +122,8 @@ pub struct AppState {
     pub fill_tx: RwLock<Option<mpsc::Sender<FillEvent>>>,
     pub user_ws_cancel: RwLock<Option<CancellationToken>>,
     pub maker_config: RwLock<MakerConfig>,
+    // ── Revert tracking ────────────────────────────────────────────────────
+    pub pending_reverts: Mutex<Vec<PendingRevert>>,
     // ── Sweep (endgame) state ──────────────────────────────────────────────
     pub sweep_phase: RwLock<SweepPhase>,
     pub sweep_config: RwLock<Option<SweepConfig>>,
@@ -134,6 +158,7 @@ impl AppState {
             fill_tx: RwLock::new(None),
             user_ws_cancel: RwLock::new(None),
             maker_config: RwLock::new(maker_cfg),
+            pending_reverts: Mutex::new(Vec::new()),
             sweep_phase: RwLock::new(SweepPhase::Idle),
             sweep_config: RwLock::new(None),
             sweep_orders: Mutex::new(Vec::new()),
@@ -192,6 +217,46 @@ impl AppState {
         }
     }
 
+    // ── Revert tracking helpers ─────────────────────────────────────────────
+
+    /// Record a newly placed revert GTC order.
+    pub fn push_revert(&self, revert: PendingRevert) {
+        self.pending_reverts.lock().unwrap().push(revert);
+    }
+
+    /// Remove a revert by order_id (e.g. when it fills or is cancelled).
+    /// Returns the removed entry if found.
+    pub fn remove_revert(&self, order_id: &str) -> Option<PendingRevert> {
+        let mut reverts = self.pending_reverts.lock().unwrap();
+        if let Some(idx) = reverts.iter().position(|r| r.order_id == order_id) {
+            Some(reverts.swap_remove(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Remove and return all pending reverts for a given team.
+    /// Used when an opposite event arrives and we need to cancel stale reverts.
+    pub fn take_reverts_for_team(&self, team: Team) -> Vec<PendingRevert> {
+        let mut reverts = self.pending_reverts.lock().unwrap();
+        let mut taken = Vec::new();
+        let mut i = 0;
+        while i < reverts.len() {
+            if reverts[i].team == team {
+                taken.push(reverts.swap_remove(i));
+                // Don't increment i — swap_remove moved last element here
+            } else {
+                i += 1;
+            }
+        }
+        taken
+    }
+
+    /// Count of pending reverts (for /api/status).
+    pub fn pending_revert_count(&self) -> usize {
+        self.pending_reverts.lock().unwrap().len()
+    }
+
     pub fn reset_for_new_match(&self) {
         let config = self.config.read().unwrap();
         *self.phase.write().unwrap() = MatchPhase::Idle;
@@ -203,6 +268,7 @@ impl AppState {
         pos.trade_count = 0;
         pos.total_budget = config.total_budget_usdc;
         self.clear_orders();
+        self.pending_reverts.lock().unwrap().clear();
         self.events.lock().unwrap().clear();
         self.inventory_history.lock().unwrap().clear();
         self.trade_log.lock().unwrap().clear();
