@@ -665,8 +665,7 @@ async fn poll_fill_status(
     tracing::info!(tag = %result.tag, order_id, "waiting 3.5s for sports market matching delay");
     tokio::time::sleep(MATCH_DELAY).await;
 
-    // After the matching delay, the order should be processed quickly.
-    // Poll for the result with a generous timeout for data indexer lag.
+    // Try to confirm the fill via get_order API.
     let deadline = tokio::time::Instant::now() + poll_timeout;
 
     loop {
@@ -676,7 +675,7 @@ async fn poll_fill_status(
                 let price = open_order.fill_price();
                 let status = open_order.status.as_deref().unwrap_or("unknown");
 
-                tracing::debug!(
+                tracing::info!(
                     tag = %result.tag, order_id, status,
                     filled = %filled, price = %price,
                     "poll fill status"
@@ -694,6 +693,7 @@ async fn poll_fill_status(
                     });
                 }
 
+                // If explicitly killed/cancelled, no fill happened
                 if open_order.is_terminal() {
                     tracing::warn!(
                         tag = %result.tag, order_id, status,
@@ -704,7 +704,7 @@ async fn poll_fill_status(
                 }
             }
             Err(e) => {
-                tracing::debug!(tag = %result.tag, error = %e, "poll_fill: order not indexed yet");
+                tracing::warn!(tag = %result.tag, order_id, error = %e, "poll_fill: get_order failed");
             }
         }
 
@@ -715,51 +715,24 @@ async fn poll_fill_status(
         tokio::time::sleep(poll_interval).await;
     }
 
-    // Order endpoint didn't return a result — try /data/trades as fallback.
-    // The trades API may index faster than the order API.
-    tracing::info!(tag = %result.tag, order_id, "order poll timed out — checking /data/trades fallback");
-    let token_id = config.token_id(result.intended_order.team);
-    match orders::get_user_trades(auth, Some(token_id)).await {
-        Ok(trades) => {
-            // Find a trade matching our order_id
-            for t in &trades {
-                let trade_oid = t.get("order_id")
-                    .or_else(|| t.get("orderID"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if trade_oid == order_id {
-                    let size_str = t.get("size").and_then(|v| v.as_str()).unwrap_or("0");
-                    let price_str = t.get("price").and_then(|v| v.as_str()).unwrap_or("0");
-                    let filled: Decimal = size_str.parse().unwrap_or(Decimal::ZERO);
-                    let price: Decimal = price_str.parse().unwrap_or(Decimal::ZERO);
-                    if !filled.is_zero() {
-                        tracing::info!(
-                            tag = %result.tag, order_id,
-                            filled = %filled, price = %price,
-                            "found fill via /data/trades fallback"
-                        );
-                        app.push_event("fill", &format!("{}: filled {} @ {} (via trades API)",
-                            result.tag, filled, price));
-                        return Some(FillInfo {
-                            filled_size: filled,
-                            avg_price: if price.is_zero() { result.intended_order.price } else { price },
-                            order: result.intended_order,
-                            tag: result.tag,
-                            order_id: oid,
-                        });
-                    }
-                }
-            }
-            tracing::warn!(tag = %result.tag, order_id, "no matching trade found in /data/trades");
-        }
-        Err(e) => {
-            tracing::warn!(tag = %result.tag, error = %e, "/data/trades fallback failed");
-        }
-    }
-
-    tracing::warn!(tag = %result.tag, order_id, "fill poll timed out — no confirmed fill");
-    app.push_event("warn", &format!("{}: fill poll timed out, no confirmed fill — check on-chain balance", result.tag));
-    None
+    // Poll timed out — the order was accepted with "delayed" status but the data
+    // indexer never returned a result. On sports markets this typically means the
+    // order DID fill but the indexer is lagging. Assume fill at order price so we
+    // place the revert GTC. Position will be reconciled via on-chain balance sync.
+    tracing::warn!(
+        tag = %result.tag, order_id,
+        price = %result.intended_order.price, size = %result.intended_order.size,
+        "poll timed out — assuming fill at order price (sports market indexer lag)"
+    );
+    app.push_event("fill", &format!("{}: assumed fill {} @ {} (indexer timeout)",
+        result.tag, result.intended_order.size, result.intended_order.price));
+    Some(FillInfo {
+        filled_size: result.intended_order.size,
+        avg_price: result.intended_order.price,
+        order: result.intended_order,
+        tag: result.tag,
+        order_id: oid,
+    })
 }
 
 pub(crate) fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
