@@ -282,9 +282,16 @@ async fn execute_event_trade(
         tokio::time::sleep(revert_delay - elapsed).await;
     }
 
-    // Determine edge in ticks based on signal type
-    let edge_ticks = edge_pct_for_label(label, &config); // reusing field name, now means ticks
-    let tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
+    // Re-read config for latest tick_size (Polymarket can change it mid-match)
+    let config = app.config.read().unwrap().clone();
+
+    // Fetch latest tick size from Gamma API
+    let tick: Decimal = match refresh_tick_size(&config, app).await {
+        Some(t) => t,
+        None => config.tick_size.parse().unwrap_or(dec!(0.01)),
+    };
+
+    let edge_ticks = edge_pct_for_label(label, &config);
     let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
 
     tracing::info!(delay_ms = config.revert_delay_ms, edge_ticks, tick = %tick, edge_amount = %edge_amount, "{label} REVERT");
@@ -307,7 +314,7 @@ async fn execute_event_trade(
             price: limit_price,
             size,
         };
-        if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_SELL", app).await {
+        if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_SELL", app).await {
             let revert_label = format!("{label}_REVERT_SELL");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
@@ -342,7 +349,7 @@ async fn execute_event_trade(
             price: limit_price,
             size,
         };
-        if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_BUY", app).await {
+        if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_BUY", app).await {
             let revert_label = format!("{label}_REVERT_BUY");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
@@ -441,6 +448,31 @@ fn spawn_revert_fill_monitor(
         tracing::warn!(order_id = %order_id, label = %label, "revert fill monitor timed out after 1h");
         app.remove_revert(&order_id);
     });
+}
+
+/// Fetch the latest tick size from Gamma API and update config if changed.
+async fn refresh_tick_size(config: &Config, app: &Arc<AppState>) -> Option<Decimal> {
+    if config.market_slug.is_empty() {
+        return None;
+    }
+    let url = format!("https://gamma-api.polymarket.com/markets?slug={}", config.market_slug);
+    let resp = reqwest::get(&url).await.ok()?;
+    let markets: Vec<serde_json::Value> = resp.json().await.ok()?;
+    let market = markets.first()?;
+    let tick_f64 = market["orderPriceMinTickSize"].as_f64()?;
+    let tick: Decimal = Decimal::from_f64_retain(tick_f64)?;
+
+    // Update config if tick changed
+    let old_tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
+    if tick != old_tick {
+        tracing::warn!(old = %old_tick, new = %tick, "tick size changed mid-match!");
+        app.push_event("warn", &format!("tick size changed: {old_tick} → {tick}"));
+        let mut cfg = app.config.write().unwrap();
+        cfg.tick_size = tick.to_string();
+        cfg.persist();
+    }
+
+    Some(tick)
 }
 
 fn is_boundary(runs: u8) -> bool {
