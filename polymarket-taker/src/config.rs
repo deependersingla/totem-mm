@@ -286,7 +286,7 @@ impl Config {
             safe_percentage: saved.safe_percentage
                 .unwrap_or_else(|| env_or("SAFE_PERCENTAGE", "2").parse().unwrap_or(2)),
             revert_delay_ms: saved.revert_delay_ms
-                .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "9500").parse().unwrap_or(9500)),
+                .unwrap_or_else(|| env_or("REVERT_DELAY_MS", "0").parse().unwrap_or(0)),
             fill_poll_interval_ms: saved.fill_poll_interval_ms
                 .unwrap_or_else(|| env_or("FILL_POLL_INTERVAL_MS", "500").parse().unwrap_or(500)),
             fill_poll_timeout_ms: saved.fill_poll_timeout_ms
