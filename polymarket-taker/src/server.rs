@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
-use futures_util::future;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
@@ -142,6 +141,7 @@ struct StatusResponse {
     book_b_bid: Option<Decimal>,
     book_b_ask: Option<Decimal>,
     live_orders: usize,
+    pending_reverts: usize,
     trade_team_a: bool,
     trade_team_b: bool,
 }
@@ -188,6 +188,7 @@ async fn get_status(State(state): State<S>) -> Json<StatusResponse> {
         book_b_bid: bb_bid,
         book_b_ask: bb_ask,
         live_orders: state.live_order_ids.lock().unwrap().len(),
+        pending_reverts: state.pending_revert_count(),
         trade_team_a: *state.trade_team_a.read().unwrap(),
         trade_team_b: *state.trade_team_b.read().unwrap(),
     })
@@ -721,6 +722,7 @@ struct LimitsRequest {
     edge_wicket: Option<f64>,
     edge_boundary_4: Option<f64>,
     edge_boundary_6: Option<f64>,
+    breakeven_timeout_ms: Option<u64>,
 }
 
 async fn post_limits(
@@ -751,6 +753,7 @@ async fn post_limits(
     if let Some(v) = body.edge_wicket { config.edge_wicket = v; }
     if let Some(v) = body.edge_boundary_4 { config.edge_boundary_4 = v; }
     if let Some(v) = body.edge_boundary_6 { config.edge_boundary_6 = v; }
+    if let Some(v) = body.breakeven_timeout_ms { config.breakeven_timeout_ms = v; }
     config.persist();
     drop(config); // release write lock before acquiring position mutex
 

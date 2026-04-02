@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket Taker Telegram Bot
+After=totem-taker.service
+Requires=totem-taker.service
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/polymarket-taker/telegram-bot
+ExecStart=/home/%i/polymarket-taker/telegram-bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

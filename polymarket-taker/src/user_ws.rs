@@ -24,6 +24,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Raw trade message from user WebSocket.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct RawTradeMessage {
     #[serde(default)]
     event_type: String,
@@ -45,6 +46,7 @@ struct RawTradeMessage {
 
 /// Raw order message from user WebSocket.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct RawOrderMessage {
     #[serde(default)]
     event_type: String,

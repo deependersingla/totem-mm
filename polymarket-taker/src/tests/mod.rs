@@ -3,6 +3,7 @@ mod heartbeat_tests;
 mod latency_tests;
 mod maker_tests;
 mod orders_tests;
+mod pending_revert_tests;
 mod position_tests;
 mod signal_tests;
 mod strategy_tests;

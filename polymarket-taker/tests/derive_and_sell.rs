@@ -97,7 +97,7 @@ async fn test_derive_then_sell_order() {
     use polymarket_taker::types::{FakOrder, Side, Team};
     use rust_decimal_macros::dec;
 
-    let order = FakOrder {
+    let _order = FakOrder {
         side: Side::Sell,
         team: Team::TeamB,
         price: dec!(0.01), // $0.01 — minimum price, won't fill

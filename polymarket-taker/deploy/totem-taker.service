@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket Taker Bot
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/polymarket-taker
+ExecStart=/home/%i/polymarket-taker/target/release/polymarket-taker
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

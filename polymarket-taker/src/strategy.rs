@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rust_decimal::Decimal;
 use tokio::sync::{broadcast, watch};
@@ -10,7 +10,7 @@ use crate::clob_auth::ClobAuth;
 use crate::config::Config;
 use crate::orders::{self, BatchOrderResult};
 use crate::position::Position;
-use crate::state::{AppState, TradeRecord};
+use crate::state::{AppState, PendingRevert, TradeRecord};
 use crate::types::{CricketSignal, FakOrder, OrderBook, Side, Team};
 
 fn random_tag(prefix: &str) -> String {
@@ -181,6 +181,7 @@ struct FillInfo {
     filled_size: Decimal,
     avg_price: Decimal,
     order: FakOrder,
+    #[allow(dead_code)]
     tag: String,
     order_id: String,
 }
@@ -281,13 +282,7 @@ async fn execute_event_trade(
     }
 
     // Determine edge % based on signal type (label)
-    let edge_pct = if label.starts_with("WICKET") || label.starts_with("W") {
-        config.edge_wicket
-    } else if label.contains('6') {
-        config.edge_boundary_6
-    } else {
-        config.edge_boundary_4
-    };
+    let edge_pct = edge_pct_for_label(label, &config);
     let edge_mult = Decimal::from_f64_retain(edge_pct / 100.0).unwrap_or(Decimal::ZERO);
 
     tracing::info!(delay_ms = config.revert_delay_ms, edge_pct, "{label} REVERT");
@@ -306,12 +301,29 @@ async fn execute_event_trade(
             limit_price = %limit_price, size = %size,
             "REVERT_SELL: GTC sell limit (original + {edge_pct}% edge)"
         );
-        execute_limit(config, auth, &FakOrder {
+        let revert_order = FakOrder {
             team: f.order.team,
             side: Side::Sell,
             price: limit_price,
             size,
-        }, position, "REVERT_SELL", app).await;
+        };
+        if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_SELL", app).await {
+            let revert_label = format!("{label}_REVERT_SELL");
+            app.push_revert(PendingRevert {
+                order_id: oid.clone(),
+                team: f.order.team,
+                side: Side::Sell,
+                size,
+                entry_price: f.avg_price,
+                revert_limit_price: limit_price,
+                placed_at: Instant::now(),
+                label: revert_label.clone(),
+            });
+            spawn_breakeven_monitor(
+                config.clone(), auth.clone(), app.clone(),
+                oid, f.avg_price, f.order.team, Side::Sell, size, revert_label,
+            );
+        }
     }
     // Revert sell → buy back at original_price * (1 - edge)
     // e.g. sold at 25¢ with 1% edge → buy limit at 24.75¢ → rounds to 25¢
@@ -326,13 +338,135 @@ async fn execute_event_trade(
             limit_price = %limit_price, size = %size,
             "REVERT_BUY: GTC buy limit (original - {edge_pct}% edge)"
         );
-        execute_limit(config, auth, &FakOrder {
+        let revert_order = FakOrder {
             team: f.order.team,
             side: Side::Buy,
             price: limit_price,
             size,
-        }, position, "REVERT_BUY", app).await;
+        };
+        if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_BUY", app).await {
+            let revert_label = format!("{label}_REVERT_BUY");
+            app.push_revert(PendingRevert {
+                order_id: oid.clone(),
+                team: f.order.team,
+                side: Side::Buy,
+                size,
+                entry_price: f.avg_price,
+                revert_limit_price: limit_price,
+                placed_at: Instant::now(),
+                label: revert_label.clone(),
+            });
+            spawn_breakeven_monitor(
+                config.clone(), auth.clone(), app.clone(),
+                oid, f.avg_price, f.order.team, Side::Buy, size, revert_label,
+            );
+        }
     }
+}
+
+/// Spawn a background task that monitors a placed revert GTC order.
+/// After `breakeven_timeout_ms`, if the revert hasn't filled:
+///   1. Cancel the revert order
+///   2. Place a break-even FAK at the original entry_price (zero P&L exit)
+///   3. Remove from pending_reverts
+/// If the revert fills before timeout, the pending_revert is cleaned up
+/// and no break-even FAK is placed.
+fn spawn_breakeven_monitor(
+    config: Config,
+    auth: ClobAuth,
+    app: Arc<AppState>,
+    revert_order_id: String,
+    entry_price: Decimal,
+    team: Team,
+    revert_side: Side, // side of the revert GTC (Sell for REVERT_SELL, Buy for REVERT_BUY)
+    size: Decimal,
+    label: String,
+) {
+    let timeout_ms = config.breakeven_timeout_ms;
+    if timeout_ms == 0 {
+        return; // disabled
+    }
+
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+
+        // Check if revert is still pending (hasn't been removed by fill or opposite event)
+        let still_pending = app.pending_reverts.lock().unwrap()
+            .iter().any(|r| r.order_id == revert_order_id);
+        if !still_pending {
+            tracing::debug!(order_id = %revert_order_id, "breakeven monitor: revert already resolved");
+            return;
+        }
+
+        // Check order status on CLOB
+        let is_filled = match orders::get_order(&auth, &revert_order_id).await {
+            Ok(open_order) => {
+                let filled = open_order.filled_size();
+                if !filled.is_zero() {
+                    tracing::info!(order_id = %revert_order_id, filled = %filled, "revert filled before breakeven timeout");
+                    app.remove_revert(&revert_order_id);
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: failed to check revert status, proceeding with cancel");
+                false
+            }
+        };
+
+        if is_filled {
+            return;
+        }
+
+        // Cancel the unfilled revert
+        tracing::info!(order_id = %revert_order_id, label = %label, "breakeven: cancelling unfilled revert");
+        app.push_event("breakeven", &format!("{label}: cancelling unfilled revert {revert_order_id}"));
+
+        if !config.dry_run {
+            if let Err(e) = orders::cancel_order(&config, &auth, &revert_order_id).await {
+                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: cancel failed");
+                app.push_event("error", &format!("{label}: breakeven cancel failed — {e}"));
+            }
+        }
+        app.remove_revert(&revert_order_id);
+
+        // Place break-even FAK at entry price — exit the position at zero P&L
+        let breakeven_order = FakOrder {
+            team,
+            side: revert_side,
+            price: entry_price,
+            size,
+        };
+
+        let be_tag = format!("{label}_BREAKEVEN");
+        tracing::info!(
+            tag = %be_tag, side = %revert_side, team = %config.team_name(team),
+            price = %entry_price, size = %size,
+            "breakeven: FAK exit at entry price"
+        );
+        app.push_event("breakeven", &format!("{be_tag}: FAK {} {} @ {} sz={}",
+            revert_side, config.team_name(team), entry_price, size));
+
+        if config.dry_run {
+            tracing::info!(tag = %be_tag, "[DRY RUN] would place break-even FAK");
+            return;
+        }
+
+        match orders::post_fak_order(&config, &auth, &breakeven_order, &be_tag).await {
+            Ok(resp) => {
+                let oid = resp.order_id.unwrap_or_default();
+                let status = resp.status.unwrap_or_default();
+                tracing::info!(tag = %be_tag, order_id = %oid, status, "break-even FAK placed");
+                app.push_event("breakeven", &format!("{be_tag}: placed ({oid}) [{status}]"));
+            }
+            Err(e) => {
+                tracing::error!(tag = %be_tag, error = %e, "break-even FAK failed");
+                app.push_event("error", &format!("{be_tag}: {e}"));
+            }
+        }
+    });
 }
 
 fn is_boundary(runs: u8) -> bool {
@@ -470,6 +604,7 @@ async fn fire_fak_batch(
     (sell_result, buy_result)
 }
 
+#[allow(dead_code)]
 async fn fire_fak(
     config: &Config,
     auth: &ClobAuth,
@@ -716,6 +851,18 @@ pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> 
     Some(FakOrder { team, side: Side::Buy, price: best_ask.price, size })
 }
 
+/// Select the revert edge percentage based on the signal label.
+/// "WICKET" → edge_wicket, labels containing '6' → edge_boundary_6, else → edge_boundary_4.
+pub(crate) fn edge_pct_for_label(label: &str, config: &Config) -> f64 {
+    if label == "WICKET" {
+        config.edge_wicket
+    } else if label.contains('6') {
+        config.edge_boundary_6
+    } else {
+        config.edge_boundary_4
+    }
+}
+
 pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
     if price.is_zero() { return Decimal::ZERO; }
     let max_tokens = config.max_trade_usdc / price;
@@ -723,17 +870,18 @@ pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal)
     max_tokens.min(*available).floor()
 }
 
+/// Place a GTC limit order and return the order_id if successful.
 async fn execute_limit(
     config: &Config, auth: &ClobAuth, order: &FakOrder,
     _position: &Position, tag: &str, app: &Arc<AppState>,
-) {
+) -> Option<String> {
     if config.dry_run {
         let notional = order.price * order.size;
         tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
             price = %order.price, size = %order.size, notional = %notional,
             "[DRY RUN] would place GTC limit order");
         app.push_event("trade", &format!("[DRY] {tag}: GTC {} {} @ {} sz={}", order.side, config.team_name(order.team), order.price, order.size));
-        return;
+        return Some(format!("dry_run_{tag}"));
     }
 
     match orders::post_limit_order(config, auth, order, tag).await {
@@ -753,16 +901,19 @@ async fn execute_limit(
                 cost,
                 order_type: "GTC".into(),
                 label: tag.to_string(),
-                order_id: oid,
+                order_id: oid.clone(),
             });
+            Some(oid)
         }
         Ok(resp) => {
             let msg = resp.error_msg.unwrap_or_default();
             app.push_event("error", &format!("{tag}: GTC rejected — {msg}"));
+            None
         }
         Err(e) => {
             tracing::error!(tag, error = %e, "GTC limit order failed");
             app.push_event("error", &format!("{tag}: {e}"));
+            None
         }
     }
 }

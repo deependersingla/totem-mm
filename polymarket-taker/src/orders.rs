@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ethers::types::{Address, U256};
+use ethers::types::Address;
 use ethers::utils::keccak256;
 use rand::Rng;
 use rust_decimal::Decimal;

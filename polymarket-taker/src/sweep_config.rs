@@ -343,6 +343,7 @@ impl SweepAppConfig {
             edge_boundary_4: 0.0,
             edge_boundary_6: 0.0,
             fill_ws_timeout_ms: 5000,
+            breakeven_timeout_ms: 3000,
             maker_config: crate::config::MakerConfig::default(),
             builder_api_key: self.builder_api_key.clone(),
             builder_api_secret: self.builder_api_secret.clone(),
