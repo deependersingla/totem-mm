@@ -47,11 +47,22 @@ def save_config(cfg: dict):
 
 CFG = load_config()
 TAKER_URL = CFG["taker_url"]
-ADMIN_ID = int(CFG["telegram_admin_id"])
+ADMIN_IDS: set[int] = set()
+# Support single admin_id or list of admin_ids
+_admin = CFG.get("telegram_admin_id", 0)
+if isinstance(_admin, list):
+    ADMIN_IDS = set(_admin)
+elif _admin:
+    ADMIN_IDS.add(int(_admin))
+for uid in CFG.get("admin_ids", []):
+    ADMIN_IDS.add(int(uid))
 GRANTED_USERS: set[int] = set(CFG.get("granted_users", []))
 
 # Shared async HTTP client
 http = httpx.AsyncClient(timeout=10.0)
+
+# All users who have interacted — they get buttons when innings starts
+active_users: set[int] = set()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -64,12 +75,29 @@ SIGNAL_KEYBOARD = InlineKeyboardMarkup([
 ])
 
 
+# Track bot message IDs per chat so /clear can delete them.
+# last_buttons_msg stores the most recent buttons message per chat (preserved on /clear).
+bot_messages: dict[int, list[int]] = {}
+last_buttons_msg: dict[int, int] = {}
+
+
+def track_msg(chat_id: int, msg_id: int):
+    bot_messages.setdefault(chat_id, []).append(msg_id)
+
+
+def track_buttons(chat_id: int, msg_id: int):
+    """Track as both a bot message and the latest buttons message."""
+    track_msg(chat_id, msg_id)
+    last_buttons_msg[chat_id] = msg_id
+
+
 def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    return user_id in ADMIN_IDS
 
 
 def is_granted(user_id: int) -> bool:
-    return user_id in GRANTED_USERS or is_admin(user_id)
+    # Public bot — anyone can send signals
+    return True
 
 
 async def taker_get(path: str) -> dict | list | None:
@@ -169,30 +197,6 @@ async def cmd_dryrun(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"dry_run={val}" if ok else f"failed: {resp}")
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("unauthorized")
-        return
-    ok, resp = await taker_post("/api/start-innings")
-    await update.message.reply_text("innings started" if ok else f"failed: {resp}")
-
-
-async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("unauthorized")
-        return
-    ok, resp = await taker_post("/api/stop-innings")
-    await update.message.reply_text("innings stopped" if ok else f"failed: {resp}")
-
-
-async def cmd_matchover(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("unauthorized")
-        return
-    ok, resp = await taker_post("/api/match-over")
-    await update.message.reply_text("match ended" if ok else f"failed: {resp}")
-
-
 async def cmd_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("unauthorized")
@@ -287,55 +291,89 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"user {uid} revoked")
 
 
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete all bot messages except the last buttons message."""
+    chat_id = update.effective_chat.id
+    keep = last_buttons_msg.get(chat_id)
+    ids = bot_messages.pop(chat_id, [])
+    kept = []
+    for mid in ids:
+        if mid == keep:
+            kept.append(mid)
+            continue
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    bot_messages[chat_id] = kept
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+
 # ── User signal buttons ──────────────────────────────────────────────────────
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Any message from a granted user shows the signal keyboard."""
+    """Any message shows the signal keyboard."""
     uid = update.effective_user.id
-    if not is_granted(uid):
-        return  # silently ignore non-granted users
+    uname = update.effective_user.username or uid
+    active_users.add(uid)
+    logger.info(f"message from @{uname} ({uid}): {update.message.text}")
 
-    await update.message.reply_text(
+    msg = await update.message.reply_text(
         "tap a signal:", reply_markup=SIGNAL_KEYBOARD
     )
+    track_buttons(msg.chat_id, msg.message_id)
 
 
 async def handle_signal_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle [4] [6] [W] button presses."""
+    """
+    Flow: [4][6][W] buttons → user taps → old buttons disappear,
+    confirmation text appears → new [4][6][W] buttons below it.
+    """
     query = update.callback_query
     uid = query.from_user.id
-    if not is_granted(uid):
-        await query.answer("unauthorized")
-        return
+    uname = query.from_user.username or uid
+    active_users.add(uid)
 
-    signal = query.data  # "4", "6", or "W"
-    await query.answer()  # dismiss the loading spinner
+    signal = query.data
+    await query.answer()
+
+    logger.info(f"signal from @{uname} ({uid}): {signal}")
 
     ok, resp = await taker_post("/api/signal", {"signal": signal})
 
     signal_names = {"4": "BOUNDARY 4", "6": "BOUNDARY 6", "W": "WICKET"}
     name = signal_names.get(signal, signal)
+    chat_id = query.message.chat_id
 
     if ok:
-        await query.edit_message_text(
-            f"{name} sent",
-            reply_markup=SIGNAL_KEYBOARD,
-        )
+        result = f"{name} sent"
+        logger.info(f"signal {signal} from @{uname} → OK")
     else:
-        await query.edit_message_text(
-            f"{name} failed: {resp}",
-            reply_markup=SIGNAL_KEYBOARD,
-        )
+        result = f"{name} failed: {resp}"
+        logger.warning(f"signal {signal} from @{uname} → FAILED: {resp}")
+
+    # 1. Replace old buttons with confirmation/error text (no buttons)
+    try:
+        await query.edit_message_text(result)
+    except Exception:
+        pass
+    track_msg(chat_id, query.message.message_id)
+
+    # 2. Send new buttons below
+    msg = await query.message.chat.send_message(
+        text="signal:", reply_markup=SIGNAL_KEYBOARD
+    )
+    track_buttons(chat_id, msg.message_id)
 
 
 # ── Event notifications to admin ─────────────────────────────────────────────
 
-NOTIFY_KINDS = {"filled", "error", "innings", "wicket", "boundary", "breakeven", "revert"}
-
-
 async def event_poller(app: Application):
-    """Background task: poll /api/events every 3s, forward new events to admin."""
+    """Background task: poll /api/events, send signal buttons when innings starts."""
     last_ts = ""
     bot = app.bot
 
@@ -346,25 +384,58 @@ async def event_poller(app: Application):
             if not data or not isinstance(data, list):
                 continue
 
-            new_events = []
             for evt in data:
                 ts = evt.get("ts", "")
-                if ts > last_ts:
-                    kind = evt.get("kind", "")
-                    if kind in NOTIFY_KINDS:
-                        new_events.append(evt)
+                if ts <= last_ts:
+                    continue
+                kind = evt.get("kind", "")
+                detail = evt.get("detail", "")
+
+                # When innings starts, delete old buttons and send fresh ones
+                if kind == "innings" and "started" in detail:
+                    all_users = active_users | ADMIN_IDS
+                    for uid in all_users:
+                        try:
+                            # Delete previous buttons if any
+                            old_btn = last_buttons_msg.pop(uid, None)
+                            if old_btn:
+                                try:
+                                    await bot.delete_message(chat_id=uid, message_id=old_btn)
+                                except Exception:
+                                    pass
+
+                            m1 = await bot.send_message(
+                                chat_id=uid,
+                                text=f"innings started — {detail}",
+                            )
+                            track_msg(uid, m1.message_id)
+                            m2 = await bot.send_message(
+                                chat_id=uid,
+                                text="signal:",
+                                reply_markup=SIGNAL_KEYBOARD,
+                            )
+                            track_buttons(uid, m2.message_id)
+                        except Exception as e:
+                            logger.warning(f"failed to send buttons to {uid}: {e}")
+
+                # When innings stops or match ends, delete buttons
+                if kind == "innings" and ("stopped" in detail or "over" in detail):
+                    all_users = active_users | ADMIN_IDS
+                    for uid in all_users:
+                        old_btn = last_buttons_msg.pop(uid, None)
+                        if old_btn:
+                            try:
+                                await bot.delete_message(chat_id=uid, message_id=old_btn)
+                            except Exception:
+                                pass
+                        try:
+                            m = await bot.send_message(chat_id=uid, text=f"stopped — {detail}")
+                            track_msg(uid, m.message_id)
+                        except Exception:
+                            pass
 
             if data:
                 last_ts = data[-1].get("ts", last_ts)
-
-            for evt in new_events:
-                msg = f"`{evt.get('ts', '')}` [{evt.get('kind', '')}] {evt.get('detail', '')}"
-                try:
-                    await bot.send_message(
-                        chat_id=ADMIN_ID, text=msg, parse_mode="Markdown"
-                    )
-                except Exception as e:
-                    logger.warning(f"failed to notify admin: {e}")
 
         except Exception as e:
             logger.warning(f"event poller error: {e}")
@@ -377,13 +448,14 @@ async def post_init(app: Application):
     """Send startup message to admin and start event poller."""
     data = await taker_get("/api/status")
     phase = data.get("phase", "unknown") if data else "unreachable"
-    try:
-        await app.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"bot connected, taker at {TAKER_URL}, phase={phase}",
-        )
-    except Exception as e:
-        logger.warning(f"failed to send startup message: {e}")
+    for aid in ADMIN_IDS:
+        try:
+            await app.bot.send_message(
+                chat_id=aid,
+                text=f"bot connected, taker at {TAKER_URL}, phase={phase}",
+            )
+        except Exception as e:
+            logger.warning(f"failed to send startup message to {aid}: {e}")
 
     asyncio.create_task(event_poller(app))
 
@@ -394,8 +466,8 @@ def main():
         logger.error("telegram_bot_token not set in config.json")
         return
 
-    if ADMIN_ID == 0:
-        logger.error("telegram_admin_id not set in config.json")
+    if not ADMIN_IDS:
+        logger.error("no admin IDs configured in config.json")
         return
 
     app = Application.builder().token(token).post_init(post_init).build()
@@ -405,15 +477,13 @@ def main():
     app.add_handler(CommandHandler("setup", cmd_setup))
     app.add_handler(CommandHandler("limits", cmd_limits))
     app.add_handler(CommandHandler("dryrun", cmd_dryrun))
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("matchover", cmd_matchover))
     app.add_handler(CommandHandler("book", cmd_book))
     app.add_handler(CommandHandler("trades", cmd_trades))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("grant", cmd_grant))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CommandHandler("clear", cmd_clear))
 
     # Signal buttons callback
     app.add_handler(CallbackQueryHandler(handle_signal_button))
@@ -421,7 +491,7 @@ def main():
     # Any text from granted user → show signal keyboard
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info(f"starting bot, admin={ADMIN_ID}, granted={GRANTED_USERS}")
+    logger.info(f"starting bot, admins={ADMIN_IDS}, granted={GRANTED_USERS}")
     app.run_polling()
 
 
