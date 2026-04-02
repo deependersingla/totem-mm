@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use tokio::sync::{broadcast, watch};
 
 use rand::Rng;
@@ -281,25 +282,24 @@ async fn execute_event_trade(
         tokio::time::sleep(revert_delay - elapsed).await;
     }
 
-    // Determine edge % based on signal type (label)
-    let edge_pct = edge_pct_for_label(label, &config);
-    let edge_mult = Decimal::from_f64_retain(edge_pct / 100.0).unwrap_or(Decimal::ZERO);
+    // Determine edge in ticks based on signal type
+    let edge_ticks = edge_pct_for_label(label, &config); // reusing field name, now means ticks
+    let tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
+    let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
 
-    tracing::info!(delay_ms = config.revert_delay_ms, edge_pct, "{label} REVERT");
-    app.push_event("revert", &format!("{label}: revert after {}ms (edge {edge_pct}%)", config.revert_delay_ms));
+    tracing::info!(delay_ms = config.revert_delay_ms, edge_ticks, tick = %tick, edge_amount = %edge_amount, "{label} REVERT");
+    app.push_event("revert", &format!("{label}: revert after {}ms (edge {edge_ticks} ticks = {edge_amount})", config.revert_delay_ms));
 
-    // Revert buy → sell back at original_price * (1 + edge)
-    // e.g. bought at 75¢ with 1% edge → sell limit at 75.75¢ → rounds to 76¢
-    // Fills at 76¢ or better. If market is at 80¢, fills at 80¢.
+    // Revert buy → sell back at avg_price + edge_ticks
+    // e.g. bought at 0.48 with 2 ticks → sell limit at 0.50
     if let Some(f) = buy_fill {
-        let raw_limit = f.avg_price * (Decimal::ONE + edge_mult);
-        let limit_price = raw_limit.round_dp(2);
-        let size = f.filled_size.round_dp(2); // CLOB requires max 2 dp for token amounts
+        let limit_price = (f.avg_price + edge_amount).round_dp(2);
+        let size = f.filled_size.round_dp(2);
         tracing::info!(
             team = %config.team_name(f.order.team),
-            original = %f.avg_price, edge_pct,
+            original = %f.avg_price, edge_ticks,
             limit_price = %limit_price, size = %size,
-            "REVERT_SELL: GTC sell limit (original + {edge_pct}% edge)"
+            "REVERT_SELL: GTC sell limit (original + {edge_ticks} ticks)"
         );
         let revert_order = FakOrder {
             team: f.order.team,
@@ -310,29 +310,31 @@ async fn execute_event_trade(
         if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_SELL", app).await {
             let revert_label = format!("{label}_REVERT_SELL");
             app.push_revert(PendingRevert {
-                order_id: oid,
+                order_id: oid.clone(),
                 team: f.order.team,
                 side: Side::Sell,
                 size,
                 entry_price: f.avg_price,
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
-                label: revert_label,
+                label: revert_label.clone(),
             });
+            spawn_revert_fill_monitor(
+                config.clone(), auth.clone(), app.clone(), position.clone(),
+                oid, f.order.team, Side::Sell, size, limit_price, revert_label,
+            );
         }
     }
-    // Revert sell → buy back at original_price * (1 - edge)
-    // e.g. sold at 25¢ with 1% edge → buy limit at 24.75¢ → rounds to 25¢
-    // Fills at 25¢ or better (lower). If market is at 22¢, fills at 22¢.
+    // Revert sell → buy back at avg_price - edge_ticks
+    // e.g. sold at 0.52 with 2 ticks → buy limit at 0.50
     if let Some(f) = sell_fill {
-        let raw_limit = f.avg_price * (Decimal::ONE - edge_mult);
-        let limit_price = raw_limit.round_dp(2);
+        let limit_price = (f.avg_price - edge_amount).max(tick).round_dp(2);
         let size = f.filled_size.round_dp(2);
         tracing::info!(
             team = %config.team_name(f.order.team),
-            original = %f.avg_price, edge_pct,
+            original = %f.avg_price, edge_ticks,
             limit_price = %limit_price, size = %size,
-            "REVERT_BUY: GTC buy limit (original - {edge_pct}% edge)"
+            "REVERT_BUY: GTC buy limit (original - {edge_ticks} ticks)"
         );
         let revert_order = FakOrder {
             team: f.order.team,
@@ -343,131 +345,101 @@ async fn execute_event_trade(
         if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_BUY", app).await {
             let revert_label = format!("{label}_REVERT_BUY");
             app.push_revert(PendingRevert {
-                order_id: oid,
+                order_id: oid.clone(),
                 team: f.order.team,
                 side: Side::Buy,
                 size,
                 entry_price: f.avg_price,
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
-                label: revert_label,
+                label: revert_label.clone(),
             });
+            spawn_revert_fill_monitor(
+                config.clone(), auth.clone(), app.clone(), position.clone(),
+                oid, f.order.team, Side::Buy, size, limit_price, revert_label,
+            );
         }
     }
 }
 
-/// Spawn a background task that monitors a placed revert GTC order.
-/// After `breakeven_timeout_ms`, if the revert hasn't filled:
-///   1. Cancel the revert order
-///   2. Place a break-even FAK at the original entry_price (zero P&L exit)
-///   3. Remove from pending_reverts
-/// If the revert fills before timeout, the pending_revert is cleaned up
-/// and no break-even FAK is placed.
-fn spawn_breakeven_monitor(
+/// Spawn a background task that polls a revert GTC order until it fills.
+/// When filled, logs the trade to the trade log and updates position.
+fn spawn_revert_fill_monitor(
     config: Config,
     auth: ClobAuth,
     app: Arc<AppState>,
-    revert_order_id: String,
-    entry_price: Decimal,
+    position: Position,
+    order_id: String,
     team: Team,
-    revert_side: Side, // side of the revert GTC (Sell for REVERT_SELL, Buy for REVERT_BUY)
+    side: Side,
     size: Decimal,
+    limit_price: Decimal,
     label: String,
 ) {
-    let timeout_ms = config.breakeven_timeout_ms;
-    if timeout_ms == 0 {
-        return; // disabled
-    }
-
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+        let poll_interval = Duration::from_secs(5);
+        let max_polls = 720; // 1 hour max (5s × 720)
 
-        // Check if revert is still pending (hasn't been removed by fill or opposite event)
-        let still_pending = app.pending_reverts.lock().unwrap()
-            .iter().any(|r| r.order_id == revert_order_id);
-        if !still_pending {
-            tracing::debug!(order_id = %revert_order_id, "breakeven monitor: revert already resolved");
-            return;
-        }
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
 
-        // Check order status on CLOB
-        let should_exit = match orders::get_order(&auth, &revert_order_id).await {
-            Ok(open_order) => {
-                let filled = open_order.filled_size();
-                let status = open_order.status.as_deref().unwrap_or("unknown").to_lowercase();
-                if !filled.is_zero() || status == "matched" {
-                    tracing::info!(order_id = %revert_order_id, filled = %filled, status, "revert already filled/matched");
-                    app.remove_revert(&revert_order_id);
-                    false // don't exit — revert worked
-                } else if status == "delayed" {
-                    // Sports market matching delay — order is being processed, don't cancel
-                    tracing::info!(order_id = %revert_order_id, "revert in delayed status, waiting");
-                    app.remove_revert(&revert_order_id);
-                    false
-                } else {
-                    true // still live/open — proceed with cancel + breakeven
+            // Check if revert was removed (cancelled by opposite event or reset)
+            let still_pending = app.pending_reverts.lock().unwrap()
+                .iter().any(|r| r.order_id == order_id);
+            if !still_pending {
+                tracing::debug!(order_id = %order_id, label = %label, "revert monitor: removed externally");
+                return;
+            }
+
+            match orders::get_order(&auth, &order_id).await {
+                Ok(open_order) => {
+                    let filled = open_order.filled_size();
+                    let fill_price = open_order.fill_price();
+                    let status = open_order.status.as_deref().unwrap_or("unknown").to_lowercase();
+
+                    if !filled.is_zero() || status == "matched" {
+                        let price = if fill_price.is_zero() { limit_price } else { fill_price };
+                        let cost = filled * price;
+
+                        // Update position
+                        {
+                            let mut pos = position.lock().unwrap();
+                            pos.on_fill(&FakOrder { team, side, price, size: filled });
+                        }
+
+                        let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${}",
+                            side, config.team_name(team), price, cost.round_dp(2));
+                        tracing::info!("{msg}");
+                        app.push_event("filled", &msg);
+                        app.log_trade(TradeRecord {
+                            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                            side: format!("{side}"),
+                            team: config.team_name(team).to_string(),
+                            size: filled,
+                            price,
+                            cost,
+                            order_type: "GTC".into(),
+                            label: label.clone(),
+                            order_id: order_id.clone(),
+                        });
+                        app.snapshot_inventory();
+                        app.remove_revert(&order_id);
+                        return;
+                    }
+
+                    if open_order.is_terminal() && filled.is_zero() {
+                        tracing::info!(order_id = %order_id, status, "revert order terminal with no fill");
+                        app.push_event("warn", &format!("{label}: revert {status} (no fill)"));
+                        app.remove_revert(&order_id);
+                        return;
+                    }
                 }
-            }
-            Err(e) => {
-                // Can't check status — order might already be gone (matched/cancelled)
-                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: can't check revert status");
-                app.remove_revert(&revert_order_id);
-                false // don't blindly cancel + exit, too risky
-            }
-        };
-
-        if !should_exit {
-            return;
-        }
-
-        // Cancel the unfilled revert
-        tracing::info!(order_id = %revert_order_id, label = %label, "breakeven: cancelling unfilled revert");
-        app.push_event("breakeven", &format!("{label}: cancelling unfilled revert {revert_order_id}"));
-
-        if !config.dry_run {
-            if let Err(e) = orders::cancel_order(&config, &auth, &revert_order_id).await {
-                tracing::warn!(order_id = %revert_order_id, error = %e, "breakeven: cancel failed (order may already be matched)");
-                app.push_event("warn", &format!("{label}: cancel failed — {e} (order likely already matched)"));
-                app.remove_revert(&revert_order_id);
-                return; // don't place breakeven if we couldn't cancel — order was likely filled
+                Err(_) => {} // not indexed yet, keep polling
             }
         }
-        app.remove_revert(&revert_order_id);
 
-        // Place break-even FAK at entry price — exit the position at zero P&L
-        let breakeven_order = FakOrder {
-            team,
-            side: revert_side,
-            price: entry_price,
-            size,
-        };
-
-        let be_tag = format!("{label}_BREAKEVEN");
-        tracing::info!(
-            tag = %be_tag, side = %revert_side, team = %config.team_name(team),
-            price = %entry_price, size = %size,
-            "breakeven: FAK exit at entry price"
-        );
-        app.push_event("breakeven", &format!("{be_tag}: FAK {} {} @ {} sz={}",
-            revert_side, config.team_name(team), entry_price, size));
-
-        if config.dry_run {
-            tracing::info!(tag = %be_tag, "[DRY RUN] would place break-even FAK");
-            return;
-        }
-
-        match orders::post_fak_order(&config, &auth, &breakeven_order, &be_tag).await {
-            Ok(resp) => {
-                let oid = resp.order_id.unwrap_or_default();
-                let status = resp.status.unwrap_or_default();
-                tracing::info!(tag = %be_tag, order_id = %oid, status, "break-even FAK placed");
-                app.push_event("breakeven", &format!("{be_tag}: placed ({oid}) [{status}]"));
-            }
-            Err(e) => {
-                tracing::error!(tag = %be_tag, error = %e, "break-even FAK failed");
-                app.push_event("error", &format!("{be_tag}: {e}"));
-            }
-        }
+        tracing::warn!(order_id = %order_id, label = %label, "revert fill monitor timed out after 1h");
+        app.remove_revert(&order_id);
     });
 }
 
