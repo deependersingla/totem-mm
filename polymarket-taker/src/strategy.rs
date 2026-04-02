@@ -310,19 +310,15 @@ async fn execute_event_trade(
         if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_SELL", app).await {
             let revert_label = format!("{label}_REVERT_SELL");
             app.push_revert(PendingRevert {
-                order_id: oid.clone(),
+                order_id: oid,
                 team: f.order.team,
                 side: Side::Sell,
                 size,
                 entry_price: f.avg_price,
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
-                label: revert_label.clone(),
+                label: revert_label,
             });
-            spawn_breakeven_monitor(
-                config.clone(), auth.clone(), app.clone(),
-                oid, f.avg_price, f.order.team, Side::Sell, size, revert_label,
-            );
         }
     }
     // Revert sell → buy back at original_price * (1 - edge)
@@ -347,19 +343,15 @@ async fn execute_event_trade(
         if let Some(oid) = execute_limit(config, auth, &revert_order, position, "REVERT_BUY", app).await {
             let revert_label = format!("{label}_REVERT_BUY");
             app.push_revert(PendingRevert {
-                order_id: oid.clone(),
+                order_id: oid,
                 team: f.order.team,
                 side: Side::Buy,
                 size,
                 entry_price: f.avg_price,
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
-                label: revert_label.clone(),
+                label: revert_label,
             });
-            spawn_breakeven_monitor(
-                config.clone(), auth.clone(), app.clone(),
-                oid, f.avg_price, f.order.team, Side::Buy, size, revert_label,
-            );
         }
     }
 }
