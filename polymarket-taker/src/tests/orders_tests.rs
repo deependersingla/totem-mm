@@ -111,10 +111,9 @@ fn is_not_terminal_for_delayed_status() {
 }
 
 #[test]
-fn is_not_terminal_for_unmatched_status() {
-    // "unmatched" = order went through delay, found no taker, now resting live.
-    // Still active — should not stop polling yet.
-    assert!(!make_order("unmatched", None, None).is_terminal());
+fn is_terminal_for_unmatched_status() {
+    // "unmatched" = sports market delay expired with no match — order is killed.
+    assert!(make_order("unmatched", None, None).is_terminal());
 }
 
 #[test]
