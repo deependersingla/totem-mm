@@ -1,6 +1,6 @@
 /// Tests for strategy order building, safe-price guard, size computation, and edge selection.
 use crate::config::Config;
-use crate::strategy::{build_buy_order, build_sell_order, compute_size, edge_pct_for_label, price_in_safe_range};
+use crate::strategy::{build_buy_order, build_sell_order, compute_size, edge_ticks_for_label, price_in_safe_range};
 use crate::types::{OrderBook, OrderBookSide, PriceLevel, Side, Team};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -197,48 +197,48 @@ fn build_buy_order_size_limited_by_available() {
     assert_eq!(order.size, dec!(5));
 }
 
-// ── edge_pct_for_label ───────────────────────────────────────────────────────
+// ── edge_ticks_for_label ───────────────────────────────────────────────────────
 
 #[test]
 fn edge_label_wicket_uses_wicket_edge() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("WICKET", &config), config.edge_wicket);
+    assert_eq!(edge_ticks_for_label("WICKET", &config), config.edge_wicket);
 }
 
 #[test]
 fn edge_label_run4_uses_boundary_4_edge() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("RUN4", &config), config.edge_boundary_4);
+    assert_eq!(edge_ticks_for_label("RUN4", &config), config.edge_boundary_4);
 }
 
 #[test]
 fn edge_label_run6_uses_boundary_6_edge() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("RUN6", &config), config.edge_boundary_6);
+    assert_eq!(edge_ticks_for_label("RUN6", &config), config.edge_boundary_6);
 }
 
 #[test]
 fn edge_label_wd4_uses_boundary_4_not_wicket() {
     // This is the bug: "WD4" starts with "W" but is NOT a wicket.
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("WD4", &config), config.edge_boundary_4);
-    assert_ne!(edge_pct_for_label("WD4", &config), config.edge_wicket);
+    assert_eq!(edge_ticks_for_label("WD4", &config), config.edge_boundary_4);
+    assert_ne!(edge_ticks_for_label("WD4", &config), config.edge_wicket);
 }
 
 #[test]
 fn edge_label_wd6_uses_boundary_6() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("WD6", &config), config.edge_boundary_6);
+    assert_eq!(edge_ticks_for_label("WD6", &config), config.edge_boundary_6);
 }
 
 #[test]
 fn edge_label_nb4_uses_boundary_4() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("NB4", &config), config.edge_boundary_4);
+    assert_eq!(edge_ticks_for_label("NB4", &config), config.edge_boundary_4);
 }
 
 #[test]
 fn edge_label_nb6_uses_boundary_6() {
     let config = test_config("10", 2);
-    assert_eq!(edge_pct_for_label("NB6", &config), config.edge_boundary_6);
+    assert_eq!(edge_ticks_for_label("NB6", &config), config.edge_boundary_6);
 }

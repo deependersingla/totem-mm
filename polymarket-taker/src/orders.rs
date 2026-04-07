@@ -540,7 +540,7 @@ impl OpenOrder {
     pub fn is_terminal(&self) -> bool {
         self.status.as_deref().map_or(false, |s| {
             let lower = s.to_lowercase();
-            matches!(lower.as_str(), "matched" | "cancelled" | "expired")
+            matches!(lower.as_str(), "matched" | "cancelled" | "expired" | "unmatched")
         })
     }
 }

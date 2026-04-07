@@ -291,7 +291,7 @@ async fn execute_event_trade(
         None => config.tick_size.parse().unwrap_or(dec!(0.01)),
     };
 
-    let edge_ticks = edge_pct_for_label(label, &config);
+    let edge_ticks = edge_ticks_for_label(label, &config);
     let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
 
     tracing::info!(delay_ms = config.revert_delay_ms, edge_ticks, tick = %tick, edge_amount = %edge_amount, "{label} REVERT");
@@ -379,7 +379,7 @@ fn spawn_revert_fill_monitor(
     order_id: String,
     team: Team,
     side: Side,
-    size: Decimal,
+    _size: Decimal,
     limit_price: Decimal,
     label: String,
 ) {
@@ -674,7 +674,7 @@ async fn poll_fill_status(
     fak_result: Option<FakResult>,
     poll_interval: Duration,
     poll_timeout: Duration,
-    config: &Config,
+    _config: &Config,
 ) -> Option<FillInfo> {
     let result = fak_result?;
     let order_id = result.order_id.as_deref().filter(|s| !s.is_empty())?;
@@ -725,11 +725,27 @@ async fn poll_fill_status(
                     });
                 }
 
-                // If explicitly killed/cancelled, no fill happened
+                // "matched" means the order was executed — even if size_matched
+                // isn't populated yet, trust the status and use order price/size.
+                if status.eq_ignore_ascii_case("matched") {
+                    tracing::info!(tag = %result.tag, order_id, "status=matched, treating as filled at order price");
+                    let sz = result.intended_order.size;
+                    let px = result.intended_order.price;
+                    app.push_event("fill", &format!("{}: filled {} @ {} [matched]", result.tag, sz, px));
+                    return Some(FillInfo {
+                        filled_size: sz,
+                        avg_price: px,
+                        order: result.intended_order,
+                        tag: result.tag,
+                        order_id: oid,
+                    });
+                }
+
+                // "unmatched" = sports delay expired with no fill, "cancelled"/"expired" = killed
                 if open_order.is_terminal() {
                     tracing::warn!(
                         tag = %result.tag, order_id, status,
-                        "FAK order got NO fill — killed by matching engine"
+                        "FAK order terminal — no fill"
                     );
                     app.push_event("warn", &format!("{}: NO FILL — status {} (order killed)", result.tag, status));
                     return None;
@@ -747,24 +763,9 @@ async fn poll_fill_status(
         tokio::time::sleep(poll_interval).await;
     }
 
-    // Poll timed out — the order was accepted with "delayed" status but the data
-    // indexer never returned a result. On sports markets this typically means the
-    // order DID fill but the indexer is lagging. Assume fill at order price so we
-    // place the revert GTC. Position will be reconciled via on-chain balance sync.
-    tracing::warn!(
-        tag = %result.tag, order_id,
-        price = %result.intended_order.price, size = %result.intended_order.size,
-        "poll timed out — assuming fill at order price (sports market indexer lag)"
-    );
-    app.push_event("fill", &format!("{}: assumed fill {} @ {} (indexer timeout)",
-        result.tag, result.intended_order.size, result.intended_order.price));
-    Some(FillInfo {
-        filled_size: result.intended_order.size,
-        avg_price: result.intended_order.price,
-        order: result.intended_order,
-        tag: result.tag,
-        order_id: oid,
-    })
+    tracing::warn!(tag = %result.tag, order_id, "poll timed out — no fill confirmation");
+    app.push_event("warn", &format!("{}: poll timed out, no fill confirmed", result.tag));
+    None
 }
 
 pub(crate) fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
@@ -832,7 +833,7 @@ pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> 
 
 /// Select the revert edge percentage based on the signal label.
 /// "WICKET" → edge_wicket, labels containing '6' → edge_boundary_6, else → edge_boundary_4.
-pub(crate) fn edge_pct_for_label(label: &str, config: &Config) -> f64 {
+pub(crate) fn edge_ticks_for_label(label: &str, config: &Config) -> f64 {
     if label == "WICKET" {
         config.edge_wicket
     } else if label.contains('6') {

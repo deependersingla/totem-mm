@@ -26,7 +26,14 @@ extras
 .ssh/
 .claudeRules/
 
+# Captures & docs
+captures/
+*.xlsx
+LIVE_CAPTURE_REQUIREMENTS.md
+VISUALIZATION_OPTIONS.md
+
 # polymarket-taker (Rust)
 polymarket-taker/target/
 polymarket-taker/.env
 polymarket-taker/settings.json
+polymarket-taker/telegram-bot/config.json

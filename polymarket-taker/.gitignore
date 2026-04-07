@@ -11,3 +11,6 @@ settings.json
 telegram-bot/config.json
 telegram-bot/venv/
 telegram-bot/__pycache__/
+
+# Strategy docs
+docs/
