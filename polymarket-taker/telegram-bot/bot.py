@@ -292,24 +292,53 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete all bot messages except the last buttons message."""
+    """Delete all bot messages, then show a compact status summary."""
     chat_id = update.effective_chat.id
-    keep = last_buttons_msg.get(chat_id)
+
+    # Delete all tracked bot messages (including old buttons)
     ids = bot_messages.pop(chat_id, [])
-    kept = []
     for mid in ids:
-        if mid == keep:
-            kept.append(mid)
-            continue
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
-    bot_messages[chat_id] = kept
+    last_buttons_msg.pop(chat_id, None)
+
+    # Delete the /clear command message itself
     try:
         await update.message.delete()
     except Exception:
         pass
+
+    # Fetch current status and show a compact summary
+    data = await taker_get("/api/status")
+    if data:
+        phase = data.get("phase", "?")
+        innings = data.get("innings", "?")
+        batting = data.get("batting", "?")
+        lines = [f"innings {innings} — {batting} batting — phase: {phase}"]
+
+        # Show last signal from events
+        events = await taker_get("/api/events")
+        if events and isinstance(events, list):
+            # Find last signal event
+            for evt in reversed(events):
+                if evt.get("kind") == "signal":
+                    lines.append(f"last signal: {evt.get('detail', '?')}")
+                    break
+        summary = "\n".join(lines)
+    else:
+        summary = "cleared — taker unreachable"
+
+    m = await context.bot.send_message(chat_id=chat_id, text=summary)
+    track_msg(chat_id, m.message_id)
+
+    # Re-send signal buttons if innings is running
+    if data and data.get("phase") == "innings_running":
+        m2 = await context.bot.send_message(
+            chat_id=chat_id, text="signal:", reply_markup=SIGNAL_KEYBOARD
+        )
+        track_buttons(chat_id, m2.message_id)
 
 
 # ── User signal buttons ──────────────────────────────────────────────────────
@@ -418,8 +447,8 @@ async def event_poller(app: Application):
                         except Exception as e:
                             logger.warning(f"failed to send buttons to {uid}: {e}")
 
-                # When innings stops or match ends, delete buttons
-                if kind == "innings" and ("stopped" in detail or "over" in detail):
+                # When innings stops, delete buttons and show status
+                if kind == "innings" and "over" in detail:
                     all_users = active_users | ADMIN_IDS
                     for uid in all_users:
                         old_btn = last_buttons_msg.pop(uid, None)
@@ -429,7 +458,23 @@ async def event_poller(app: Application):
                             except Exception:
                                 pass
                         try:
-                            m = await bot.send_message(chat_id=uid, text=f"stopped — {detail}")
+                            m = await bot.send_message(chat_id=uid, text=detail)
+                            track_msg(uid, m.message_id)
+                        except Exception:
+                            pass
+
+                # Match over — delete buttons, show farewell
+                if kind == "match" and ("over" in detail.lower() or "complete" in detail.lower()):
+                    all_users = active_users | ADMIN_IDS
+                    for uid in all_users:
+                        old_btn = last_buttons_msg.pop(uid, None)
+                        if old_btn:
+                            try:
+                                await bot.delete_message(chat_id=uid, message_id=old_btn)
+                            except Exception:
+                                pass
+                        try:
+                            m = await bot.send_message(chat_id=uid, text=detail)
                             track_msg(uid, m.message_id)
                         except Exception:
                             pass

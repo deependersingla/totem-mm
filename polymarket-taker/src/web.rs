@@ -221,25 +221,6 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <div id="latBar" class="latency-bar">Sig-Dec: -- | Sign-Post: -- | Post-Resp: -- | Fill(WS): -- | E2E: --</div>
 </div>
 
-<!-- Live Price Chart -->
-<div class="card full shared-section" id="chartCard" style="display:none">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <h2 style="margin-bottom:0">Live Odds</h2>
-    <div style="display:flex;gap:12px;align-items:center">
-      <select id="chartInterval" onchange="pollPriceChart()" style="background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:3px 8px;border-radius:4px;font-size:11px">
-        <option value="1m">1 Min</option>
-        <option value="5m">5 Min</option>
-        <option value="15m">15 Min</option>
-        <option value="30m">30 Min</option>
-        <option value="1h" selected>1 Hour</option>
-        <option value="2h">2 Hours</option>
-        <option value="6h">6 Hours</option>
-      </select>
-      <div id="chartLegend" style="display:flex;gap:16px;font-size:13px;font-weight:600"></div>
-    </div>
-  </div>
-  <canvas id="priceChart" height="200" style="width:100%;background:#0d1117;border-radius:6px"></canvas>
-</div>
 
 <!-- Event Log -->
 <div class="card full shared-section">
@@ -335,70 +316,64 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div id="tradeEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No trades yet</div>
   </div>
 
-</div>
-
-<!-- ======================== MAKER TAB ======================== -->
-<div id="tab-maker" class="tab-content" style="display:none">
-
-  <!-- Maker Status Card -->
-  <div class="card full">
-    <h2>Maker Status</h2>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-      <span id="mkEnabled" class="badge badge-idle">DISABLED</span>
-      <span id="mkDryRunBadge" class="badge badge-dry" style="display:none">DRY RUN</span>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <div class="stat"><span>Half Spread</span> <strong id="mkSpread">--</strong></div>
-      <div class="stat"><span>Quote Size</span> <strong id="mkQuoteSize">--</strong></div>
-      <div class="stat"><span>Inventory Tier</span> <strong id="mkTier">--</strong></div>
-    </div>
-  </div>
-
-  <!-- Maker Config Card -->
-  <div class="card full">
-    <h2>Maker Config</h2>
-    <div class="row">
-      <div><label>Enabled</label>
-        <select id="mkCfgEnabled"><option value="false">No</option><option value="true">Yes</option></select>
+  <!-- Open / Pending Orders + Round-Trip PnL -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" class="full">
+    <div class="card">
+      <h2>Open Orders <span style="font-size:10px;color:#484f58;font-weight:normal">(CLOB)</span></h2>
+      <div style="max-height:250px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+          <thead><tr style="border-bottom:2px solid #30363d">
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Size</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
+            <th style="padding:4px 6px"></th>
+          </tr></thead>
+          <tbody id="openOrdersBody"></tbody>
+        </table>
       </div>
-      <div><label>Dry Run <span style="color:#d29922;font-size:10px">(REQUIRED for first use)</span></label>
-        <select id="mkCfgDryRun"><option value="true">Yes</option><option value="false">No</option></select>
-      </div>
-    </div>
-    <div class="row">
-      <div><label>Half Spread</label><input id="mkCfgSpread" type="text" value="0.02"></div>
-      <div><label>Quote Size</label><input id="mkCfgSize" type="text" value="10"></div>
-    </div>
-    <div class="row">
-      <div><label>Use GTD</label>
-        <select id="mkCfgGtd"><option value="true">Yes</option><option value="false">No</option></select>
-      </div>
-      <div><label>GTD Expiry (secs)</label><input id="mkCfgExpiry" type="number" value="30"></div>
-    </div>
-    <div class="row">
-      <div><label>Refresh Interval (secs)</label><input id="mkCfgRefresh" type="number" value="10"></div>
-      <div><label>Skew Kappa</label><input id="mkCfgKappa" type="text" value="0.5"></div>
-    </div>
-    <div class="row">
-      <div><label>Max Exposure</label><input id="mkCfgExposure" type="text" value="100"></div>
-    </div>
-    <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
-      <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Inventory Tier Thresholds</div>
-      <div class="row">
-        <div><label>T1 %</label><input id="mkCfgT1" type="number" value="25" step="1"></div>
-        <div><label>T2 %</label><input id="mkCfgT2" type="number" value="50" step="1"></div>
-        <div><label>T3 %</label><input id="mkCfgT3" type="number" value="75" step="1"></div>
-      </div>
-    </div>
-    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveMakerConfig()">Save Maker Config</button>
-  </div>
+      <div id="openOrdersEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No open orders</div>
 
-  <!-- Maker Info Box -->
-  <div class="card full">
-    <h2>How Maker Works</h2>
-    <div style="font-size:12px;color:#8b949e;line-height:1.6">
-      Maker places 4 resting orders (BUY+SELL on both tokens). On events, dangerous legs are cancelled instantly.
-      DRY RUN mode logs quotes without submitting. Enable Dry Run first to verify quotes look correct before going live.
+      <h2 style="margin-top:12px">Pending Reverts</h2>
+      <div style="max-height:200px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+          <thead><tr style="border-bottom:2px solid #30363d">
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Label</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Limit</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Age</th>
+            <th style="padding:4px 6px"></th>
+          </tr></thead>
+          <tbody id="revertsBody"></tbody>
+        </table>
+      </div>
+      <div id="revertsEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No pending reverts</div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2>Round-Trip PnL</h2>
+        <span id="rtPnlTotal" style="font-size:16px;font-weight:700;color:#8b949e">$0.00</span>
+      </div>
+      <div style="max-height:450px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+          <thead><tr style="border-bottom:2px solid #30363d">
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Signal</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+            <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Exit</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">Size</th>
+            <th style="text-align:right;padding:4px 6px;color:#8b949e">PnL</th>
+          </tr></thead>
+          <tbody id="rtBody"></tbody>
+        </table>
+      </div>
+      <div id="rtEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No round-trips yet</div>
     </div>
   </div>
 
@@ -534,7 +509,6 @@ button:disabled{opacity:.4;cursor:not-allowed}
 <!-- Bottom Tab Bar -->
 <div class="bottom-bar">
   <button class="tab-btn tab-active" data-tab="taker" onclick="switchTab('taker')">&#9889; TAKER</button>
-  <button class="tab-btn" data-tab="maker" onclick="switchTab('maker')">&#9776; MAKER</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">&#9881; SETTINGS</button>
 </div>
 
@@ -547,8 +521,10 @@ let advancedSignalsVisible = false;
 async function api(path, opts) {
   try {
     const r = await fetch(API + path, opts);
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.detail || j || r.statusText);
+    const text = await r.text();
+    let j;
+    try { j = text ? JSON.parse(text) : {}; } catch(_) { j = {raw: text}; }
+    if (!r.ok) throw new Error(j.detail || j.error || j.raw || r.statusText);
     return j;
   } catch(e) {
     showToast(e.message);
@@ -1044,21 +1020,6 @@ async function pollBook() {
   } catch(e) {}
 }
 
-// Maker polling
-async function pollMakerStatus() {
-  try {
-    const m = await api('/api/maker/status');
-    const en = document.getElementById('mkEnabled');
-    en.textContent = m.enabled ? 'ENABLED' : 'DISABLED';
-    en.className = 'badge ' + (m.enabled ? 'badge-running' : 'badge-idle');
-    const dr = document.getElementById('mkDryRunBadge');
-    dr.style.display = m.dry_run ? '' : 'none';
-    document.getElementById('mkSpread').textContent = m.half_spread != null ? m.half_spread : '--';
-    document.getElementById('mkQuoteSize').textContent = m.quote_size != null ? m.quote_size : '--';
-    document.getElementById('mkTier').textContent = m.inventory_tier || '--';
-  } catch(e) {}
-}
-
 // Latency polling
 async function pollLatency() {
   try {
@@ -1073,60 +1034,87 @@ async function pollLatency() {
   } catch(e) {}
 }
 
-// Save maker config
-async function saveMakerConfig() {
-  await api('/api/maker/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-    enabled: document.getElementById('mkCfgEnabled').value === 'true',
-    dry_run: document.getElementById('mkCfgDryRun').value === 'true',
-    half_spread: document.getElementById('mkCfgSpread').value,
-    quote_size: document.getElementById('mkCfgSize').value,
-    use_gtd: document.getElementById('mkCfgGtd').value === 'true',
-    gtd_expiry_secs: parseInt(document.getElementById('mkCfgExpiry').value),
-    refresh_interval_secs: parseInt(document.getElementById('mkCfgRefresh').value),
-    skew_kappa: document.getElementById('mkCfgKappa').value,
-    max_exposure: document.getElementById('mkCfgExposure').value,
-    t1_pct: parseFloat(document.getElementById('mkCfgT1').value),
-    t2_pct: parseFloat(document.getElementById('mkCfgT2').value),
-    t3_pct: parseFloat(document.getElementById('mkCfgT3').value),
-  })});
+// ── Open Orders / Pending Reverts / Round-Trip PnL polling ────────────────
+async function pollTakerOrders() {
+  try {
+    const r = await fetch('/api/taker/status');
+    if (!r.ok) return;
+    const text = await r.text();
+    if (!text) return;
+    const d = JSON.parse(text);
+
+    // Open orders
+    const ooBody = document.getElementById('openOrdersBody');
+    const ooEmpty = document.getElementById('openOrdersEmpty');
+    if (d.open_orders && d.open_orders.length > 0) {
+      ooEmpty.style.display = 'none';
+      ooBody.innerHTML = d.open_orders.map(o => {
+        const sc = o.side === 'BUY' ? 'color:#3fb950' : 'color:#f85149';
+        return `<tr><td style="${sc}">${o.side}</td><td>${o.team}</td><td style="text-align:right">${o.price}</td><td style="text-align:right">${o.original_size}</td><td style="text-align:right">${o.size_matched}</td><td>${o.status}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${o.order_id}')">x</button></td></tr>`;
+      }).join('');
+    } else {
+      ooBody.innerHTML = '';
+      ooEmpty.style.display = '';
+    }
+
+    // Pending reverts
+    const rvBody = document.getElementById('revertsBody');
+    const rvEmpty = document.getElementById('revertsEmpty');
+    if (d.pending_reverts && d.pending_reverts.length > 0) {
+      rvEmpty.style.display = 'none';
+      rvBody.innerHTML = d.pending_reverts.map(r => {
+        const sc = r.side === 'BUY' ? 'color:#3fb950' : 'color:#f85149';
+        return `<tr><td>${r.label}</td><td style="${sc}">${r.side}</td><td>${r.team}</td><td style="text-align:right">${r.entry_price}</td><td style="text-align:right">${r.revert_limit}</td><td style="text-align:right">${r.age_secs.toFixed(0)}s</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${r.order_id}')">x</button></td></tr>`;
+      }).join('');
+    } else {
+      rvBody.innerHTML = '';
+      rvEmpty.style.display = '';
+    }
+
+    // Round-trip PnL
+    const rtPnl = parseFloat(d.round_trip_pnl) || 0;
+    const rtEl = document.getElementById('rtPnlTotal');
+    rtEl.textContent = '$' + rtPnl.toFixed(4);
+    rtEl.style.color = rtPnl > 0 ? '#3fb950' : rtPnl < 0 ? '#f85149' : '#8b949e';
+
+    const rtBody = document.getElementById('rtBody');
+    const rtEmpty = document.getElementById('rtEmpty');
+    if (d.round_trips && d.round_trips.length > 0) {
+      rtEmpty.style.display = 'none';
+      rtBody.innerHTML = d.round_trips.map(r => {
+        const p = parseFloat(r.pnl) || 0;
+        const pc = p > 0 ? '#3fb950' : p < 0 ? '#f85149' : '#8b949e';
+        return `<tr><td>${r.label}</td><td>${r.entry_side}</td><td>${r.team}</td><td style="text-align:right">${r.entry_price}</td><td style="text-align:right">${r.exit_price}</td><td style="text-align:right">${r.size}</td><td style="text-align:right;color:${pc}">$${p.toFixed(4)}</td></tr>`;
+      }).join('');
+    } else {
+      rtBody.innerHTML = '';
+      rtEmpty.style.display = '';
+    }
+  } catch(e) { console.error('pollTakerOrders', e); }
 }
 
-// Load maker config
-async function loadMakerConfig() {
+async function cancelOrder(oid) {
+  if (!confirm('Cancel order ' + oid.slice(0,12) + '?')) return;
   try {
-    const c = await api('/api/maker/config');
-    if (c.half_spread != null) document.getElementById('mkCfgSpread').value = c.half_spread;
-    if (c.quote_size != null) document.getElementById('mkCfgSize').value = c.quote_size;
-    if (c.enabled != null) document.getElementById('mkCfgEnabled').value = String(c.enabled);
-    if (c.dry_run != null) document.getElementById('mkCfgDryRun').value = String(c.dry_run);
-    if (c.use_gtd != null) document.getElementById('mkCfgGtd').value = String(c.use_gtd);
-    if (c.gtd_expiry_secs != null) document.getElementById('mkCfgExpiry').value = c.gtd_expiry_secs;
-    if (c.refresh_interval_secs != null) document.getElementById('mkCfgRefresh').value = c.refresh_interval_secs;
-    if (c.skew_kappa != null) document.getElementById('mkCfgKappa').value = c.skew_kappa;
-    if (c.max_exposure != null) document.getElementById('mkCfgExposure').value = c.max_exposure;
-    if (c.t1_pct != null) document.getElementById('mkCfgT1').value = c.t1_pct;
-    if (c.t2_pct != null) document.getElementById('mkCfgT2').value = c.t2_pct;
-    if (c.t3_pct != null) document.getElementById('mkCfgT3').value = c.t3_pct;
-  } catch(e) {}
+    await fetch('/api/taker/cancel-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order_id: oid})});
+    setTimeout(pollTakerOrders, 500);
+  } catch(e) { console.error(e); }
 }
 
 // Init
 loadConfig();
-loadMakerConfig();
 pollStatus();
 pollEvents();
 pollTrades();
 pollBook();
-pollPriceChart();
-pollMakerStatus();
 pollLatency();
+pollTakerOrders();
 setInterval(pollStatus, 1500);
 setInterval(pollEvents, 1500);
 setInterval(pollTrades, 2000);
 setInterval(pollBook, 500);
-setInterval(pollPriceChart, 1000);
-setInterval(pollMakerStatus, 2000);
 setInterval(pollLatency, 3000);
+setInterval(pollTakerOrders, 3000);
 </script>
 </body>
 </html>
@@ -1789,6 +1777,327 @@ setInterval(pollBalances, 10000);
 setInterval(pollBook, 500);
 setInterval(pollSweepStatus, 2000);
 setInterval(pollEvents, 1500);
+</script>
+</body>
+</html>
+"##;
+
+pub const TAKER_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TOTEM TAKER</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'SF Mono',Menlo,Monaco,monospace;background:#0a0a0f;color:#c9d1d9;min-height:100vh;padding:12px;max-width:1200px;margin:0 auto}
+.header{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #1b1f27;margin-bottom:12px}
+.header h1{font-size:16px;color:#58a6ff;font-weight:700;letter-spacing:2px}
+.phase{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;text-transform:uppercase}
+.phase-idle{background:#30363d;color:#8b949e}
+.phase-running{background:#238636;color:#fff}
+.phase-dry{background:#6e40c9;color:#fff}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.card{background:#111318;border:1px solid #1b1f27;border-radius:6px;padding:10px}
+.card h3{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.val{font-size:18px;font-weight:700;color:#e6edf3}
+.val-sm{font-size:13px;color:#c9d1d9}
+.pnl-pos{color:#3fb950}.pnl-neg{color:#f85149}.pnl-zero{color:#8b949e}
+.sig-btns{display:flex;gap:4px;flex-wrap:wrap}
+.sig-btn{padding:6px 14px;border:1px solid #30363d;background:#161b22;color:#c9d1d9;border-radius:4px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+.sig-btn:hover{border-color:#58a6ff;color:#58a6ff}
+.sig-btn.w{border-color:#f85149;color:#f85149}.sig-btn.w:hover{background:#f8514922}
+.sig-btn.b{border-color:#3fb950;color:#3fb950}.sig-btn.b:hover{background:#3fb95022}
+.sig-btn.io{border-color:#d29922;color:#d29922}
+.sig-btn.danger{border-color:#f85149;color:#f85149}
+.sig-btn.action{border-color:#238636;color:#238636}
+.sig-btn.action:hover{background:#23863622}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:5px 8px;color:#8b949e;font-weight:600;font-size:10px;text-transform:uppercase;border-bottom:1px solid #1b1f27}
+td{padding:4px 8px;border-bottom:1px solid #0d1117}
+tr:hover{background:#161b22}
+.buy{color:#3fb950}.sell{color:#f85149}
+.fak{color:#d29922}.gtc{color:#58a6ff}
+.section{margin-bottom:12px}
+.section h2{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.book-row{display:flex;justify-content:space-between;padding:3px 0;font-size:13px}
+.book-label{color:#8b949e;font-size:11px}
+.lat-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+.lat-card{background:#111318;border:1px solid #1b1f27;border-radius:4px;padding:5px;text-align:center}
+.lat-card .name{font-size:9px;color:#8b949e;text-transform:uppercase}
+.lat-card .p50{font-size:13px;font-weight:700;color:#58a6ff}
+.lat-card .detail{font-size:9px;color:#484f58}
+.event-log{max-height:180px;overflow-y:auto;font-size:11px;background:#0d1117;border:1px solid #1b1f27;border-radius:4px;padding:6px}
+.event-line{padding:2px 0;border-bottom:1px solid #0d1017}
+.event-ts{color:#484f58;margin-right:6px}
+.event-kind{font-weight:600;margin-right:6px}
+.event-kind.filled{color:#3fb950}.event-kind.error{color:#f85149}.event-kind.warn{color:#d29922}
+.event-kind.trade{color:#58a6ff}.event-kind.tg-signal{color:#bc8cff}.event-kind.pnl{color:#3fb950}
+.empty{color:#484f58;text-align:center;padding:12px}
+.flash{animation:flash-bg 0.6s ease-out}
+@keyframes flash-bg{0%{background:#58a6ff33}100%{background:transparent}}
+label{font-size:11px;color:#8b949e;display:block;margin-bottom:2px;margin-top:6px}
+input{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:4px 8px;border-radius:4px;font-size:12px;width:100%;font-family:inherit}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>TOTEM TAKER</h1>
+  <div>
+    <span id="rt-pnl" class="pnl-zero" style="font-size:14px;font-weight:700;margin-right:12px">PnL: $0.00</span>
+    <span id="phase" class="phase phase-idle">IDLE</span>
+    <span id="innings" style="color:#8b949e;font-size:12px;margin-left:8px"></span>
+  </div>
+</div>
+
+<!-- ROW 1: Order Book + Signals -->
+<div class="row">
+  <div class="card">
+    <h3>Order Book</h3>
+    <div id="book-a" class="book-row"></div>
+    <div id="book-b" class="book-row" style="margin-top:4px"></div>
+  </div>
+  <div class="card">
+    <h3>Signal</h3>
+    <div class="sig-btns">
+      <button class="sig-btn" onclick="sig('0')">0</button>
+      <button class="sig-btn" onclick="sig('1')">1</button>
+      <button class="sig-btn" onclick="sig('2')">2</button>
+      <button class="sig-btn" onclick="sig('3')">3</button>
+      <button class="sig-btn b" onclick="sig('4')">4</button>
+      <button class="sig-btn b" onclick="sig('6')">6</button>
+      <button class="sig-btn w" onclick="sig('W')">W</button>
+      <button class="sig-btn" onclick="sig('Wd')">Wd</button>
+      <button class="sig-btn" onclick="sig('N')">N</button>
+    </div>
+  </div>
+</div>
+
+<!-- ROW 2: Positions + Settings/Controls -->
+<div class="row">
+  <div class="card">
+    <h3>Position</h3>
+    <div class="val-sm" id="positions"></div>
+    <div style="margin-top:6px">
+      <span class="book-label">Budget: </span><span id="budget" class="val-sm"></span>
+      <span class="book-label" style="margin-left:12px">Spent: </span><span id="spent" class="val-sm"></span>
+      <span class="book-label" style="margin-left:12px">Trades: </span><span id="trade-count" class="val-sm"></span>
+    </div>
+    <div style="margin-top:4px">
+      <span class="book-label">Unrealized: </span><span id="upnl" class="val-sm pnl-zero"></span>
+      <span class="book-label" style="margin-left:12px">Round-Trip: </span><span id="rt-pnl-detail" class="val-sm pnl-zero"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Settings</h3>
+    <div id="settings-info" class="val-sm"></div>
+    <div style="margin-top:8px" class="sig-btns">
+      <button class="sig-btn action" onclick="startInnings()">Start Innings</button>
+      <button class="sig-btn io" onclick="sig('IO')">Stop Innings</button>
+      <button class="sig-btn danger" onclick="sig('MO')">Match Over</button>
+      <button class="sig-btn" onclick="cancelAll()">Cancel All</button>
+    </div>
+  </div>
+</div>
+
+<!-- ROW 3: Filled Orders + Open/Pending Orders side by side -->
+<div class="row">
+  <div class="section">
+    <h2>Filled / Closed Orders</h2>
+    <div style="max-height:300px;overflow-y:auto">
+    <table>
+      <thead><tr><th>Time</th><th>Signal</th><th>Side</th><th>Team</th><th>Size</th><th>Price</th><th>Cost</th><th>Type</th></tr></thead>
+      <tbody id="trades"></tbody>
+    </table>
+    </div>
+  </div>
+  <div class="section">
+    <h2>Open / Pending Orders</h2>
+    <div style="max-height:300px;overflow-y:auto">
+    <table>
+      <thead><tr><th>Side</th><th>Team</th><th>Price</th><th>Size</th><th>Filled</th><th>Status</th><th></th></tr></thead>
+      <tbody id="open-orders"></tbody>
+    </table>
+    <div style="margin-top:8px">
+      <span style="color:#8b949e;font-size:10px;text-transform:uppercase">Pending Reverts</span>
+    </div>
+    <table>
+      <thead><tr><th>Label</th><th>Side</th><th>Team</th><th>Entry</th><th>Limit</th><th>Age</th><th></th></tr></thead>
+      <tbody id="reverts"></tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<!-- Latency -->
+<div class="section">
+  <h2>Latency</h2>
+  <div class="lat-grid" id="latency"></div>
+</div>
+
+<!-- Event Log -->
+<div class="section">
+  <h2>Event Log</h2>
+  <div class="event-log" id="events"></div>
+</div>
+
+<script>
+let prevTradeCount = 0;
+function esc(s) { if (s == null) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
+
+async function poll() {
+  try {
+    const r = await fetch('/api/taker/status');
+    if (!r.ok) return;
+    const text = await r.text();
+    if (!text) return;
+    const d = JSON.parse(text);
+    render(d);
+  } catch(e) { console.error('poll', e); }
+}
+
+function render(d) {
+  // Header
+  const phaseEl = document.getElementById('phase');
+  phaseEl.textContent = d.dry_run ? 'DRY RUN' : (d.phase||'').replace('_',' ').toUpperCase();
+  phaseEl.className = 'phase ' + (d.dry_run ? 'phase-dry' : d.phase === 'innings_running' ? 'phase-running' : 'phase-idle');
+  document.getElementById('innings').textContent = `Inn ${d.innings} | ${esc(d.batting)} batting`;
+
+  // PnL header
+  const rtPnl = parseFloat(d.round_trip_pnl) || 0;
+  const rtEl = document.getElementById('rt-pnl');
+  rtEl.textContent = `PnL: $${rtPnl.toFixed(4)}`;
+  rtEl.className = rtPnl > 0 ? 'pnl-pos' : rtPnl < 0 ? 'pnl-neg' : 'pnl-zero';
+  rtEl.style.cssText = 'font-size:14px;font-weight:700;margin-right:12px';
+
+  // Book
+  document.getElementById('book-a').innerHTML = `<span class="book-label">${esc(d.team_a_name)}</span><span><span class="buy">${d.book_a_bid||'—'}</span> / <span class="sell">${d.book_a_ask||'—'}</span></span>`;
+  document.getElementById('book-b').innerHTML = `<span class="book-label">${esc(d.team_b_name)}</span><span><span class="buy">${d.book_b_bid||'—'}</span> / <span class="sell">${d.book_b_ask||'—'}</span></span>`;
+
+  // Position
+  document.getElementById('positions').textContent = `${d.team_a_name}: ${d.team_a_tokens} tokens | ${d.team_b_name}: ${d.team_b_tokens} tokens`;
+  document.getElementById('budget').textContent = `$${parseFloat(d.remaining).toFixed(2)} / ${parseFloat(d.total_budget).toFixed(2)}`;
+  document.getElementById('spent').textContent = `$${parseFloat(d.total_spent).toFixed(2)}`;
+  document.getElementById('trade-count').textContent = d.trade_count;
+
+  const upnl = parseFloat(d.unrealized_pnl) || 0;
+  const upnlEl = document.getElementById('upnl');
+  upnlEl.textContent = `$${upnl.toFixed(4)}`;
+  upnlEl.className = 'val-sm ' + (upnl > 0 ? 'pnl-pos' : upnl < 0 ? 'pnl-neg' : 'pnl-zero');
+
+  const rtDetail = document.getElementById('rt-pnl-detail');
+  rtDetail.textContent = `$${rtPnl.toFixed(4)}`;
+  rtDetail.className = 'val-sm ' + (rtPnl > 0 ? 'pnl-pos' : rtPnl < 0 ? 'pnl-neg' : 'pnl-zero');
+
+  // Settings
+  document.getElementById('settings-info').innerHTML =
+    `slug: <strong>${esc(d.market_slug||'—')}</strong> | max_trade: $${d.max_trade_usdc} | edge W:${d.edge_wicket} 4:${d.edge_boundary_4} 6:${d.edge_boundary_6} | revert_delay: ${d.revert_delay_ms}ms`;
+
+  // Filled orders (trades)
+  const tbody = document.getElementById('trades');
+  if (d.trades && d.trades.length !== prevTradeCount) {
+    prevTradeCount = d.trades.length;
+    if (d.trades.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
+    } else {
+      tbody.innerHTML = d.trades.slice().reverse().map(t =>
+        `<tr class="flash">
+          <td>${esc(t.ts)}</td><td>${esc(t.label)}</td>
+          <td class="${t.side==='BUY'?'buy':'sell'}">${esc(t.side)}</td>
+          <td>${esc(t.team)}</td><td>${esc(t.size)}</td><td>${esc(t.price)}</td>
+          <td>$${parseFloat(t.cost).toFixed(2)}</td>
+          <td class="${t.order_type==='FAK'?'fak':'gtc'}">${esc(t.order_type)}</td>
+        </tr>`
+      ).join('');
+    }
+  }
+
+  // Open orders
+  const openEl = document.getElementById('open-orders');
+  const allOpen = [...(d.open_orders||[]).map(o => ({...o, src:'clob'})), ...(d.pending_reverts||[]).map(r => ({side:r.side, team:r.team, price:r.revert_limit, original_size:r.size, size_matched:'0', status:'revert', order_id:r.order_id, src:'revert'}))];
+  if (allOpen.length === 0) {
+    openEl.innerHTML = '<tr><td colspan="7" class="empty">No open orders</td></tr>';
+  } else {
+    openEl.innerHTML = allOpen.filter(o=>o.src==='clob').map(o =>
+      `<tr>
+        <td class="${o.side==='BUY'?'buy':'sell'}">${esc(o.side)}</td>
+        <td>${esc(o.team)}</td><td>${esc(o.price)}</td><td>${esc(o.original_size)}</td>
+        <td>${esc(o.size_matched)}</td><td>${esc(o.status)}</td>
+        <td><button class="sig-btn" style="padding:1px 6px;font-size:10px" onclick="cancelOrder('${esc(o.order_id)}')">x</button></td>
+      </tr>`
+    ).join('');
+  }
+
+  // Pending reverts
+  const revEl = document.getElementById('reverts');
+  if (!d.pending_reverts || d.pending_reverts.length === 0) {
+    revEl.innerHTML = '<tr><td colspan="7" class="empty">No pending reverts</td></tr>';
+  } else {
+    revEl.innerHTML = d.pending_reverts.map(r =>
+      `<tr>
+        <td>${esc(r.label)}</td>
+        <td class="${r.side==='BUY'?'buy':'sell'}">${esc(r.side)}</td>
+        <td>${esc(r.team)}</td><td>${esc(r.entry_price)}</td><td>${esc(r.revert_limit)}</td>
+        <td>${r.age_secs.toFixed(0)}s</td>
+        <td><button class="sig-btn" style="padding:1px 6px;font-size:10px" onclick="cancelOrder('${esc(r.order_id)}')">x</button></td>
+      </tr>`
+    ).join('');
+  }
+
+  // Latency
+  const lat = d.latency;
+  if (lat) {
+    document.getElementById('latency').innerHTML = [
+      {name:'sig→decision', data:lat.signal_to_decision},
+      {name:'sign→post', data:lat.sign_to_post},
+      {name:'post→resp', data:lat.post_to_response},
+      {name:'fill (ws)', data:lat.fill_detect_ws},
+      {name:'fill (poll)', data:lat.fill_detect_poll},
+      {name:'e2e', data:lat.e2e_signal_to_fill},
+    ].map(m => {
+      const p50 = m.data.count > 0 ? (m.data.p50_us/1000).toFixed(1)+'ms' : '—';
+      const p95 = m.data.count > 0 ? (m.data.p95_us/1000).toFixed(1) : '—';
+      return `<div class="lat-card"><div class="name">${m.name}</div><div class="p50">${p50}</div><div class="detail">p95:${p95}ms n:${m.data.count}</div></div>`;
+    }).join('');
+  }
+
+  // Events
+  const evEl = document.getElementById('events');
+  if (d.events) {
+    evEl.innerHTML = d.events.map(e =>
+      `<div class="event-line"><span class="event-ts">${esc(e.ts)}</span><span class="event-kind ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.detail)}</div>`
+    ).join('');
+  }
+}
+
+async function sig(s) {
+  try {
+    let url = '/api/signal', opts = {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signal:s})};
+    if (s === 'IO') { url = '/api/stop-innings'; opts = {method:'POST'}; }
+    else if (s === 'MO') { url = '/api/match-over'; opts = {method:'POST'}; }
+    await fetch(url, opts);
+    setTimeout(poll, 300);
+  } catch(e) { console.error('signal', e); }
+}
+
+async function startInnings() {
+  try { await fetch('/api/start-innings', {method:'POST'}); setTimeout(poll, 500); } catch(e) { console.error(e); }
+}
+
+async function cancelAll() {
+  if (!confirm('Cancel ALL open orders?')) return;
+  try { await fetch('/api/cancel-all', {method:'POST'}); setTimeout(poll, 500); } catch(e) { console.error(e); }
+}
+
+async function cancelOrder(oid) {
+  try {
+    await fetch('/api/taker/cancel-order', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order_id: oid})});
+    setTimeout(poll, 500);
+  } catch(e) { console.error(e); }
+}
+
+poll();
+setInterval(poll, 1500);
 </script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
-use polymarket_taker::{clob_auth, config, server, state};
+use polymarket_taker::{clob_auth, config, db, server, state};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,6 +49,17 @@ async fn main() -> Result<()> {
     }
 
     let app_state = state::AppState::new(config.clone());
+
+    // Initialize SQLite database for trade/order persistence
+    match db::Db::open() {
+        Ok(database) => {
+            *app_state.db.write().unwrap() = Some(std::sync::Arc::new(database));
+            tracing::info!("SQLite database initialized (taker.db)");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to open SQLite database — trades will not persist");
+        }
+    }
 
     // Generate CLOB API keys only when wallet is configured (private key set).
     // Uses EIP-712 sign + GET /auth/derive-api-key (or POST /auth/api-key) — same flow as tests.
