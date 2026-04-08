@@ -12,7 +12,8 @@ use crate::types::{FakOrder, Side};
 const USDC_DECIMALS: u64 = 1_000_000;
 
 /// Fee rate in basis points. Must match what the market expects.
-/// Sports markets use 1000 (10%). Fetched from Gamma API during market setup.
+/// Sports markets use ~200 bps (2%). Fetched from Gamma API during market setup.
+/// The exact rate varies by category — always verify via GET /fee-rate endpoint.
 fn fee_rate_bps(config: &Config) -> u32 {
     config.fee_rate_bps
 }
@@ -99,7 +100,7 @@ pub(crate) fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ClobOrder {
+pub struct ClobOrder {
     pub salt: String,
     pub maker: String,
     pub signer: String,
@@ -287,7 +288,7 @@ fn build_signed_order_inner(
     Ok(clob_order)
 }
 
-fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
+pub(crate) fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
     build_signed_order_inner(config, auth, order, "0")
 }
 
@@ -373,6 +374,16 @@ pub async fn post_fak_order(
     post_order(config, auth, &signed, "FAK", tag).await
 }
 
+/// Post a pre-signed FAK order directly (zero signing latency).
+pub async fn post_presigned_fak(
+    config: &Config,
+    auth: &ClobAuth,
+    signed: &ClobOrder,
+    tag: &str,
+) -> Result<PostOrderResponse> {
+    post_order(config, auth, signed, "FAK", tag).await
+}
+
 /// Post multiple FAK orders in a single HTTP call (POST /orders).
 pub async fn post_fak_orders_batch(
     config: &Config,
@@ -437,6 +448,65 @@ pub async fn post_fak_orders_batch(
             }
         } else if let Some(oid) = oid {
             tracing::info!(tag, order_id = oid, status = ?r.status, "batch order accepted");
+        }
+    }
+
+    Ok(results)
+}
+
+/// Post multiple pre-signed FAK orders in a single HTTP call (POST /orders).
+/// Skips the build+sign step entirely — orders were already signed by the order cache.
+pub async fn post_presigned_fak_batch(
+    config: &Config,
+    auth: &ClobAuth,
+    orders: &[(ClobOrder, &str)],
+) -> Result<Vec<BatchOrderResult>> {
+    let mut items = Vec::with_capacity(orders.len());
+    for (signed, tag) in orders {
+        tracing::info!(tag, "batch pre-signed FAK order");
+        items.push(BatchOrderItem {
+            order: PostOrderBody::from(signed),
+            owner: auth.api_key.clone(),
+            order_type: "FAK".to_string(),
+            tick_size: config.tick_size.clone(),
+            defer_exec: false,
+        });
+    }
+    let body_json = serde_json::to_string(&items)?;
+    let path = "/orders";
+    let headers = auth.l2_headers("POST", path, Some(&body_json))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+
+    let resp = auth
+        .http_client()
+        .post(&url)
+        .headers(headers)
+        .header("Content-Type", "application/json")
+        .body(body_json.clone())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let resp_body = resp.text().await?;
+
+    if !status.is_success() {
+        tracing::warn!(status = %status, body = resp_body, "pre-signed batch FAK HTTP error");
+        anyhow::bail!("pre-signed batch FAK HTTP {status}: {resp_body}");
+    }
+
+    let results: Vec<BatchOrderResult> = serde_json::from_str(&resp_body)
+        .map_err(|e| {
+            tracing::error!(error = %e, body = resp_body, "failed to parse pre-signed batch response — cannot determine fill status");
+            anyhow::anyhow!("batch response parse failed: {e} body={resp_body}")
+        })?;
+
+    for (i, r) in results.iter().enumerate() {
+        let tag = orders.get(i).map(|(_, t)| *t).unwrap_or("?");
+        let err = r.error_msg.as_deref().unwrap_or("");
+        if !err.is_empty() {
+            tracing::warn!(tag, error = err, "pre-signed batch FAK rejected");
+        } else if let Some(oid) = r.order_id.as_deref().filter(|s| !s.is_empty()) {
+            tracing::info!(tag, order_id = oid, status = ?r.status, "pre-signed batch FAK accepted");
         }
     }
 

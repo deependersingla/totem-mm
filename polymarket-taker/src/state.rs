@@ -7,9 +7,12 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, watch};
 pub use tokio_util::sync::CancellationToken;
 
+use crate::capture::OracleEvent;
 use crate::clob_auth::ClobAuth;
 use crate::config::{Config, MakerConfig};
+use crate::db::Db;
 use crate::latency::LatencyTracker;
+use crate::order_cache::OrderCache;
 use crate::position::{self, Position};
 use crate::types::{CricketSignal, FillEvent, MatchState, OrderBook, Side, Team};
 
@@ -124,11 +127,22 @@ pub struct AppState {
     pub maker_config: RwLock<MakerConfig>,
     // ── Revert tracking ────────────────────────────────────────────────────
     pub pending_reverts: Mutex<Vec<PendingRevert>>,
+    // ── Pre-signed order cache ────────────────────────────────────────────
+    pub order_cache: Arc<OrderCache>,
+    /// Cached tick size, updated by background task.
+    pub cached_tick_size: RwLock<Option<Decimal>>,
+    /// Buffer of fill events received from user WS, keyed by order_id.
+    /// Strategy checks this before REST polling for faster fill detection.
+    fill_event_buffer: Mutex<Vec<FillEvent>>,
     // ── Sweep (endgame) state ──────────────────────────────────────────────
     pub sweep_phase: RwLock<SweepPhase>,
     pub sweep_config: RwLock<Option<SweepConfig>>,
     pub sweep_orders: Mutex<Vec<SweepOrder>>,
     pub sweep_cancel: RwLock<Option<CancellationToken>>,
+    // ── Database ──────────────────────────────────────────────────────────
+    pub db: RwLock<Option<Arc<Db>>>,
+    // ── Capture (background, non-blocking) ─────────────────────────────
+    pub oracle_tx: RwLock<Option<mpsc::Sender<OracleEvent>>>,
 }
 
 const MAX_EVENTS: usize = 200;
@@ -159,10 +173,15 @@ impl AppState {
             user_ws_cancel: RwLock::new(None),
             maker_config: RwLock::new(maker_cfg),
             pending_reverts: Mutex::new(Vec::new()),
+            order_cache: Arc::new(OrderCache::new()),
+            cached_tick_size: RwLock::new(None),
+            fill_event_buffer: Mutex::new(Vec::new()),
             sweep_phase: RwLock::new(SweepPhase::Idle),
             sweep_config: RwLock::new(None),
             sweep_orders: Mutex::new(Vec::new()),
             sweep_cancel: RwLock::new(None),
+            db: RwLock::new(None),
+            oracle_tx: RwLock::new(None),
         })
     }
 
@@ -207,6 +226,19 @@ impl AppState {
     }
 
     pub fn log_trade(&self, record: TradeRecord) {
+        // Only persist real trades to SQLite (not dry_run)
+        let is_dry = record.order_id.starts_with("dry_run");
+        if !is_dry {
+            if let Some(ref db) = *self.db.read().unwrap() {
+                let slug = self.config.read().unwrap().market_slug.clone();
+                db.insert_trade(
+                    &record.ts, &record.side, &record.team,
+                    &record.size.to_string(), &record.price.to_string(),
+                    &record.cost.to_string(), &record.order_type, &record.label,
+                    &record.order_id, &slug,
+                );
+            }
+        }
         self.trade_log.lock().unwrap().push(record);
     }
 
@@ -214,6 +246,38 @@ impl AppState {
         match team {
             Team::TeamA => *self.trade_team_a.read().unwrap(),
             Team::TeamB => *self.trade_team_b.read().unwrap(),
+        }
+    }
+
+    // ── Fill event buffer (from user WS) ────────────────────────────────────
+
+    /// Buffer a fill event from the user WebSocket.
+    /// For the same order_id, keeps only the latest (largest) fill to prevent
+    /// double-counting partial fills on GTC orders.
+    /// Capped at 500 entries to prevent unbounded growth.
+    pub fn buffer_fill_event(&self, event: FillEvent) {
+        let mut buf = self.fill_event_buffer.lock().unwrap();
+        // Deduplicate: if same order_id exists, keep the one with larger filled_size
+        if let Some(existing) = buf.iter_mut().find(|e| e.order_id == event.order_id) {
+            if event.filled_size >= existing.filled_size {
+                *existing = event;
+            }
+            return;
+        }
+        if buf.len() >= 500 {
+            buf.drain(..250);
+        }
+        buf.push(event);
+    }
+
+    /// Take a fill event for a specific order_id from the buffer.
+    /// Returns the first matching event and removes it.
+    pub fn take_fill_event(&self, order_id: &str) -> Option<FillEvent> {
+        let mut buf = self.fill_event_buffer.lock().unwrap();
+        if let Some(idx) = buf.iter().position(|e| e.order_id == order_id) {
+            Some(buf.swap_remove(idx))
+        } else {
+            None
         }
     }
 
@@ -255,6 +319,21 @@ impl AppState {
     /// Count of pending reverts (for /api/status).
     pub fn pending_revert_count(&self) -> usize {
         self.pending_reverts.lock().unwrap().len()
+    }
+
+    /// Fire-and-forget capture of an oracle event. Never blocks.
+    pub fn capture_signal(&self, signal: &str, source: &str) {
+        if let Some(tx) = self.oracle_tx.read().unwrap().as_ref() {
+            let ms = self.match_state.read().unwrap();
+            let config = self.config.read().unwrap();
+            let _ = tx.try_send(OracleEvent {
+                signal: signal.to_string(),
+                source: source.to_string(),
+                innings: ms.innings,
+                batting: config.team_name(ms.batting).to_string(),
+                bowling: config.team_name(ms.bowling()).to_string(),
+            });
+        }
     }
 
     pub fn reset_for_new_match(&self) {

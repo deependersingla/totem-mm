@@ -37,3 +37,6 @@ polymarket-taker/target/
 polymarket-taker/.env
 polymarket-taker/settings.json
 polymarket-taker/telegram-bot/config.json
+*.db
+*.db-shm
+*.db-wal
