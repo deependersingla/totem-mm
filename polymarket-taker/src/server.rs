@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tower_http::cors::CorsLayer;
 
+use crate::capture;
 use crate::clob_auth::ClobAuth;
 use crate::ctf;
 use crate::market_ws;
@@ -22,13 +23,16 @@ const CHAIN_SYNC_INTERVAL_SECS: u64 = 30;
 use crate::config::MakerConfig;
 use crate::heartbeat;
 use crate::maker;
+use crate::order_cache;
 use crate::orders;
 use crate::state::{AppState, MatchPhase};
 use crate::strategy;
 use crate::types::{CricketSignal, FillEvent, OrderBook, Team};
+use crate::user_ws;
 use crate::web;
 
 type S = Arc<AppState>;
+
 
 /// Start (or restart) the orderbook WebSocket feed so the UI shows live
 /// bid/ask data even before a match is started.  Safe to call multiple times —
@@ -82,6 +86,9 @@ pub fn build_router(state: S) -> Router {
         .route("/api/start-innings", post(post_start_innings))
         .route("/api/stop-innings", post(post_stop_innings))
         .route("/api/signal", post(post_signal))
+        .route("/api/tg-signal", post(post_tg_signal))
+        .route("/api/taker/status", get(get_taker_status))
+        .route("/api/taker/cancel-order", post(post_taker_cancel_order))
         .route("/api/toggle-team", post(post_toggle_team))
         .route("/api/match-over", post(post_match_over))
         .route("/api/cancel-all", post(post_cancel_all))
@@ -885,9 +892,86 @@ async fn post_start_innings(
         });
     }
 
+    // ── User WS for real-time fill detection ────────────────────────────────
+    let (taker_fill_tx, taker_fill_rx) = mpsc::channel::<FillEvent>(128);
+    {
+        let ws_url = config.clob_ws.clone();
+        let api_key = config.api_key.clone();
+        let api_secret = config.api_secret.clone();
+        let api_passphrase = config.api_passphrase.clone();
+        let condition_id = config.condition_id.clone();
+        let token_ids = vec![config.team_a_token_id.clone(), config.team_b_token_id.clone()];
+        let user_ws_cancel = cancel.clone();
+        let fill_tx_for_ws = taker_fill_tx.clone();
+        let (bridge_tx, mut bridge_rx) = mpsc::channel::<FillEvent>(128);
+
+        // Bridge task: forward WS fills to both the mpsc channel (for strategy)
+        // and the AppState buffer (for revert monitors and other consumers).
+        let bridge_app = state.clone();
+        tokio::spawn(async move {
+            while let Some(event) = bridge_rx.recv().await {
+                bridge_app.buffer_fill_event(event.clone());
+                let _ = fill_tx_for_ws.send(event).await;
+            }
+        });
+
+        tokio::spawn(async move {
+            user_ws::run(
+                ws_url,
+                api_key,
+                api_secret,
+                api_passphrase,
+                condition_id,
+                token_ids,
+                bridge_tx,
+                user_ws_cancel,
+            ).await;
+        });
+        tracing::info!("[TAKER] user WS spawned for real-time fill detection");
+    }
+
+    // ── Order cache: pre-sign orders in background ────────────────────────
+    {
+        let cache_app = state.clone();
+        let cache = state.order_cache.clone();
+        let cache_book_rx = state.book_rx.read().unwrap().clone()
+            .expect("book_rx must be set");
+        let cache_cancel = cancel.clone();
+        tokio::spawn(async move {
+            order_cache::run(cache_app, cache, cache_book_rx, cache_cancel).await;
+        });
+        tracing::info!("[TAKER] order cache pre-signer spawned");
+    }
+
+    // ── Background tick_size refresher ────────────────────────────────────
+    {
+        let tick_app = state.clone();
+        let tick_cancel = cancel.clone();
+        tokio::spawn(async move {
+            strategy::tick_size_refresher(tick_app, tick_cancel).await;
+        });
+        tracing::info!("[TAKER] background tick_size refresher spawned");
+    }
+
+    // ── CLOB order sync (polls /data/orders every 5s) ────────────────────
+    {
+        let sync_app = state.clone();
+        let sync_cancel = cancel.clone();
+        tokio::spawn(async move {
+            strategy::clob_order_sync(sync_app, sync_cancel).await;
+        });
+        tracing::info!("[TAKER] CLOB order sync spawned");
+    }
+
+    // ── Background oracle event capture ────────────────────────────────
+    if let Some(ref db) = *state.db.read().unwrap() {
+        let slug = config.market_slug.clone();
+        let oracle_tx = capture::spawn_oracle_writer(db.clone(), slug, cancel.clone());
+        *state.oracle_tx.write().unwrap() = Some(oracle_tx);
+        tracing::info!("[CAPTURE] oracle event writer spawned");
+    }
+
     // Wait for book to populate then start strategy.
-    // Rather than a blind 3s sleep, poll until we have a non-empty book snapshot
-    // (or fall back to 5s max wait so we don't block forever on WS failure).
     let st = state.clone();
     tokio::spawn(async move {
         // Poll until at least one token has a best bid/ask (max 5s)
@@ -908,7 +992,7 @@ async fn post_start_innings(
         }
 
         let config = st.config.read().unwrap().clone();
-        strategy::run(&config, &auth_snapshot, signal_rx, book_rx, st.position.clone(), st.clone()).await;
+        strategy::run(&config, &auth_snapshot, signal_rx, book_rx, st.position.clone(), st.clone(), taker_fill_rx).await;
     });
 
     // If maker is enabled, spawn maker::run with its own signal subscriber and fill channel.
@@ -957,13 +1041,9 @@ async fn post_stop_innings(
         return Err((StatusCode::CONFLICT, "no innings running".into()));
     }
 
-    // Compute next batting state BEFORE sending InningsOver so the event message
-    // is correct regardless of when the strategy processes the signal.
-    let (next_batting_name, next_innings_num) = {
-        let ms = state.match_state.read().unwrap();
-        let config = state.config.read().unwrap();
-        // After InningsOver the opponent bats next; innings counter increments.
-        (config.team_name(ms.batting.opponent()).to_string(), ms.innings + 1)
+    // Capture current innings number before strategy processes the signal.
+    let current_innings = {
+        state.match_state.read().unwrap().innings
     };
 
     // Signal strategy to stop. The strategy's InningsOver handler calls
@@ -980,11 +1060,19 @@ async fn post_stop_innings(
     }
     *state.ws_cancel.write().unwrap() = None;
 
-    *state.phase.write().unwrap() = MatchPhase::InningsPaused;
-
-    state.push_event("innings", &format!(
-        "innings paused — next: {next_batting_name} batting (innings {next_innings_num})"
-    ));
+    if current_innings >= 2 {
+        *state.phase.write().unwrap() = MatchPhase::MatchOver;
+        state.push_event("match", "innings 2 over — match complete, see you again");
+    } else {
+        *state.phase.write().unwrap() = MatchPhase::InningsPaused;
+        let config = state.config.read().unwrap();
+        let ms = state.match_state.read().unwrap();
+        // By now strategy may have already switched, so read the updated state
+        let next_batting = config.team_name(ms.batting.opponent());
+        state.push_event("innings", &format!(
+            "innings {current_innings} over — {next_batting} batting next"
+        ));
+    };
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -1022,8 +1110,90 @@ async fn post_signal(
         return Err((StatusCode::CONFLICT, "signal channel not ready".into()));
     }
 
+    state.capture_signal(&body.signal, "ui");
     state.push_event("signal", &format!("{parsed}"));
     Ok(Json(serde_json::json!({"ok": true, "signal": body.signal})))
+}
+
+// ── Telegram signal webhook ──────────────────────────────────────────────────
+// Fastest possible signal path: Telegram bot → HTTP POST → parse → broadcast
+// Accepts both JSON body {"signal": "W"} and raw text body "W"
+// Can also accept Telegram webhook format {"message":{"text":"W"}}
+
+#[derive(Deserialize)]
+struct TelegramUpdate {
+    message: Option<TelegramMessage>,
+}
+
+#[derive(Deserialize)]
+struct TelegramMessage {
+    text: Option<String>,
+}
+
+async fn post_tg_signal(
+    State(state): State<S>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let recv_time = std::time::Instant::now();
+
+    if !state.is_match_running() {
+        return Err((StatusCode::CONFLICT, "no innings running".into()));
+    }
+
+    // Extract signal text from various formats
+    let raw_text = extract_signal_text(&body)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "could not extract signal from body".into()))?;
+
+    let parsed = CricketSignal::parse(&raw_text)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown signal: {raw_text}")))?;
+
+    // IO and MO should go through the same logic as dedicated endpoints
+    // to ensure proper state transitions (phase changes, etc.)
+    if parsed == CricketSignal::InningsOver {
+        return Err((StatusCode::BAD_REQUEST, "use /api/stop-innings for IO (or send via regular /api/signal)".into()));
+    }
+    if parsed == CricketSignal::MatchOver {
+        return Err((StatusCode::BAD_REQUEST, "use /api/match-over for MO (or send via regular /api/signal)".into()));
+    }
+
+    let tx = state.signal_tx.read().unwrap().clone();
+    if let Some(tx) = tx {
+        tx.send(parsed.clone())
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
+    } else {
+        return Err((StatusCode::CONFLICT, "signal channel not ready".into()));
+    }
+
+    state.capture_signal(&raw_text, "telegram");
+    let latency_us = recv_time.elapsed().as_micros();
+    state.push_event("tg-signal", &format!("{parsed} ({latency_us}us)"));
+    Ok(Json(serde_json::json!({"ok": true, "signal": format!("{parsed}"), "latency_us": latency_us})))
+}
+
+fn extract_signal_text(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let trimmed = text.trim();
+
+    // 1) Try Telegram webhook format: {"message":{"text":"W"}}
+    if let Ok(update) = serde_json::from_str::<TelegramUpdate>(trimmed) {
+        if let Some(msg) = update.message {
+            if let Some(t) = msg.text {
+                return Some(t.trim().to_string());
+            }
+        }
+    }
+
+    // 2) Try simple JSON: {"signal":"W"}
+    if let Ok(req) = serde_json::from_str::<SignalRequest>(trimmed) {
+        return Some(req.signal.trim().to_string());
+    }
+
+    // 3) Raw text body: "W"
+    if !trimmed.is_empty() && trimmed.len() < 10 {
+        return Some(trimmed.to_string());
+    }
+
+    None
 }
 
 // ── Toggle team trading ──────────────────────────────────────────────────────
@@ -1528,6 +1698,239 @@ async fn post_maker_config(
 
 async fn get_latency(State(state): State<S>) -> Json<crate::latency::LatencySnapshot> {
     Json(state.latency.snapshot())
+}
+
+// ── Taker UI & status ─────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct TakerTradeEntry {
+    ts: String,
+    side: String,
+    team: String,
+    size: Decimal,
+    price: Decimal,
+    cost: Decimal,
+    order_type: String,
+    label: String,
+    order_id: String,
+    pnl: Decimal,
+}
+
+#[derive(Serialize)]
+struct PendingRevertEntry {
+    order_id: String,
+    team: String,
+    side: String,
+    size: Decimal,
+    entry_price: Decimal,
+    revert_limit: Decimal,
+    age_secs: f64,
+    label: String,
+}
+
+#[derive(Serialize)]
+struct TakerStatusResponse {
+    phase: MatchPhase,
+    batting: String,
+    bowling: String,
+    innings: u8,
+    team_a_name: String,
+    team_b_name: String,
+    team_a_tokens: Decimal,
+    team_b_tokens: Decimal,
+    total_spent: Decimal,
+    total_budget: Decimal,
+    remaining: Decimal,
+    trade_count: u64,
+    dry_run: bool,
+    // Book prices
+    book_a_bid: Option<Decimal>,
+    book_a_ask: Option<Decimal>,
+    book_b_bid: Option<Decimal>,
+    book_b_ask: Option<Decimal>,
+    // PnL
+    unrealized_pnl: Decimal,
+    round_trip_pnl: Decimal,
+    // Trades and reverts
+    trades: Vec<TakerTradeEntry>,
+    pending_reverts: Vec<PendingRevertEntry>,
+    // CLOB orders (from DB)
+    open_orders: Vec<crate::db::ClobOrderRow>,
+    closed_orders: Vec<crate::db::ClobOrderRow>,
+    // Round-trips
+    round_trips: Vec<crate::db::RoundTrip>,
+    // Latency
+    latency: crate::latency::LatencySnapshot,
+    // Settings summary
+    market_slug: String,
+    max_trade_usdc: Decimal,
+    edge_wicket: f64,
+    edge_boundary_4: f64,
+    edge_boundary_6: f64,
+    revert_delay_ms: u64,
+    fill_poll_timeout_ms: u64,
+    // Recent events
+    events: Vec<crate::state::EventEntry>,
+}
+
+async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
+    let config = state.config.read().unwrap();
+    let pos = state.position.lock().unwrap();
+    let ms = state.match_state.read().unwrap();
+    let phase = *state.phase.read().unwrap();
+
+    let (ba_bid, ba_ask, bb_bid, bb_ask) = {
+        let br = state.book_rx.read().unwrap();
+        if let Some(rx) = br.as_ref() {
+            let books = rx.borrow().clone();
+            (
+                books.0.best_bid().map(|l| l.price),
+                books.0.best_ask().map(|l| l.price),
+                books.1.best_bid().map(|l| l.price),
+                books.1.best_ask().map(|l| l.price),
+            )
+        } else {
+            (None, None, None, None)
+        }
+    };
+
+    // Unrealized PnL: mark-to-market of held tokens
+    let team_a_mid = match (ba_bid, ba_ask) {
+        (Some(b), Some(a)) => (b + a) / Decimal::TWO,
+        (Some(b), None) => b,
+        (None, Some(a)) => a,
+        _ => Decimal::ZERO,
+    };
+    let team_b_mid = match (bb_bid, bb_ask) {
+        (Some(b), Some(a)) => (b + a) / Decimal::TWO,
+        (Some(b), None) => b,
+        (None, Some(a)) => a,
+        _ => Decimal::ZERO,
+    };
+    let token_value = pos.team_a_tokens * team_a_mid + pos.team_b_tokens * team_b_mid;
+    let unrealized_pnl = token_value - pos.total_spent;
+
+    // Round-trip PnL from DB (the real PnL — completed entry+exit pairs)
+    let slug = config.market_slug.clone();
+    let (round_trip_pnl, round_trips, open_orders, closed_orders) = {
+        let db = state.db.read().unwrap();
+        if let Some(ref db) = *db {
+            (
+                db.total_pnl(&slug),
+                db.get_round_trips(&slug, 100),
+                db.get_open_orders(&slug),
+                db.get_closed_orders(&slug, 100),
+            )
+        } else {
+            (Decimal::ZERO, Vec::new(), Vec::new(), Vec::new())
+        }
+    };
+
+    // Build trade entries with running PnL
+    let trades = state.trade_log.lock().unwrap().clone();
+    let mut running_pnl = Decimal::ZERO;
+    let trade_entries: Vec<TakerTradeEntry> = trades.iter().map(|t| {
+        match t.side.as_str() {
+            "SELL" => running_pnl += t.cost,
+            "BUY" => running_pnl -= t.cost,
+            _ => {}
+        }
+        TakerTradeEntry {
+            ts: t.ts.clone(),
+            side: t.side.clone(),
+            team: t.team.clone(),
+            size: t.size,
+            price: t.price,
+            cost: t.cost,
+            order_type: t.order_type.clone(),
+            label: t.label.clone(),
+            order_id: t.order_id.clone(),
+            pnl: running_pnl,
+        }
+    }).collect();
+
+    // Pending reverts
+    let pending_reverts: Vec<PendingRevertEntry> = state.pending_reverts.lock().unwrap()
+        .iter().map(|r| PendingRevertEntry {
+            order_id: r.order_id.clone(),
+            team: config.team_name(r.team).to_string(),
+            side: format!("{}", r.side),
+            size: r.size,
+            entry_price: r.entry_price,
+            revert_limit: r.revert_limit_price,
+            age_secs: r.age_secs(),
+            label: r.label.clone(),
+        }).collect();
+
+    // Recent events (last 50)
+    let events: Vec<crate::state::EventEntry> = {
+        let ev = state.events.lock().unwrap();
+        ev.iter().rev().take(50).cloned().collect()
+    };
+
+    Json(TakerStatusResponse {
+        phase,
+        batting: config.team_name(ms.batting).to_string(),
+        bowling: config.team_name(ms.bowling()).to_string(),
+        innings: ms.innings,
+        team_a_name: config.team_a_name.clone(),
+        team_b_name: config.team_b_name.clone(),
+        team_a_tokens: pos.team_a_tokens,
+        team_b_tokens: pos.team_b_tokens,
+        total_spent: pos.total_spent,
+        total_budget: pos.total_budget,
+        remaining: pos.remaining_budget(),
+        trade_count: pos.trade_count,
+        dry_run: config.dry_run,
+        book_a_bid: ba_bid,
+        book_a_ask: ba_ask,
+        book_b_bid: bb_bid,
+        book_b_ask: bb_ask,
+        unrealized_pnl,
+        round_trip_pnl,
+        trades: trade_entries,
+        pending_reverts,
+        open_orders,
+        closed_orders,
+        round_trips,
+        latency: state.latency.snapshot(),
+        market_slug: slug,
+        max_trade_usdc: config.max_trade_usdc,
+        edge_wicket: config.edge_wicket,
+        edge_boundary_4: config.edge_boundary_4,
+        edge_boundary_6: config.edge_boundary_6,
+        revert_delay_ms: config.revert_delay_ms,
+        fill_poll_timeout_ms: config.fill_poll_timeout_ms,
+        events,
+    })
+}
+
+// ── Taker cancel order ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CancelOrderRequest {
+    order_id: String,
+}
+
+async fn post_taker_cancel_order(
+    State(state): State<S>,
+    Json(body): Json<CancelOrderRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let config = state.config.read().unwrap().clone();
+    let auth = state.auth.read().unwrap().clone()
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "no auth".into()))?;
+
+    match orders::cancel_order(&config, &auth, &body.order_id).await {
+        Ok(()) => {
+            // Also remove from pending_reverts if it's there
+            state.remove_revert(&body.order_id);
+            state.push_event("cancel", &format!("order {} cancelled", &body.order_id[..8.min(body.order_id.len())]));
+            Ok(Json(serde_json::json!({"ok": true, "cancelled": body.order_id})))
+        }
+        Err(e) => {
+            Err((StatusCode::BAD_REQUEST, format!("cancel failed: {e}")))
+        }
+    }
 }
 
 // ── Sweep (endgame) endpoints ──────────────────────────────────────────────

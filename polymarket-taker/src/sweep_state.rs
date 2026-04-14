@@ -129,7 +129,7 @@ impl SweepAppState {
 
     pub fn push_event(&self, kind: &str, detail: &str) {
         let entry = EventEntry {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: crate::state::ist_now(),
             kind: kind.to_string(),
             detail: detail.to_string(),
         };

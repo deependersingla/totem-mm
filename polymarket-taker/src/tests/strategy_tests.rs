@@ -177,7 +177,7 @@ fn build_buy_order_uses_best_ask_price_and_size() {
     assert_eq!(order.side, Side::Buy);
     assert_eq!(order.team, Team::TeamB);
     assert_eq!(order.price, dec!(0.40));
-    // max_tokens = 10 / 0.40 = 25, available = 100 → size = 25
+    // 10 / 0.40 = 25 tokens from budget
     assert_eq!(order.size, dec!(25));
 }
 
@@ -189,12 +189,13 @@ fn build_buy_order_returns_none_for_empty_asks() {
 }
 
 #[test]
-fn build_buy_order_size_limited_by_available() {
+fn build_buy_order_size_from_budget_not_book() {
     let config = test_config("100", 2); // 100 USDC max
-    // Available: 5 tokens @ 0.50 — only 5 tokens available
+    // Available: 5 tokens @ 0.50 — but size comes from budget, not book
     let book = book_with_ask(dec!(0.50), dec!(5));
     let order = build_buy_order(&config, Team::TeamA, &book).unwrap();
-    assert_eq!(order.size, dec!(5));
+    // 100 / 0.50 = 200 tokens — sized from budget, ignoring book depth
+    assert_eq!(order.size, dec!(200));
 }
 
 // ── edge_ticks_for_label ───────────────────────────────────────────────────────

@@ -3,16 +3,17 @@ use std::time::{Duration, Instant};
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use rand::Rng;
 
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
-use crate::orders::{self, BatchOrderResult};
+use crate::latency::LatencyMetric;
+use crate::orders::{self, ClobOrder};
 use crate::position::Position;
 use crate::state::{AppState, PendingRevert, TradeRecord};
-use crate::types::{CricketSignal, FakOrder, OrderBook, Side, Team};
+use crate::types::{CricketSignal, FakOrder, FillEvent, OrderBook, Side, Team};
 
 fn random_tag(prefix: &str) -> String {
     let suffix: String = rand::thread_rng()
@@ -30,6 +31,7 @@ pub async fn run(
     book_rx: watch::Receiver<(OrderBook, OrderBook)>,
     position: Position,
     app: Arc<AppState>,
+    mut fill_rx: mpsc::Receiver<FillEvent>,
 ) {
     // Read current match state — innings 2 means India is already batting
     let mut state = app.match_state.read().unwrap().clone();
@@ -43,7 +45,11 @@ pub async fn run(
     );
 
     while let Ok(signal) = signal_rx.recv().await {
+        let signal_time = Instant::now();
         let config = app.config.read().unwrap().clone();
+
+        // Drain any pending fill events into a shared buffer for this cycle
+        drain_fill_events(&mut fill_rx, &app);
 
         match signal {
             CricketSignal::MatchOver => {
@@ -55,12 +61,20 @@ pub async fn run(
             }
 
             CricketSignal::InningsOver => {
+                let finished_innings = state.innings;
                 state.switch_innings();
                 *app.match_state.write().unwrap() = state.clone();
-                let msg = format!("innings over — {} now batting (innings {})",
-                    config.team_name(state.batting), state.innings);
-                tracing::info!("{msg}");
-                app.push_event("innings", &msg);
+                if finished_innings >= 2 {
+                    // T20: only 2 innings — don't advertise innings 3
+                    let msg = format!("innings {} over — match complete", finished_innings);
+                    tracing::info!("{msg}");
+                    app.push_event("innings", &msg);
+                } else {
+                    let msg = format!("innings {} over — {} now batting (innings {})",
+                        finished_innings, config.team_name(state.batting), state.innings);
+                    tracing::info!("{msg}");
+                    app.push_event("innings", &msg);
+                }
             }
 
             CricketSignal::Wicket(extra_runs) => {
@@ -84,16 +98,21 @@ pub async fn run(
                     continue;
                 }
 
+                // Record signal-to-decision latency
+                app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
+
                 let (batting_book, bowling_book) = team_books(&books, batting);
+
+                // Try pre-signed cache first, fall back to fresh build
                 let sell_order = if app.is_team_enabled(batting) {
                     let held = position.lock().unwrap().token_balance(batting);
-                    build_sell_order(&config, batting, &batting_book, Some(held))
+                    resolve_sell_order(&config, &app, auth, batting, &batting_book, held, signal_time).await
                 } else {
                     tracing::debug!(team = %config.team_name(batting), "team disabled — sell skipped");
                     None
                 };
                 let buy_order = if app.is_team_enabled(bowling) {
-                    build_buy_order(&config, bowling, &bowling_book)
+                    resolve_buy_order(&config, &app, auth, bowling, &bowling_book, signal_time).await
                 } else {
                     tracing::debug!(team = %config.team_name(bowling), "team disabled — buy skipped");
                     None
@@ -123,7 +142,7 @@ pub async fn run(
                 tokio::spawn(async move {
                     execute_event_trade(
                         &task_config, &task_auth, &task_position, &task_app,
-                        task_book_rx, sell_order, buy_order, "WICKET",
+                        task_book_rx, sell_order, buy_order, "WICKET", signal_time,
                     ).await;
                 });
             }
@@ -134,7 +153,8 @@ pub async fn run(
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN");
+                        app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN", signal_time).await;
                     } else {
                         app.push_event("skip", &format!("RUN{r}: price outside safe range — boundary skipped"));
                     }
@@ -146,7 +166,8 @@ pub async fn run(
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD");
+                        app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD", signal_time).await;
                     } else {
                         app.push_event("skip", &format!("WD{r}: price outside safe range — boundary skipped"));
                     }
@@ -158,7 +179,8 @@ pub async fn run(
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB");
+                        app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB", signal_time).await;
                     } else {
                         app.push_event("skip", &format!("NB{r}: price outside safe range — boundary skipped"));
                     }
@@ -168,6 +190,86 @@ pub async fn run(
     }
 
     tracing::info!("strategy engine stopped");
+}
+
+/// Drain any pending fill events from the user WS channel into a shared buffer.
+/// This keeps the channel from backing up and lets us quickly check for fills later.
+fn drain_fill_events(fill_rx: &mut mpsc::Receiver<FillEvent>, app: &Arc<AppState>) {
+    while let Ok(event) = fill_rx.try_recv() {
+        tracing::debug!(
+            order_id = %event.order_id, status = %event.status,
+            filled = %event.filled_size, price = %event.avg_price,
+            "[FILL-DRAIN] buffered WS fill event"
+        );
+        app.buffer_fill_event(event);
+    }
+}
+
+// ── Pre-signed order resolution ───────────────────────────────────────────
+
+/// Resolved order: either from pre-signed cache or freshly built.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedOrder {
+    pub fak: FakOrder,
+    pub signed: Option<ClobOrder>, // Some = pre-signed, None = needs signing
+}
+
+/// Try to get a pre-signed sell from cache. Fall back to fresh build.
+async fn resolve_sell_order(
+    config: &Config,
+    app: &Arc<AppState>,
+    _auth: &ClobAuth,
+    team: Team,
+    book: &OrderBook,
+    held: Decimal,
+    _signal_time: Instant,
+) -> Option<ResolvedOrder> {
+    // Try cache first
+    if let Some(cached) = app.order_cache.take(team, Side::Sell).await {
+        // Validate cache is still usable: price must match current best bid
+        // AND size must not exceed currently held tokens (position may have changed since signing)
+        if let Some(best_bid) = book.best_bid() {
+            let held_floor = held.floor();
+            let size_ok = cached.fak.size <= held_floor && held_floor >= config.order_min_size;
+            if cached.book_price == best_bid.price && size_ok {
+                tracing::debug!(team = %config.team_name(team), price = %cached.book_price, size = %cached.fak.size, held = %held_floor, "using pre-signed SELL from cache");
+                return Some(ResolvedOrder { fak: cached.fak, signed: Some(cached.signed) });
+            }
+            tracing::debug!(team = %config.team_name(team),
+                cached_price = %cached.book_price, current_price = %best_bid.price,
+                cached_size = %cached.fak.size, held = %held_floor,
+                "cache stale or size exceeded — rebuilding SELL");
+        }
+    }
+
+    // Fresh build
+    let fak = build_sell_order(config, team, book, Some(held))?;
+    Some(ResolvedOrder { fak, signed: None })
+}
+
+/// Try to get a pre-signed buy from cache. Fall back to fresh build.
+async fn resolve_buy_order(
+    config: &Config,
+    app: &Arc<AppState>,
+    _auth: &ClobAuth,
+    team: Team,
+    book: &OrderBook,
+    _signal_time: Instant,
+) -> Option<ResolvedOrder> {
+    if let Some(cached) = app.order_cache.take(team, Side::Buy).await {
+        if let Some(best_ask) = book.best_ask() {
+            if cached.book_price == best_ask.price {
+                tracing::debug!(team = %config.team_name(team), price = %cached.book_price, "using pre-signed BUY from cache");
+                return Some(ResolvedOrder { fak: cached.fak, signed: Some(cached.signed) });
+            }
+            tracing::debug!(team = %config.team_name(team),
+                cached = %cached.book_price, current = %best_ask.price,
+                "cache stale — rebuilding BUY");
+        }
+    }
+
+    let fak = build_buy_order(config, team, book)?;
+    Some(ResolvedOrder { fak, signed: None })
 }
 
 /// Result of firing a single FAK order
@@ -187,27 +289,26 @@ struct FillInfo {
     order_id: String,
 }
 
-/// Generic trade executor: fire sell+buy FAK pair, poll fills, record position, revert.
-/// Used by both wicket trades (sell batting/buy bowling) and boundary trades (sell bowling/buy batting).
-/// The revert is symmetric: buy back whatever was sold, sell back whatever was bought — determined
-/// by `f.order.team` so no separate "batting/bowling" parameters are needed.
+/// Generic trade executor: fire sell+buy FAK pair, detect fills via WS+REST race,
+/// record position, then place revert.
 async fn execute_event_trade(
     config: &Config,
     auth: &ClobAuth,
     position: &Position,
     app: &Arc<AppState>,
     _book_rx: watch::Receiver<(OrderBook, OrderBook)>,
-    sell_order: Option<FakOrder>,
-    buy_order: Option<FakOrder>,
-    label: &str, // "WICKET" or "BOUNDARY_4" etc. for log/event context
+    sell_order: Option<ResolvedOrder>,
+    buy_order: Option<ResolvedOrder>,
+    label: &str,
+    signal_time: Instant,
 ) {
     let trade_start = tokio::time::Instant::now();
 
     let sell_desc = sell_order.as_ref()
-        .map(|o| format!("SELL {} @ {} sz={}", config.team_name(o.team), o.price, o.size))
+        .map(|o| format!("SELL {} @ {} sz={}", config.team_name(o.fak.team), o.fak.price, o.fak.size))
         .unwrap_or_else(|| "no order".into());
     let buy_desc = buy_order.as_ref()
-        .map(|o| format!("BUY {} @ {} sz={}", config.team_name(o.team), o.price, o.size))
+        .map(|o| format!("BUY {} @ {} sz={}", config.team_name(o.fak.team), o.fak.price, o.fak.size))
         .unwrap_or_else(|| "no order".into());
 
     let sell_tag = random_tag("sell");
@@ -217,15 +318,16 @@ async fn execute_event_trade(
         config, auth, position, app,
         sell_order, &sell_tag,
         buy_order,  &buy_tag,
+        signal_time,
     ).await;
 
-    let poll_interval = Duration::from_millis(config.fill_poll_interval_ms);
+    let poll_interval = Duration::from_millis(config.fill_poll_interval_ms.max(200));
     let poll_timeout  = Duration::from_millis(config.fill_poll_timeout_ms);
-    let revert_delay  = Duration::from_millis(config.revert_delay_ms);
 
+    // Detect fills: race user WS events against REST polling (no hardcoded 3.5s sleep)
     let (sell_fill, buy_fill) = tokio::join!(
-        poll_fill_status(auth, app, sell_result, poll_interval, poll_timeout, config),
-        poll_fill_status(auth, app, buy_result,  poll_interval, poll_timeout, config),
+        detect_fill(auth, app, sell_result, poll_interval, poll_timeout, config, signal_time),
+        detect_fill(auth, app, buy_result,  poll_interval, poll_timeout, config, signal_time),
     );
 
     if let Some(ref f) = sell_fill {
@@ -237,7 +339,7 @@ async fn execute_event_trade(
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: crate::state::ist_now(),
             side: "SELL".into(),
             team: config.team_name(f.order.team).to_string(),
             size: f.filled_size,
@@ -257,7 +359,7 @@ async fn execute_event_trade(
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: crate::state::ist_now(),
             side: "BUY".into(),
             team: config.team_name(f.order.team).to_string(),
             size: f.filled_size,
@@ -270,6 +372,9 @@ async fn execute_event_trade(
     }
     app.snapshot_inventory();
 
+    // Record e2e latency
+    app.latency.record(LatencyMetric::E2eSignalToFill, signal_time.elapsed());
+
     if sell_fill.is_none() && buy_fill.is_none() {
         let msg = format!("{label}: no fills — sell=[{sell_desc}] buy=[{buy_desc}]");
         tracing::info!("{msg}");
@@ -278,18 +383,17 @@ async fn execute_event_trade(
     }
 
     let elapsed = trade_start.elapsed();
-    if elapsed < revert_delay {
-        tokio::time::sleep(revert_delay - elapsed).await;
+    let revert_delay_dur = Duration::from_millis(config.revert_delay_ms);
+    if elapsed < revert_delay_dur {
+        tokio::time::sleep(revert_delay_dur - elapsed).await;
     }
 
-    // Re-read config for latest tick_size (Polymarket can change it mid-match)
+    // Re-read config for latest settings
     let config = app.config.read().unwrap().clone();
 
-    // Fetch latest tick size from Gamma API
-    let tick: Decimal = match refresh_tick_size(&config, app).await {
-        Some(t) => t,
-        None => config.tick_size.parse().unwrap_or(dec!(0.01)),
-    };
+    // Use cached tick_size from background task (no HTTP in hot path)
+    let tick: Decimal = app.cached_tick_size.read().unwrap()
+        .unwrap_or_else(|| config.tick_size.parse().unwrap_or(dec!(0.01)));
 
     let edge_ticks = edge_ticks_for_label(label, &config);
     let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
@@ -297,10 +401,15 @@ async fn execute_event_trade(
     tracing::info!(delay_ms = config.revert_delay_ms, edge_ticks, tick = %tick, edge_amount = %edge_amount, "{label} REVERT");
     app.push_event("revert", &format!("{label}: revert after {}ms (edge {edge_ticks} ticks = {edge_amount})", config.revert_delay_ms));
 
+    // Determine tick precision for rounding (e.g., 0.01 → 2dp, 0.001 → 3dp)
+    let tick_dp = tick.to_string()
+        .split('.')
+        .nth(1)
+        .map_or(0, |frac| frac.trim_end_matches('0').len()) as u32;
+
     // Revert buy → sell back at avg_price + edge_ticks
-    // e.g. bought at 0.48 with 2 ticks → sell limit at 0.50
     if let Some(f) = buy_fill {
-        let limit_price = (f.avg_price + edge_amount).round_dp(2);
+        let limit_price = round_to_tick(f.avg_price + edge_amount, tick, tick_dp);
         let size = f.filled_size.round_dp(2);
         tracing::info!(
             team = %config.team_name(f.order.team),
@@ -333,9 +442,8 @@ async fn execute_event_trade(
         }
     }
     // Revert sell → buy back at avg_price - edge_ticks
-    // e.g. sold at 0.52 with 2 ticks → buy limit at 0.50
     if let Some(f) = sell_fill {
-        let limit_price = (f.avg_price - edge_amount).max(tick).round_dp(2);
+        let limit_price = round_to_tick((f.avg_price - edge_amount).max(tick), tick, tick_dp);
         let size = f.filled_size.round_dp(2);
         tracing::info!(
             team = %config.team_name(f.order.team),
@@ -370,7 +478,6 @@ async fn execute_event_trade(
 }
 
 /// Spawn a background task that polls a revert GTC order until it fills.
-/// When filled, logs the trade to the trade log and updates position.
 fn spawn_revert_fill_monitor(
     config: Config,
     auth: ClobAuth,
@@ -385,7 +492,7 @@ fn spawn_revert_fill_monitor(
 ) {
     tokio::spawn(async move {
         let poll_interval = Duration::from_secs(5);
-        let max_polls = 720; // 1 hour max (5s × 720)
+        let max_polls = 720; // 1 hour max (5s x 720)
 
         for _ in 0..max_polls {
             tokio::time::sleep(poll_interval).await;
@@ -398,6 +505,39 @@ fn spawn_revert_fill_monitor(
                 return;
             }
 
+            // Check WS fill buffer first (fast path)
+            if let Some(fill) = app.take_fill_event(&order_id) {
+                let filled = fill.filled_size;
+                let price = if fill.avg_price.is_zero() { limit_price } else { fill.avg_price };
+                let cost = filled * price;
+                {
+                    let mut pos = position.lock().unwrap();
+                    pos.on_fill(&FakOrder { team, side, price, size: filled });
+                }
+                let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${}",
+                    side, config.team_name(team), price, cost.round_dp(2));
+                tracing::info!("{msg}");
+                app.push_event("filled", &msg);
+                app.log_trade(TradeRecord {
+                    ts: crate::state::ist_now(),
+                    side: format!("{side}"),
+                    team: config.team_name(team).to_string(),
+                    size: filled,
+                    price,
+                    cost,
+                    order_type: "GTC".into(),
+                    label: label.clone(),
+                    order_id: order_id.clone(),
+                });
+                // Log round-trip PnL
+                if let Some(revert) = app.remove_revert(&order_id) {
+                    log_round_trip(&app, &config, &revert, price, filled, &order_id);
+                }
+                app.snapshot_inventory();
+                return;
+            }
+
+            // Fall back to REST
             match orders::get_order(&auth, &order_id).await {
                 Ok(open_order) => {
                     let filled = open_order.filled_size();
@@ -407,19 +547,16 @@ fn spawn_revert_fill_monitor(
                     if !filled.is_zero() || status == "matched" {
                         let price = if fill_price.is_zero() { limit_price } else { fill_price };
                         let cost = filled * price;
-
-                        // Update position
                         {
                             let mut pos = position.lock().unwrap();
                             pos.on_fill(&FakOrder { team, side, price, size: filled });
                         }
-
                         let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${}",
                             side, config.team_name(team), price, cost.round_dp(2));
                         tracing::info!("{msg}");
                         app.push_event("filled", &msg);
                         app.log_trade(TradeRecord {
-                            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                            ts: crate::state::ist_now(),
                             side: format!("{side}"),
                             team: config.team_name(team).to_string(),
                             size: filled,
@@ -429,8 +566,11 @@ fn spawn_revert_fill_monitor(
                             label: label.clone(),
                             order_id: order_id.clone(),
                         });
+                        // Log round-trip PnL
+                        if let Some(revert) = app.remove_revert(&order_id) {
+                            log_round_trip(&app, &config, &revert, price, filled, &order_id);
+                        }
                         app.snapshot_inventory();
-                        app.remove_revert(&order_id);
                         return;
                     }
 
@@ -450,29 +590,221 @@ fn spawn_revert_fill_monitor(
     });
 }
 
-/// Fetch the latest tick size from Gamma API and update config if changed.
-async fn refresh_tick_size(config: &Config, app: &Arc<AppState>) -> Option<Decimal> {
-    if config.market_slug.is_empty() {
-        return None;
-    }
-    let url = format!("https://gamma-api.polymarket.com/markets?slug={}", config.market_slug);
-    let resp = reqwest::get(&url).await.ok()?;
-    let markets: Vec<serde_json::Value> = resp.json().await.ok()?;
-    let market = markets.first()?;
-    let tick_f64 = market["orderPriceMinTickSize"].as_f64()?;
-    let tick: Decimal = Decimal::from_f64_retain(tick_f64)?;
+/// Background tick_size refresh task. Polls Gamma API every `interval` and
+/// updates `app.cached_tick_size`. Removes HTTP call from the revert hot path.
+pub async fn tick_size_refresher(
+    app: Arc<AppState>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let interval = Duration::from_secs(30);
+    tracing::info!("[TICK-REFRESH] background tick_size refresher started (every 30s)");
 
-    // Update config if tick changed
-    let old_tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
-    if tick != old_tick {
-        tracing::warn!(old = %old_tick, new = %tick, "tick size changed mid-match!");
-        app.push_event("warn", &format!("tick size changed: {old_tick} → {tick}"));
-        let mut cfg = app.config.write().unwrap();
-        cfg.tick_size = tick.to_string();
-        cfg.persist();
-    }
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("[TICK-REFRESH] cancelled, stopping");
+                return;
+            }
+            _ = tokio::time::sleep(interval) => {
+                let config = app.config.read().unwrap().clone();
+                if config.market_slug.is_empty() {
+                    continue;
+                }
 
-    Some(tick)
+                let url = format!("https://gamma-api.polymarket.com/markets?slug={}", config.market_slug);
+                match reqwest::get(&url).await {
+                    Ok(resp) => {
+                        if let Ok(markets) = resp.json::<Vec<serde_json::Value>>().await {
+                            if let Some(market) = markets.first() {
+                                if let Some(tick_f64) = market["orderPriceMinTickSize"].as_f64() {
+                                    if let Some(tick) = Decimal::from_f64_retain(tick_f64) {
+                                        *app.cached_tick_size.write().unwrap() = Some(tick);
+
+                                        // Update config if changed
+                                        let old_tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
+                                        if tick != old_tick {
+                                            tracing::warn!(old = %old_tick, new = %tick, "tick size changed!");
+                                            app.push_event("warn", &format!("tick size changed: {old_tick} -> {tick}"));
+                                            let mut cfg = app.config.write().unwrap();
+                                            cfg.tick_size = tick.to_string();
+                                            cfg.persist();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "[TICK-REFRESH] fetch failed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Log a completed round-trip (FAK entry + GTC revert exit) to the DB.
+/// PnL = exit_proceeds - entry_cost for each leg.
+fn log_round_trip(
+    app: &Arc<AppState>,
+    config: &Config,
+    revert: &PendingRevert,
+    exit_price: Decimal,
+    exit_size: Decimal,
+    exit_order_id: &str,
+) {
+    // Round-trip PnL calculation:
+    // If entry was BUY (revert is SELL): pnl = (exit_price - entry_price) * size
+    // If entry was SELL (revert is BUY): pnl = (entry_price - exit_price) * size
+    let pnl = match revert.side {
+        Side::Sell => (exit_price - revert.entry_price) * exit_size, // entry was BUY, exit is SELL
+        Side::Buy => (revert.entry_price - exit_price) * exit_size,  // entry was SELL, exit is BUY
+    };
+
+    let entry_side = match revert.side {
+        Side::Sell => "BUY",  // revert sell means entry was buy
+        Side::Buy => "SELL",  // revert buy means entry was sell
+    };
+
+    tracing::info!(
+        team = %config.team_name(revert.team),
+        entry_side, entry_price = %revert.entry_price,
+        exit_price = %exit_price, size = %exit_size,
+        pnl = %pnl.round_dp(4),
+        label = %revert.label,
+        "ROUND-TRIP complete"
+    );
+
+    app.push_event("pnl", &format!("{}: {} {} entry={} exit={} sz={} PnL=${}",
+        revert.label, entry_side, config.team_name(revert.team),
+        revert.entry_price, exit_price, exit_size, pnl.round_dp(4)));
+
+    if let Some(ref db) = *app.db.read().unwrap() {
+        let slug = config.market_slug.clone();
+        let now = crate::state::ist_now();
+        db.insert_round_trip(
+            &revert.placed_at.elapsed().as_secs().to_string(), // approximate entry time
+            &now,
+            &config.team_name(revert.team),
+            entry_side,
+            &revert.entry_price.to_string(),
+            &exit_price.to_string(),
+            &exit_size.to_string(),
+            &pnl.round_dp(6).to_string(),
+            &revert.label,
+            "", // entry_order_id not stored in PendingRevert — could add later
+            exit_order_id,
+            &slug,
+        );
+    }
+}
+
+/// Background CLOB order sync — polls /data/orders every 5s and upserts into DB.
+/// Reconciles pending_reverts against actual CLOB state.
+pub async fn clob_order_sync(
+    app: Arc<AppState>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let interval = Duration::from_secs(5);
+    tracing::info!("[ORDER-SYNC] background CLOB order sync started (every 5s)");
+
+    // Initial delay to let auth settle
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("[ORDER-SYNC] cancelled, stopping");
+                return;
+            }
+            _ = tokio::time::sleep(interval) => {
+                let config = app.config.read().unwrap().clone();
+
+                // Skip sync in dry_run — no real orders on CLOB
+                if config.dry_run {
+                    continue;
+                }
+
+                let auth = match app.auth.read().unwrap().clone() {
+                    Some(a) => a,
+                    None => continue,
+                };
+
+                if !config.has_tokens() {
+                    continue;
+                }
+
+                // Fetch orders for both tokens
+                let (res_a, res_b) = tokio::join!(
+                    orders::get_user_orders(&auth, Some(&config.team_a_token_id)),
+                    orders::get_user_orders(&auth, Some(&config.team_b_token_id)),
+                );
+
+                let mut all_orders: Vec<(serde_json::Value, &str)> = Vec::new();
+                if let Ok(ords) = res_a {
+                    for o in ords { all_orders.push((o, &config.team_a_name)); }
+                }
+                if let Ok(ords) = res_b {
+                    for o in ords { all_orders.push((o, &config.team_b_name)); }
+                }
+
+                // Upsert into DB and update in-memory state
+                if let Some(ref db) = *app.db.read().unwrap() {
+                    for (o, team_name) in &all_orders {
+                        let order_id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        if order_id.is_empty() { continue; }
+
+                        let row = crate::db::ClobOrderRow {
+                            order_id: order_id.to_string(),
+                            asset_id: o.get("asset_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            side: o.get("side").and_then(|v| v.as_str()).unwrap_or("BUY").to_string(),
+                            price: o.get("price").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                            original_size: o.get("original_size").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                            size_matched: o.get("size_matched").and_then(|v| v.as_str()).unwrap_or("0").to_string(),
+                            status: o.get("status").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
+                            order_type: o.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            created_at: o.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            team: team_name.to_string(),
+                        };
+                        db.upsert_clob_order(&row, &config.market_slug);
+                    }
+                }
+
+                // Reconcile pending_reverts: if CLOB says "matched" or "cancelled", update
+                let reverts: Vec<String> = app.pending_reverts.lock().unwrap()
+                    .iter().map(|r| r.order_id.clone()).collect();
+                for oid in &reverts {
+                    for (o, _) in &all_orders {
+                        let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        if id != oid.as_str() { continue; }
+                        let status = o.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                        let size_matched = o.get("size_matched").and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<Decimal>().ok())
+                            .unwrap_or(Decimal::ZERO);
+
+                        if (status == "matched" || status == "cancelled" || status == "expired") && !size_matched.is_zero() {
+                            // Revert filled — buffer as fill event for the revert monitor to pick up
+                            let price = o.get("price").and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<Decimal>().ok())
+                                .unwrap_or(Decimal::ZERO);
+                            let side_str = o.get("side").and_then(|v| v.as_str()).unwrap_or("BUY");
+                            let side = if side_str == "SELL" { Side::Sell } else { Side::Buy };
+
+                            app.buffer_fill_event(FillEvent {
+                                order_id: oid.clone(),
+                                filled_size: size_matched,
+                                avg_price: price,
+                                status: status.to_string(),
+                                asset_id: o.get("asset_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                side,
+                            });
+                            tracing::debug!(order_id = %oid, status, filled = %size_matched, "[ORDER-SYNC] reconciled revert fill");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn is_boundary(runs: u8) -> bool {
@@ -480,8 +812,7 @@ fn is_boundary(runs: u8) -> bool {
 }
 
 /// Spawn a boundary trade: sell bowling team, buy batting team, then revert.
-/// Called for Runs(4/6), Wide(4/6), NoBall(4/6). NOT called for Wicket(4/6) — those stay wicket.
-fn spawn_boundary_trade(
+async fn spawn_boundary_trade(
     config: Config,
     auth: ClobAuth,
     position: Position,
@@ -491,19 +822,20 @@ fn spawn_boundary_trade(
     batting: Team,
     runs: u8,
     kind: &'static str,
+    signal_time: Instant,
 ) {
     let bowling = batting.opponent();
     let (batting_book, bowling_book) = team_books(&books, batting);
 
-    // Boundary: bowler got hit → sell bowling (price drops), buy batting (price rises)
+    // Boundary: bowler got hit -> sell bowling (price drops), buy batting (price rises)
     let sell_order = if app.is_team_enabled(bowling) {
         let held = position.lock().unwrap().token_balance(bowling);
-        build_sell_order(&config, bowling, &bowling_book, Some(held))
+        resolve_sell_order(&config, &app, &auth, bowling, &bowling_book, held, signal_time).await
     } else {
         None
     };
     let buy_order = if app.is_team_enabled(batting) {
-        build_buy_order(&config, batting, &batting_book)
+        resolve_buy_order(&config, &app, &auth, batting, &batting_book, signal_time).await
     } else {
         None
     };
@@ -520,25 +852,26 @@ fn spawn_boundary_trade(
 
     let label = format!("{kind}{runs}");
     tokio::spawn(async move {
-        execute_event_trade(&config, &auth, &position, &app, book_rx, sell_order, buy_order, &label).await;
+        execute_event_trade(&config, &auth, &position, &app, book_rx, sell_order, buy_order, &label, signal_time).await;
     });
 }
 
 /// Send sell + buy FAK orders together via POST /orders (batch endpoint).
-/// Handles dry_run, budget checks, and maps responses back to FakResult pairs.
+/// Uses pre-signed orders from cache when available, falls back to fresh signing.
 async fn fire_fak_batch(
     config: &Config,
     auth: &ClobAuth,
     position: &Position,
     app: &Arc<AppState>,
-    sell_order: Option<FakOrder>,
+    sell_order: Option<ResolvedOrder>,
     sell_tag: &str,
-    buy_order: Option<FakOrder>,
+    buy_order: Option<ResolvedOrder>,
     buy_tag: &str,
+    _signal_time: Instant,
 ) -> (Option<FakResult>, Option<FakResult>) {
     // Budget check for buy order
     let buy_order = if let Some(ref buy) = buy_order {
-        let notional = buy.price * buy.size;
+        let notional = buy.fak.price * buy.fak.size;
         let can_spend = position.lock().unwrap().can_spend(notional);
         if !can_spend {
             tracing::warn!(tag = buy_tag, notional = %notional, "budget exceeded — buy skipped");
@@ -551,134 +884,146 @@ async fn fire_fak_batch(
         buy_order
     };
 
-    // Dry run: simulate both legs independently
+    // Dry run
     if config.dry_run {
-        let dry = |order: Option<FakOrder>, tag: &str| -> Option<FakResult> {
+        let dry = |order: Option<ResolvedOrder>, tag: &str| -> Option<FakResult> {
             let o = order?;
-            let notional = o.price * o.size;
-            tracing::info!(tag, side = %o.side, team = %config.team_name(o.team),
-                price = %o.price, size = %o.size, notional = %notional,
+            let notional = o.fak.price * o.fak.size;
+            tracing::info!(tag, side = %o.fak.side, team = %config.team_name(o.fak.team),
+                price = %o.fak.price, size = %o.fak.size, notional = %notional,
+                presigned = o.signed.is_some(),
                 "[DRY RUN] would place FAK order");
             app.push_event("trade", &format!("[DRY] {tag}: {} {} @ {} sz={}",
-                o.side, config.team_name(o.team), o.price, o.size));
-            Some(FakResult { order_id: Some("dry_run".to_string()), intended_order: o, tag: tag.to_string() })
+                o.fak.side, config.team_name(o.fak.team), o.fak.price, o.fak.size));
+            Some(FakResult { order_id: Some("dry_run".to_string()), intended_order: o.fak, tag: tag.to_string() })
         };
         return (dry(sell_order, sell_tag), dry(buy_order, buy_tag));
     }
 
-    // Build batch — track which index corresponds to sell vs buy
-    let mut batch: Vec<(FakOrder, &str)> = Vec::new();
-    let mut sell_idx: Option<usize> = None;
-    let mut buy_idx:  Option<usize> = None;
+    // Build batch — use pre-signed where available, sign fresh otherwise
+    let sign_start = Instant::now();
+    let mut batch_signed: Vec<(ClobOrder, &str)> = Vec::new();
+    let mut fak_meta: Vec<(Option<usize>, FakOrder, String)> = Vec::new(); // (batch_idx, fak, tag)
 
-    if let Some(ref o) = sell_order { sell_idx = Some(batch.len()); batch.push((o.clone(), sell_tag)); }
-    if let Some(ref o) = buy_order  { buy_idx  = Some(batch.len()); batch.push((o.clone(), buy_tag));  }
+    if let Some(ref sell) = sell_order {
+        let signed = match &sell.signed {
+            Some(s) => s.clone(),
+            None => match orders::build_signed_order(config, auth, &sell.fak) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(tag = sell_tag, error = %e, "failed to sign sell order");
+                    app.push_event("error", &format!("{sell_tag}: sign failed — {e}"));
+                    return (None, buy_order.map(|_| FakResult { order_id: None, intended_order: sell.fak.clone(), tag: sell_tag.to_string() }).and(None));
+                }
+            }
+        };
+        let idx = batch_signed.len();
+        batch_signed.push((signed, sell_tag));
+        fak_meta.push((Some(idx), sell.fak.clone(), sell_tag.to_string()));
+    }
 
-    if batch.is_empty() {
+    if let Some(ref buy) = buy_order {
+        let signed = match &buy.signed {
+            Some(s) => Some(s.clone()),
+            None => match orders::build_signed_order(config, auth, &buy.fak) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::error!(tag = buy_tag, error = %e, "failed to sign buy order");
+                    app.push_event("error", &format!("{buy_tag}: sign failed — {e}"));
+                    None
+                }
+            }
+        };
+        if let Some(signed) = signed {
+            let idx = batch_signed.len();
+            batch_signed.push((signed, buy_tag));
+            fak_meta.push((Some(idx), buy.fak.clone(), buy_tag.to_string()));
+        } else {
+            // Sign failed — record as no-index so we skip it in results
+            fak_meta.push((None, buy.fak.clone(), buy_tag.to_string()));
+            if batch_signed.is_empty() {
+                return (None, None);
+            }
+        }
+    }
+
+    app.latency.record(LatencyMetric::SignToPost, sign_start.elapsed());
+
+    if batch_signed.is_empty() {
         return (None, None);
     }
 
-    let batch_results = match orders::post_fak_orders_batch(config, auth, &batch).await {
-        Ok(r) => r,
+    let post_start = Instant::now();
+    let batch_results = match orders::post_presigned_fak_batch(config, auth, &batch_signed).await {
+        Ok(r) => {
+            app.latency.record(LatencyMetric::PostToResponse, post_start.elapsed());
+            r
+        }
         Err(e) => {
+            app.latency.record(LatencyMetric::PostToResponse, post_start.elapsed());
             tracing::error!(error = %e, "batch FAK order failed");
             app.push_event("error", &format!("batch: {e}"));
             return (None, None);
         }
     };
 
-    let extract = |idx: Option<usize>, order: Option<FakOrder>, tag: &str, results: &[BatchOrderResult]| -> Option<FakResult> {
-        let i = idx?;
-        let order = order?;
-        let r = results.get(i)?;
+    // Map results back to sell/buy
+    let mut sell_result: Option<FakResult> = None;
+    let mut buy_result: Option<FakResult> = None;
+
+    for (batch_idx_opt, fak, tag) in &fak_meta {
+        let batch_idx = match batch_idx_opt {
+            Some(i) => *i,
+            None => continue,
+        };
+        let r = match batch_results.get(batch_idx) {
+            Some(r) => r,
+            None => continue,
+        };
         let err = r.error_msg.as_deref().unwrap_or("");
         if !r.success.unwrap_or(false) || !err.is_empty() {
             if !err.is_empty() {
                 app.push_event("error", &format!("{tag}: rejected — {err}"));
             }
-            return None;
+            continue;
         }
-        let oid = r.order_id.as_deref().filter(|s| !s.is_empty())?;
+        let oid = match r.order_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(o) => o,
+            None => continue,
+        };
         let status = r.status.as_deref().unwrap_or("unknown");
         app.push_event("trade", &format!("{tag}: FAK {} {} @ {} sz={} ({}) [{}]",
-            order.side, config.team_name(order.team), order.price, order.size, oid, status));
-        Some(FakResult { order_id: Some(oid.to_string()), intended_order: order, tag: tag.to_string() })
-    };
+            fak.side, config.team_name(fak.team), fak.price, fak.size, oid, status));
 
-    let sell_result = extract(sell_idx, sell_order, sell_tag, &batch_results);
-    let buy_result  = extract(buy_idx,  buy_order,  buy_tag,  &batch_results);
+        let result = FakResult {
+            order_id: Some(oid.to_string()),
+            intended_order: fak.clone(),
+            tag: tag.to_string(),
+        };
+
+        if tag.starts_with("sell") {
+            sell_result = Some(result);
+        } else {
+            buy_result = Some(result);
+        }
+    }
+
     (sell_result, buy_result)
 }
 
-#[allow(dead_code)]
-async fn fire_fak(
-    config: &Config,
-    auth: &ClobAuth,
-    position: &Position,
-    app: &Arc<AppState>,
-    order: Option<FakOrder>,
-    tag: &str,
-) -> Option<FakResult> {
-    let order = order?;
-    let notional = order.price * order.size;
-
-    {
-        let pos = position.lock().unwrap();
-        if order.side == Side::Buy && !pos.can_spend(notional) {
-            tracing::warn!(tag, notional = %notional, remaining = %pos.remaining_budget(), "budget exceeded — skipping");
-            app.push_event("warn", &format!("{tag}: budget exceeded, skipping"));
-            return None;
-        }
-    }
-
-    if config.dry_run {
-        tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
-            price = %order.price, size = %order.size, notional = %notional,
-            "[DRY RUN] would place FAK order");
-        app.push_event("trade", &format!("[DRY] {tag}: {} {} @ {} sz={}", order.side, config.team_name(order.team), order.price, order.size));
-        return Some(FakResult {
-            order_id: Some("dry_run".to_string()),
-            intended_order: order,
-            tag: tag.to_string(),
-        });
-    }
-
-    match orders::post_fak_order(config, auth, &order, tag).await {
-        Ok(resp) if resp.order_id.as_deref().map_or(false, |s| !s.is_empty()) => {
-            let oid = resp.order_id.unwrap();
-            let status = resp.status.as_deref().unwrap_or("unknown");
-            app.push_event("trade", &format!("{tag}: FAK {} {} @ {} sz={} ({}) [{}]",
-                order.side, config.team_name(order.team), order.price, order.size, oid, status));
-            Some(FakResult {
-                order_id: Some(oid),
-                intended_order: order,
-                tag: tag.to_string(),
-            })
-        }
-        Ok(resp) => {
-            let msg = resp.error_msg.unwrap_or_default();
-            app.push_event("error", &format!("{tag}: rejected — {msg}"));
-            None
-        }
-        Err(e) => {
-            tracing::error!(tag, error = %e, "FAK order failed");
-            app.push_event("error", &format!("{tag}: {e}"));
-            None
-        }
-    }
-}
-
-async fn poll_fill_status(
+/// Detect fill via racing user WS events against REST polling.
+/// No hardcoded 3.5s sleep — starts checking immediately.
+async fn detect_fill(
     auth: &ClobAuth,
     app: &Arc<AppState>,
     fak_result: Option<FakResult>,
     poll_interval: Duration,
     poll_timeout: Duration,
     _config: &Config,
+    signal_time: Instant,
 ) -> Option<FillInfo> {
     let result = fak_result?;
     let order_id = result.order_id.as_deref().filter(|s| !s.is_empty())?;
-
     let oid = order_id.to_string();
 
     if order_id == "dry_run" {
@@ -691,30 +1036,52 @@ async fn poll_fill_status(
         });
     }
 
-    // Sports markets have a 3-second matching delay ("delayed" status).
-    // Wait before polling to avoid wasting requests on null responses.
-    const MATCH_DELAY: Duration = Duration::from_millis(3500);
-    tracing::info!(tag = %result.tag, order_id, "waiting 3.5s for sports market matching delay");
-    tokio::time::sleep(MATCH_DELAY).await;
-
-    // Try to confirm the fill via get_order API.
     let deadline = tokio::time::Instant::now() + poll_timeout;
 
+    // No initial delay — check WS buffer immediately (sub-microsecond).
+    // Sports markets have ~3s matching delay but WS events arrive as soon as
+    // the matching engine confirms, so we start checking at t=0.
+
     loop {
+        // 1) Check WS fill buffer first (fast path — sub-millisecond)
+        if let Some(fill) = app.take_fill_event(&oid) {
+            app.latency.record(LatencyMetric::FillDetectWs, signal_time.elapsed());
+            tracing::info!(
+                tag = %result.tag, order_id, status = %fill.status,
+                filled = %fill.filled_size, price = %fill.avg_price,
+                "fill detected via WS"
+            );
+            app.push_event("fill", &format!("{}: filled {} @ {} [WS:{}]",
+                result.tag, fill.filled_size, fill.avg_price, fill.status));
+            return Some(FillInfo {
+                filled_size: fill.filled_size,
+                avg_price: if fill.avg_price.is_zero() { result.intended_order.price } else { fill.avg_price },
+                order: result.intended_order,
+                tag: result.tag,
+                order_id: oid,
+            });
+        }
+
+        // 2) REST poll fallback
         match orders::get_order(auth, order_id).await {
             Ok(open_order) => {
                 let filled = open_order.filled_size();
                 let price = open_order.fill_price();
                 let status = open_order.status.as_deref().unwrap_or("unknown");
 
-                tracing::info!(
-                    tag = %result.tag, order_id, status,
-                    filled = %filled, price = %price,
-                    "poll fill status"
-                );
+                if status.eq_ignore_ascii_case("delayed") {
+                    tracing::debug!(tag = %result.tag, order_id, "order in 'delayed' state (sports matching delay)");
+                } else {
+                    tracing::debug!(
+                        tag = %result.tag, order_id, status,
+                        filled = %filled, price = %price,
+                        "poll fill status"
+                    );
+                }
 
                 if !filled.is_zero() {
-                    app.push_event("fill", &format!("{}: filled {} @ {} [{}]",
+                    app.latency.record(LatencyMetric::FillDetectPoll, signal_time.elapsed());
+                    app.push_event("fill", &format!("{}: filled {} @ {} [REST:{}]",
                         result.tag, filled, price, status));
                     return Some(FillInfo {
                         filled_size: filled,
@@ -725,13 +1092,12 @@ async fn poll_fill_status(
                     });
                 }
 
-                // "matched" means the order was executed — even if size_matched
-                // isn't populated yet, trust the status and use order price/size.
                 if status.eq_ignore_ascii_case("matched") {
+                    app.latency.record(LatencyMetric::FillDetectPoll, signal_time.elapsed());
                     tracing::info!(tag = %result.tag, order_id, "status=matched, treating as filled at order price");
                     let sz = result.intended_order.size;
                     let px = result.intended_order.price;
-                    app.push_event("fill", &format!("{}: filled {} @ {} [matched]", result.tag, sz, px));
+                    app.push_event("fill", &format!("{}: filled {} @ {} [REST:matched]", result.tag, sz, px));
                     return Some(FillInfo {
                         filled_size: sz,
                         avg_price: px,
@@ -741,18 +1107,14 @@ async fn poll_fill_status(
                     });
                 }
 
-                // "unmatched" = sports delay expired with no fill, "cancelled"/"expired" = killed
                 if open_order.is_terminal() {
-                    tracing::warn!(
-                        tag = %result.tag, order_id, status,
-                        "FAK order terminal — no fill"
-                    );
+                    tracing::warn!(tag = %result.tag, order_id, status, "FAK order terminal — no fill");
                     app.push_event("warn", &format!("{}: NO FILL — status {} (order killed)", result.tag, status));
                     return None;
                 }
             }
             Err(e) => {
-                tracing::warn!(tag = %result.tag, order_id, error = %e, "poll_fill: get_order failed");
+                tracing::debug!(tag = %result.tag, order_id, error = %e, "poll: get_order failed (may not be indexed yet)");
             }
         }
 
@@ -789,50 +1151,52 @@ fn team_books(books: &(OrderBook, OrderBook), team: Team) -> (OrderBook, OrderBo
     }
 }
 
+/// Build a SELL FAK at L+1 price, sized from budget.
+/// Makers will pull liquidity on events — book depth is irrelevant.
+/// Size = max_trade_usdc / price, capped by held tokens.
 pub(crate) fn build_sell_order(config: &Config, team: Team, book: &OrderBook, held_tokens: Option<Decimal>) -> Option<FakOrder> {
-    let best_bid = book.best_bid()?;
-    let mut size = compute_size(config, &best_bid.size, best_bid.price);
+    let levels = &book.bids.levels;
+    if levels.is_empty() { return None; }
 
-    // Cap sell size to tokens actually held (avoid "not enough balance" errors)
+    // Price at L+1 if available, else L0
+    let price = levels.get(1).map_or(levels[0].price, |l| l.price);
+
+    // Size purely from budget
+    let mut size = (config.max_trade_usdc / price).floor();
+
+    // Cap to held tokens
     if let Some(held) = held_tokens {
         let held_floor = held.floor();
         if held_floor < config.order_min_size {
-            tracing::debug!(team = %config.team_name(team), held = %held_floor, min = %config.order_min_size, "held tokens below market min — sell skipped");
             return None;
         }
-        if size > held_floor {
-            tracing::debug!(team = %config.team_name(team), original = %size, capped = %held_floor, "sell size capped to held tokens");
-            size = held_floor;
-        }
+        size = size.min(held_floor);
     }
 
-    if size.is_zero() {
-        tracing::warn!(team = %config.team_name(team), "no bid liquidity to sell into");
-        return None;
-    }
-    if size < config.order_min_size {
-        tracing::debug!(team = %config.team_name(team), size = %size, min = %config.order_min_size, "sell size below market min — skipping");
-        return None;
-    }
-    Some(FakOrder { team, side: Side::Sell, price: best_bid.price, size })
+    if size < config.order_min_size { return None; }
+
+    Some(FakOrder { team, side: Side::Sell, price, size })
 }
 
+/// Build a BUY FAK at L+1 price, sized from budget.
 pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
-    let best_ask = book.best_ask()?;
-    let mut size = compute_size(config, &best_ask.size, best_ask.price);
-    if size.is_zero() {
-        tracing::warn!(team = %config.team_name(team), "no ask liquidity to buy from");
-        return None;
-    }
+    let levels = &book.asks.levels;
+    if levels.is_empty() { return None; }
+
+    // Price at L+1 if available, else L0
+    let price = levels.get(1).map_or(levels[0].price, |l| l.price);
+
+    // Size purely from budget
+    let mut size = (config.max_trade_usdc / price).floor();
+
     if size < config.order_min_size {
         size = config.order_min_size;
-        tracing::debug!(team = %config.team_name(team), size = %size, "buy size clamped to market min");
     }
-    Some(FakOrder { team, side: Side::Buy, price: best_ask.price, size })
+
+    Some(FakOrder { team, side: Side::Buy, price, size })
 }
 
 /// Select the revert edge percentage based on the signal label.
-/// "WICKET" → edge_wicket, labels containing '6' → edge_boundary_6, else → edge_boundary_4.
 pub(crate) fn edge_ticks_for_label(label: &str, config: &Config) -> f64 {
     if label == "WICKET" {
         config.edge_wicket
@@ -843,10 +1207,22 @@ pub(crate) fn edge_ticks_for_label(label: &str, config: &Config) -> f64 {
     }
 }
 
+/// Round a price to the nearest tick boundary.
+/// e.g., round_to_tick(0.513, 0.01, 2) → 0.51
+///       round_to_tick(0.5137, 0.001, 3) → 0.514
+fn round_to_tick(price: Decimal, tick: Decimal, tick_dp: u32) -> Decimal {
+    if tick.is_zero() {
+        return price.round_dp(2);
+    }
+    // Round to nearest tick: (price / tick).round() * tick
+    let ticks = (price / tick).round_dp(0);
+    (ticks * tick).round_dp(tick_dp)
+}
+
+#[cfg(test)]
 pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal) -> Decimal {
     if price.is_zero() { return Decimal::ZERO; }
     let max_tokens = config.max_trade_usdc / price;
-    // Floor to whole tokens — Polymarket expects integer share sizes
     max_tokens.min(*available).floor()
 }
 
@@ -873,7 +1249,7 @@ async fn execute_limit(
             app.push_event("trade", &format!("{tag}: GTC {} {} @ {} sz={} = ${} ({})",
                 order.side, config.team_name(order.team), order.price, order.size, cost.round_dp(2), oid));
             app.log_trade(TradeRecord {
-                ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                ts: crate::state::ist_now(),
                 side: format!("{}", order.side),
                 team: config.team_name(order.team).to_string(),
                 size: order.size,
