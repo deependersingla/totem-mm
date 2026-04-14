@@ -339,7 +339,7 @@ async fn execute_event_trade(
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: crate::state::ist_now(),
             side: "SELL".into(),
             team: config.team_name(f.order.team).to_string(),
             size: f.filled_size,
@@ -359,7 +359,7 @@ async fn execute_event_trade(
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: crate::state::ist_now(),
             side: "BUY".into(),
             team: config.team_name(f.order.team).to_string(),
             size: f.filled_size,
@@ -519,7 +519,7 @@ fn spawn_revert_fill_monitor(
                 tracing::info!("{msg}");
                 app.push_event("filled", &msg);
                 app.log_trade(TradeRecord {
-                    ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                    ts: crate::state::ist_now(),
                     side: format!("{side}"),
                     team: config.team_name(team).to_string(),
                     size: filled,
@@ -556,7 +556,7 @@ fn spawn_revert_fill_monitor(
                         tracing::info!("{msg}");
                         app.push_event("filled", &msg);
                         app.log_trade(TradeRecord {
-                            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                            ts: crate::state::ist_now(),
                             side: format!("{side}"),
                             team: config.team_name(team).to_string(),
                             size: filled,
@@ -681,7 +681,7 @@ fn log_round_trip(
 
     if let Some(ref db) = *app.db.read().unwrap() {
         let slug = config.market_slug.clone();
-        let now = chrono::Utc::now().format("%H:%M:%S").to_string();
+        let now = crate::state::ist_now();
         db.insert_round_trip(
             &revert.placed_at.elapsed().as_secs().to_string(), // approximate entry time
             &now,
@@ -1249,7 +1249,7 @@ async fn execute_limit(
             app.push_event("trade", &format!("{tag}: GTC {} {} @ {} sz={} = ${} ({})",
                 order.side, config.team_name(order.team), order.price, order.size, cost.round_dp(2), oid));
             app.log_trade(TradeRecord {
-                ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+                ts: crate::state::ist_now(),
                 side: format!("{}", order.side),
                 team: config.team_name(order.team).to_string(),
                 size: order.size,

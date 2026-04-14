@@ -7,7 +7,15 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, watch};
 pub use tokio_util::sync::CancellationToken;
 
+use chrono::FixedOffset;
+
 use crate::capture::OracleEvent;
+
+/// IST timestamp for display (UTC+5:30).
+pub fn ist_now() -> String {
+    let ist = FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap();
+    chrono::Utc::now().with_timezone(&ist).format("%H:%M:%S").to_string()
+}
 use crate::clob_auth::ClobAuth;
 use crate::config::{Config, MakerConfig};
 use crate::db::Db;
@@ -187,7 +195,7 @@ impl AppState {
 
     pub fn push_event(&self, kind: &str, detail: &str) {
         let entry = EventEntry {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: ist_now(),
             kind: kind.to_string(),
             detail: detail.to_string(),
         };
@@ -201,7 +209,7 @@ impl AppState {
     pub fn snapshot_inventory(&self) {
         let pos = self.position.lock().unwrap();
         self.inventory_history.lock().unwrap().push(InventorySnapshot {
-            ts: chrono::Utc::now().format("%H:%M:%S").to_string(),
+            ts: ist_now(),
             team_a: pos.team_a_tokens,
             team_b: pos.team_b_tokens,
         });
