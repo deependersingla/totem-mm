@@ -434,6 +434,8 @@ async fn execute_event_trade(
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
                 label: revert_label.clone(),
+                event_seq: 0,
+                signal_tag: String::new(),
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),
@@ -468,6 +470,8 @@ async fn execute_event_trade(
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
                 label: revert_label.clone(),
+                event_seq: 0,
+                signal_tag: String::new(),
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),

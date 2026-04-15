@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -103,6 +104,12 @@ pub struct PendingRevert {
     pub revert_limit_price: Decimal,
     pub placed_at: Instant,
     pub label: String,
+    /// Monotonic event sequence id assigned when the originating signal was received.
+    /// Enables grouping FAK + revert + augment orders under one "event" in the ledger.
+    pub event_seq: u64,
+    /// Short tag of the originating signal (e.g., "W", "R4", "Wd6"). Matches
+    /// `CricketSignal::short_tag()` output.
+    pub signal_tag: String,
 }
 
 impl PendingRevert {
@@ -151,6 +158,11 @@ pub struct AppState {
     pub db: RwLock<Option<Arc<Db>>>,
     // ── Capture (background, non-blocking) ─────────────────────────────
     pub oracle_tx: RwLock<Option<mpsc::Sender<OracleEvent>>>,
+    // ── Event sequencing ───────────────────────────────────────────────
+    /// Monotonic counter incremented at the top of the signal loop. Every trade-triggering
+    /// signal gets a fresh id, which is threaded through FAK + revert orders into the
+    /// PendingRevert ledger so related orders can be grouped by `event_seq`.
+    event_seq: AtomicU64,
 }
 
 const MAX_EVENTS: usize = 200;
@@ -190,7 +202,18 @@ impl AppState {
             sweep_cancel: RwLock::new(None),
             db: RwLock::new(None),
             oracle_tx: RwLock::new(None),
+            event_seq: AtomicU64::new(0),
         })
+    }
+
+    /// Allocate the next event sequence id. Called once per trade-triggering signal.
+    pub fn next_event_seq(&self) -> u64 {
+        self.event_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Current value of the event sequence counter (for /api/status).
+    pub fn current_event_seq(&self) -> u64 {
+        self.event_seq.load(Ordering::Relaxed)
     }
 
     pub fn push_event(&self, kind: &str, detail: &str) {

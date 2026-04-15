@@ -41,6 +41,18 @@ impl std::fmt::Display for Side {
     }
 }
 
+/// Which side of the match a signal pushes the market toward.
+/// Used by the dispatch logic to classify pending reverts against new signals:
+/// reverts whose action direction aligns with a new signal trigger an AUGMENT;
+/// reverts whose action direction opposes the new signal trigger a WAIT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SignalDirection {
+    /// Price pressure favors the batting team (4/6, boundary wide/noball).
+    FavorBatting,
+    /// Price pressure favors the bowling team (wicket).
+    FavorBowling,
+}
+
 /// Raw cricket delivery signal from the oracle / telegram bot
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CricketSignal {
@@ -55,6 +67,36 @@ pub enum CricketSignal {
 impl CricketSignal {
     pub fn is_wicket(&self) -> bool {
         matches!(self, Self::Wicket(_))
+    }
+
+    /// Direction this signal pushes the market, if it triggers a trade.
+    /// Returns None for signals that don't fire a FAK batch (dot balls, 1-3 runs,
+    /// Wd/NB with non-boundary runs, innings/match over).
+    /// Plain Runs uses >3 (matches existing is_boundary); Wd/NB require strict 4 or 6
+    /// (5s are rare noise, explicitly excluded per user rule).
+    pub fn trade_direction(&self) -> Option<SignalDirection> {
+        match self {
+            Self::Wicket(_) => Some(SignalDirection::FavorBowling),
+            Self::Runs(r) if *r > 3 => Some(SignalDirection::FavorBatting),
+            Self::Wide(r) if *r == 4 || *r == 6 => Some(SignalDirection::FavorBatting),
+            Self::NoBall(r) if *r == 4 || *r == 6 => Some(SignalDirection::FavorBatting),
+            _ => None,
+        }
+    }
+
+    /// Short tag used in order/event labels, e.g. "W", "R4", "Wd6", "N4".
+    pub fn short_tag(&self) -> String {
+        match self {
+            Self::Wicket(0) => "W".to_string(),
+            Self::Wicket(r) => format!("W{r}"),
+            Self::Runs(r) => format!("R{r}"),
+            Self::Wide(0) => "Wd".to_string(),
+            Self::Wide(r) => format!("Wd{r}"),
+            Self::NoBall(0) => "N".to_string(),
+            Self::NoBall(r) => format!("N{r}"),
+            Self::InningsOver => "IO".to_string(),
+            Self::MatchOver => "MO".to_string(),
+        }
     }
 
     /// Parse a raw string into a cricket signal.

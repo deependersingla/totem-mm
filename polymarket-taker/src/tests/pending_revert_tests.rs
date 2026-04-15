@@ -63,6 +63,8 @@ fn make_revert(order_id: &str, team: Team, side: Side) -> PendingRevert {
         revert_limit_price: dec!(0.76),
         placed_at: Instant::now(),
         label: "TEST_REVERT".to_string(),
+        event_seq: 0,
+        signal_tag: String::new(),
     }
 }
 
