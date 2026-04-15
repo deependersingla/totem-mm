@@ -599,6 +599,20 @@ async fn execute_event_trade(
 }
 
 /// Spawn a background task that polls a revert GTC order until it fills.
+///
+/// The monitor runs until one of:
+///   - A fill is observed (WS event buffer or REST poll) → position updated,
+///     revert removed, task exits.
+///   - The order reaches a terminal non-fill status (cancelled/expired) → revert
+///     removed, task exits.
+///   - The revert is removed externally (e.g., perform_augment cancelled it on
+///     a new opposite signal) → task exits silently.
+///   - The server cancellation token fires → task exits on next poll boundary.
+///
+/// No wall-clock timeout. Per the stale-revert dispatch design, reverts are
+/// tracked indefinitely; if the market never reaches the limit price during
+/// the match, pending reverts stay pending across innings/match-over and are
+/// cleaned up by `reset_for_new_match` at the start of the next match.
 fn spawn_revert_fill_monitor(
     config: Config,
     auth: ClobAuth,
@@ -613,17 +627,34 @@ fn spawn_revert_fill_monitor(
 ) {
     tokio::spawn(async move {
         let poll_interval = Duration::from_secs(5);
-        let max_polls = 720; // 1 hour max (5s x 720)
+        // Heartbeat every 60 polls = every 5 minutes. Logs age so long-lived
+        // reverts are visible and don't look like leaked tasks.
+        const HEARTBEAT_EVERY: u64 = 60;
+        let mut iter: u64 = 0;
+        let started_at = Instant::now();
 
-        for _ in 0..max_polls {
+        loop {
+            iter += 1;
             tokio::time::sleep(poll_interval).await;
 
-            // Check if revert was removed (cancelled by opposite event or reset)
+            // Check if revert was removed (cancelled by opposite event, augment,
+            // match reset, etc.) — exit silently if so.
             let still_pending = app.pending_reverts.lock().unwrap()
                 .iter().any(|r| r.order_id == order_id);
             if !still_pending {
                 tracing::debug!(order_id = %order_id, label = %label, "revert monitor: removed externally");
                 return;
+            }
+
+            // Periodic heartbeat so long-watched reverts are visible in logs.
+            if iter % HEARTBEAT_EVERY == 0 {
+                let age_secs = started_at.elapsed().as_secs();
+                tracing::info!(
+                    order_id = %order_id,
+                    label = %label,
+                    age_secs,
+                    "[REVERT-MONITOR] still watching"
+                );
             }
 
             // Check WS fill buffer first (fast path)
@@ -705,9 +736,6 @@ fn spawn_revert_fill_monitor(
                 Err(_) => {} // not indexed yet, keep polling
             }
         }
-
-        tracing::warn!(order_id = %order_id, label = %label, "revert fill monitor timed out after 1h");
-        app.remove_revert(&order_id);
     });
 }
 
