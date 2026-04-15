@@ -13,7 +13,7 @@ use crate::latency::LatencyMetric;
 use crate::orders::{self, ClobOrder};
 use crate::position::Position;
 use crate::state::{AppState, PendingRevert, TradeRecord};
-use crate::types::{CricketSignal, FakOrder, FillEvent, OrderBook, Side, Team};
+use crate::types::{CricketSignal, FakOrder, FillEvent, OrderBook, Side, SignalDirection, Team};
 
 fn random_tag(prefix: &str) -> String {
     let suffix: String = rand::thread_rng()
@@ -22,6 +22,65 @@ fn random_tag(prefix: &str) -> String {
         .map(char::from)
         .collect();
     format!("{}_{}", prefix, suffix)
+}
+
+// ── Stale-revert dispatch logic ───────────────────────────────────────────
+//
+// When a new trade-triggering signal arrives, we decide between three actions:
+//
+//   NORMAL  — no pending reverts, fire a fresh FAK + place revert (existing path).
+//   WAIT    — pending reverts are opposing the new signal direction (e.g., a W
+//             left "buy A / sell B" reverts and another W arrives asking to
+//             "sell A / buy B"). Do nothing, let the existing reverts sit.
+//   AUGMENT — pending reverts are aligned with the new signal direction (e.g., a
+//             4 left "sell A / buy B" reverts and a W arrives also wanting
+//             "sell A / buy B"). Cancel and re-post those reverts at the
+//             current book ± edge — no new FAK, just recovery.
+//
+// Rule collapses to: same signal type -> WAIT, opposite signal type -> AUGMENT.
+// See brainstorm discussion in feat/stale-revert-dispatch thread.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchAction {
+    Normal,
+    Wait,
+    Augment,
+}
+
+/// Direction a pending revert's order would push the market if it filled.
+/// Buying batting (or selling bowling) favors batting; the inverses favor bowling.
+pub(crate) fn revert_action_direction(revert: &PendingRevert, batting: Team) -> SignalDirection {
+    match (revert.team == batting, revert.side) {
+        (true, Side::Buy)   => SignalDirection::FavorBatting,
+        (true, Side::Sell)  => SignalDirection::FavorBowling,
+        (false, Side::Sell) => SignalDirection::FavorBatting,
+        (false, Side::Buy)  => SignalDirection::FavorBowling,
+    }
+}
+
+/// Decide whether to NORMAL-fire, WAIT, or AUGMENT given pending revert state
+/// and the direction of the new signal.
+pub(crate) fn decide_dispatch_action(
+    app: &Arc<AppState>,
+    batting: Team,
+    new_direction: SignalDirection,
+) -> DispatchAction {
+    let reverts = app.pending_reverts.lock().unwrap();
+    if reverts.is_empty() {
+        return DispatchAction::Normal;
+    }
+
+    // If any pending revert's action aligns with the new signal direction, augment.
+    // (All reverts from a single event share a direction, so "any" == "all" in practice.)
+    let any_aligned = reverts
+        .iter()
+        .any(|r| revert_action_direction(r, batting) == new_direction);
+
+    if any_aligned {
+        DispatchAction::Augment
+    } else {
+        DispatchAction::Wait
+    }
 }
 
 pub async fn run(
@@ -50,6 +109,60 @@ pub async fn run(
 
         // Drain any pending fill events into a shared buffer for this cycle
         drain_fill_events(&mut fill_rx, &app);
+
+        // ── Stale-revert dispatch ──────────────────────────────────────────
+        // For trade-triggering signals, decide whether to fire a fresh trade
+        // (NORMAL), skip because pending reverts fight the new direction
+        // (WAIT), or re-price the pending reverts at current book (AUGMENT).
+        // See helpers near top of file for the rule definitions.
+        let new_direction = signal.trade_direction();
+        let (event_seq, signal_tag) = if new_direction.is_some() {
+            (app.next_event_seq(), signal.short_tag())
+        } else {
+            (0u64, String::new())
+        };
+
+        if let Some(dir) = new_direction {
+            match decide_dispatch_action(&app, state.batting, dir) {
+                DispatchAction::Wait => {
+                    let n = app.pending_revert_count();
+                    let msg = format!(
+                        "event{event_seq} [{signal_tag}]: WAIT — {n} pending revert(s) oppose new direction"
+                    );
+                    tracing::info!("{msg}");
+                    app.push_event("dispatch", &msg);
+                    continue;
+                }
+                DispatchAction::Augment => {
+                    let n = app.pending_revert_count();
+                    let msg = format!(
+                        "event{event_seq} [{signal_tag}]: AUGMENT — re-pricing {n} pending revert(s)"
+                    );
+                    tracing::info!("{msg}");
+                    app.push_event("dispatch", &msg);
+                    perform_augment(
+                        &config,
+                        auth,
+                        &app,
+                        &position,
+                        state.batting,
+                        &book_rx,
+                        event_seq,
+                        &signal_tag,
+                    )
+                    .await;
+                    continue;
+                }
+                DispatchAction::Normal => {
+                    // Fall through to the normal match signal path below.
+                    tracing::debug!(
+                        event_seq,
+                        signal_tag = %signal_tag,
+                        "dispatch: NORMAL (no pending reverts)"
+                    );
+                }
+            }
+        }
 
         match signal {
             CricketSignal::MatchOver => {
@@ -138,11 +251,13 @@ pub async fn run(
                 let task_position = position.clone();
                 let task_app = app.clone();
                 let task_book_rx = book_rx.clone();
+                let task_signal_tag = signal_tag.clone();
 
                 tokio::spawn(async move {
                     execute_event_trade(
                         &task_config, &task_auth, &task_position, &task_app,
-                        task_book_rx, sell_order, buy_order, "WICKET", signal_time,
+                        task_book_rx, sell_order, buy_order, "WICKET",
+                        event_seq, task_signal_tag, signal_time,
                     ).await;
                 });
             }
@@ -154,7 +269,7 @@ pub async fn run(
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN", signal_time).await;
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN", event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("RUN{r}: price outside safe range — boundary skipped"));
                     }
@@ -167,7 +282,7 @@ pub async fn run(
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD", signal_time).await;
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD", event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("WD{r}: price outside safe range — boundary skipped"));
                     }
@@ -180,7 +295,7 @@ pub async fn run(
                     let books = book_rx.borrow().clone();
                     if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB", signal_time).await;
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB", event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("NB{r}: price outside safe range — boundary skipped"));
                     }
@@ -300,6 +415,8 @@ async fn execute_event_trade(
     sell_order: Option<ResolvedOrder>,
     buy_order: Option<ResolvedOrder>,
     label: &str,
+    event_seq: u64,
+    signal_tag: String,
     signal_time: Instant,
 ) {
     let trade_start = tokio::time::Instant::now();
@@ -424,7 +541,7 @@ async fn execute_event_trade(
             size,
         };
         if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_SELL", app).await {
-            let revert_label = format!("{label}_REVERT_SELL");
+            let revert_label = format!("e{event_seq}_{label}_REVERT_SELL");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
                 team: f.order.team,
@@ -434,8 +551,8 @@ async fn execute_event_trade(
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
                 label: revert_label.clone(),
-                event_seq: 0,
-                signal_tag: String::new(),
+                event_seq,
+                signal_tag: signal_tag.clone(),
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),
@@ -460,7 +577,7 @@ async fn execute_event_trade(
             size,
         };
         if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_BUY", app).await {
-            let revert_label = format!("{label}_REVERT_BUY");
+            let revert_label = format!("e{event_seq}_{label}_REVERT_BUY");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
                 team: f.order.team,
@@ -470,8 +587,8 @@ async fn execute_event_trade(
                 revert_limit_price: limit_price,
                 placed_at: Instant::now(),
                 label: revert_label.clone(),
-                event_seq: 0,
-                signal_tag: String::new(),
+                event_seq,
+                signal_tag: signal_tag.clone(),
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),
@@ -592,6 +709,237 @@ fn spawn_revert_fill_monitor(
         tracing::warn!(order_id = %order_id, label = %label, "revert fill monitor timed out after 1h");
         app.remove_revert(&order_id);
     });
+}
+
+/// AUGMENT path: cancel all pending reverts, capture any partial fills that
+/// happened before cancel, and re-post fresh GTC reverts at the current book ±
+/// edge with the remaining unfilled size. Fires no new FAK — the goal is purely
+/// to recover the position from whatever the previous FAK already bought/sold.
+async fn perform_augment(
+    config: &Config,
+    auth: &ClobAuth,
+    app: &Arc<AppState>,
+    position: &Position,
+    batting: Team,
+    book_rx: &watch::Receiver<(OrderBook, OrderBook)>,
+    new_event_seq: u64,
+    new_signal_tag: &str,
+) {
+    // Snapshot the stale reverts under a short-lived lock; we'll process
+    // them outside the lock since subsequent work involves async HTTP calls.
+    let stale: Vec<PendingRevert> = {
+        let reverts = app.pending_reverts.lock().unwrap();
+        reverts.clone()
+    };
+
+    if stale.is_empty() {
+        return;
+    }
+
+    let order_ids: Vec<String> = stale.iter().map(|r| r.order_id.clone()).collect();
+
+    // Cancel on CLOB first (dry_run skips HTTP; ids already virtual).
+    if !config.dry_run {
+        match orders::cancel_orders_batch(auth, &order_ids).await {
+            Ok(_) => {
+                tracing::info!(
+                    event_seq = new_event_seq,
+                    count = order_ids.len(),
+                    "[AUGMENT] batch cancel ok"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    event_seq = new_event_seq,
+                    "[AUGMENT] batch cancel failed — aborting augment, leaving reverts in place"
+                );
+                app.push_event("error", &format!("augment cancel failed: {e}"));
+                return;
+            }
+        }
+    }
+
+    // Drain the stale reverts from state now that they're cancelled on CLOB.
+    // Leave any entries added concurrently (shouldn't happen, but safe).
+    for oid in &order_ids {
+        let _ = app.remove_revert(oid);
+    }
+
+    // Fetch current book prices for placing the replacement reverts.
+    let books = book_rx.borrow().clone();
+    let (batting_book, bowling_book) = team_books(&books, batting);
+    let tick: Decimal = app
+        .cached_tick_size
+        .read()
+        .unwrap()
+        .unwrap_or_else(|| config.tick_size.parse().unwrap_or(dec!(0.01)));
+    let tick_dp = tick
+        .to_string()
+        .split('.')
+        .nth(1)
+        .map_or(0, |frac| frac.trim_end_matches('0').len()) as u32;
+
+    let mut reposted = 0usize;
+    let mut skipped_filled = 0usize;
+
+    for stale_rev in stale {
+        // Discover any fill that happened before cancel landed. Prefer the WS
+        // fill buffer (authoritative avg_price); fall back to REST get_order.
+        let (filled_size, avg_price) = if let Some(fill) = app.take_fill_event(&stale_rev.order_id) {
+            let px = if fill.avg_price.is_zero() {
+                stale_rev.revert_limit_price
+            } else {
+                fill.avg_price
+            };
+            (fill.filled_size, px)
+        } else if !config.dry_run {
+            match orders::get_order(auth, &stale_rev.order_id).await {
+                Ok(o) => {
+                    let fp = o.fill_price();
+                    let px = if fp.is_zero() {
+                        stale_rev.revert_limit_price
+                    } else {
+                        fp
+                    };
+                    (o.filled_size(), px)
+                }
+                Err(_) => (Decimal::ZERO, stale_rev.revert_limit_price),
+            }
+        } else {
+            (Decimal::ZERO, stale_rev.revert_limit_price)
+        };
+
+        // Attribute any pre-cancel fill to position + trade log, matching the
+        // work the revert monitor would have done.
+        if !filled_size.is_zero() {
+            let cost = filled_size * avg_price;
+            {
+                let mut pos = position.lock().unwrap();
+                pos.on_fill(&FakOrder {
+                    team: stale_rev.team,
+                    side: stale_rev.side,
+                    price: avg_price,
+                    size: filled_size,
+                });
+            }
+            let msg = format!(
+                "{}: REVERT FILLED {} {} @ {} = ${} [augment-captured]",
+                stale_rev.label,
+                stale_rev.side,
+                config.team_name(stale_rev.team),
+                avg_price,
+                cost.round_dp(2)
+            );
+            tracing::info!("{msg}");
+            app.push_event("filled", &msg);
+            app.log_trade(TradeRecord {
+                ts: crate::state::ist_now(),
+                side: format!("{}", stale_rev.side),
+                team: config.team_name(stale_rev.team).to_string(),
+                size: filled_size,
+                price: avg_price,
+                cost,
+                order_type: "GTC".into(),
+                label: stale_rev.label.clone(),
+                order_id: stale_rev.order_id.clone(),
+            });
+            log_round_trip(app, config, &stale_rev, avg_price, filled_size, &stale_rev.order_id);
+        }
+
+        let remaining = (stale_rev.size - filled_size).max(Decimal::ZERO);
+        if remaining.is_zero() {
+            skipped_filled += 1;
+            continue;
+        }
+
+        // Re-anchor the limit to the current book on the appropriate side.
+        let book = if stale_rev.team == batting {
+            &batting_book
+        } else {
+            &bowling_book
+        };
+        let edge_ticks = edge_ticks_for_label(&stale_rev.label, config);
+        let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
+
+        let new_price = match stale_rev.side {
+            // SELL revert: place above best ask so we remain a maker.
+            Side::Sell => {
+                let anchor = book
+                    .best_ask()
+                    .map(|l| l.price)
+                    .or_else(|| book.best_bid().map(|l| l.price))
+                    .unwrap_or(stale_rev.revert_limit_price);
+                round_to_tick(anchor + edge_amount, tick, tick_dp)
+            }
+            // BUY revert: place below best bid so we remain a maker.
+            Side::Buy => {
+                let anchor = book
+                    .best_bid()
+                    .map(|l| l.price)
+                    .or_else(|| book.best_ask().map(|l| l.price))
+                    .unwrap_or(stale_rev.revert_limit_price);
+                round_to_tick((anchor - edge_amount).max(tick), tick, tick_dp)
+            }
+        };
+
+        let augment_label = format!("{}_AUGMENT_e{}", stale_rev.label, new_event_seq);
+        let repost_order = FakOrder {
+            team: stale_rev.team,
+            side: stale_rev.side,
+            price: new_price,
+            size: remaining,
+        };
+
+        tracing::info!(
+            event_seq = new_event_seq,
+            old_order_id = %stale_rev.order_id,
+            team = %config.team_name(stale_rev.team),
+            side = %stale_rev.side,
+            old_price = %stale_rev.revert_limit_price,
+            new_price = %new_price,
+            size = %remaining,
+            "[AUGMENT] reposting revert"
+        );
+
+        if let Some(new_oid) =
+            execute_limit(config, auth, &repost_order, position, &augment_label, app).await
+        {
+            app.push_revert(PendingRevert {
+                order_id: new_oid.clone(),
+                team: stale_rev.team,
+                side: stale_rev.side,
+                size: remaining,
+                entry_price: stale_rev.entry_price,
+                revert_limit_price: new_price,
+                placed_at: Instant::now(),
+                label: augment_label.clone(),
+                event_seq: new_event_seq,
+                signal_tag: new_signal_tag.to_string(),
+            });
+            spawn_revert_fill_monitor(
+                config.clone(),
+                auth.clone(),
+                app.clone(),
+                position.clone(),
+                new_oid,
+                stale_rev.team,
+                stale_rev.side,
+                remaining,
+                new_price,
+                augment_label,
+            );
+            reposted += 1;
+        }
+    }
+
+    app.push_event(
+        "augment",
+        &format!(
+            "event{new_event_seq} [{new_signal_tag}]: reposted {reposted}, captured-filled {skipped_filled}"
+        ),
+    );
+    app.snapshot_inventory();
 }
 
 /// Background tick_size refresh task. Polls Gamma API every `interval` and
@@ -826,6 +1174,8 @@ async fn spawn_boundary_trade(
     batting: Team,
     runs: u8,
     kind: &'static str,
+    event_seq: u64,
+    signal_tag: String,
     signal_time: Instant,
 ) {
     let bowling = batting.opponent();
@@ -856,7 +1206,7 @@ async fn spawn_boundary_trade(
 
     let label = format!("{kind}{runs}");
     tokio::spawn(async move {
-        execute_event_trade(&config, &auth, &position, &app, book_rx, sell_order, buy_order, &label, signal_time).await;
+        execute_event_trade(&config, &auth, &position, &app, book_rx, sell_order, buy_order, &label, event_seq, signal_tag, signal_time).await;
     });
 }
 
