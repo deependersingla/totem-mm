@@ -207,7 +207,6 @@ def identify_innings(events):
 
     # If no clear boundary found, try another heuristic
     if not inn2 and len(inn1) > 10:
-        # Look for a score reset
         for i in range(1, len(inn1)):
             if inn1[i]["runs"] < inn1[i-1]["runs"] - 20:
                 inn2 = inn1[i:]
@@ -215,8 +214,20 @@ def identify_innings(events):
                 max_1st_innings_score = inn1[-1]["runs"] if inn1 else 0
                 break
 
-    target = max_1st_innings_score + 1  # need 1 more to win
-    return inn1, inn2, target
+    target = max_1st_innings_score + 1
+
+    # Detect rain-reduced matches:
+    # Check if 1st innings ended before 20 overs (< 120 balls)
+    max_1st_inn_balls = max((e["balls_bowled"] for e in inn1), default=120) if inn1 else 120
+    max_2nd_inn_balls = max((e["balls_bowled"] for e in inn2), default=120) if inn2 else 120
+
+    # If 2nd innings is clearly shorter than 120 balls, this is rain-reduced
+    # Use the actual overs available, not 120
+    # Only flag as rain-reduced if max balls is well below a full innings
+    # A chase completed in 18 overs (108 balls) is NOT rain-reduced
+    total_2nd_inn_balls = max_2nd_inn_balls if max_2nd_inn_balls < 80 else 120
+
+    return inn1, inn2, target, max_1st_inn_balls, total_2nd_inn_balls
 
 
 # ====================================================================
@@ -354,13 +365,25 @@ def test2_win_prob_vs_market(events_by_match, dp):
     all_details = []
 
     for match_name, events in events_by_match.items():
-        inn1, inn2, target = identify_innings(events)
+        inn1, inn2, target, inn1_balls, inn2_total_balls = identify_innings(events)
         if not inn2 or target <= 0:
             print(f"  {match_name}: Could not identify 2nd innings (inn1={len(inn1)}, inn2={len(inn2)})")
             continue
 
         team1 = events[0]["team1_name"]
         team2 = events[0]["team2_name"]
+
+        is_rain_reduced = inn2_total_balls < 110
+        if is_rain_reduced:
+            print(f"\n  {match_name}")
+            print(f"  Teams: {team1} vs {team2}")
+            print(f"  *** RAIN-REDUCED MATCH ***")
+            print(f"  1st innings: {target-1} off {inn1_balls} balls ({inn1_balls//6}.{inn1_balls%6} overs)")
+            print(f"  2nd innings: {inn2_total_balls} balls available ({inn2_total_balls//6}.{inn2_total_balls%6} overs)")
+            print(f"  Target: {target} (DLS-adjusted target unknown — using raw)")
+            print(f"  SKIPPING: Model has no DLS support yet. Cannot price rain-reduced chases.")
+            print(f"  2nd innings events: {len(inn2)}")
+            continue
 
         print(f"\n  {match_name}")
         print(f"  Teams: {team1} vs {team2}")
