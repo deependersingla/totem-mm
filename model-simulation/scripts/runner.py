@@ -337,8 +337,127 @@ def phase5_integrate(dp, model, df, features_dict):
     return dp_ml
 
 
+# ====== PHASE 5.5: Calibration ======
+def phase5_5_calibrate(dp_ml, df):
+    """Calibrate the DP model using historical match outcomes."""
+    import numpy as np
+
+    update_progress(5, "IN PROGRESS", "Calibrating probabilities")
+
+    from src.calibration.calibrator import PhaseCalibrator, compute_all_metrics
+
+    # Split matches into calibration (80%) and test (20%) by date
+    match_info = df.drop_duplicates("match_id")[["match_id", "match_date"]].sort_values("match_date")
+    split_idx = int(len(match_info) * 0.8)
+    cal_matches = set(match_info.iloc[:split_idx]["match_id"])
+    test_matches = set(match_info.iloc[split_idx:]["match_id"])
+
+    # For each match, compute chase start probability and compare with outcome
+    second_innings = df[df["innings"] == 2].copy()
+    match_summaries = second_innings.groupby("match_id").agg(
+        batting_team_won=("batting_team_won", "first"),
+    ).reset_index()
+
+    first_innings = df[df["innings"] == 1].copy()
+    first_inn_totals = first_innings.groupby("match_id").agg(
+        target=("cumulative_runs", "last"),
+    ).reset_index()
+    first_inn_totals["target"] = first_inn_totals["target"] + 1
+
+    match_summaries = match_summaries.merge(first_inn_totals, on="match_id", how="inner")
+
+    # Also collect mid-innings predictions (at every 30th ball)
+    cal_probs = []
+    cal_outcomes = []
+    test_probs = []
+    test_outcomes = []
+
+    for _, row in match_summaries.iterrows():
+        target = int(row["target"])
+        if target > dp_ml.MAX_RUNS or target <= 0:
+            continue
+        outcome = int(row["batting_team_won"])
+        match_id = row["match_id"]
+
+        # Chase start probability
+        prob = dp_ml.lookup(120, target, 10)
+
+        if match_id in cal_matches:
+            cal_probs.append(prob)
+            cal_outcomes.append(outcome)
+        else:
+            test_probs.append(prob)
+            test_outcomes.append(outcome)
+
+        # Also add mid-innings states for richer calibration data
+        match_deliveries = second_innings[second_innings["match_id"] == match_id]
+        for check_ball in [30, 60, 90]:
+            ball_rows = match_deliveries[match_deliveries["cumulative_legal_balls"] == check_ball]
+            if len(ball_rows) == 0:
+                continue
+            ball_row = ball_rows.iloc[0]
+            runs_scored = int(ball_row["cumulative_runs"])
+            wickets = int(ball_row["cumulative_wickets"])
+            balls_done = check_ball
+            balls_remaining = 120 - balls_done
+            runs_needed = target - runs_scored
+            wickets_in_hand = 10 - wickets
+
+            if runs_needed <= 0 or wickets_in_hand <= 0 or balls_remaining <= 0:
+                continue
+
+            prob_mid = dp_ml.lookup(balls_remaining, runs_needed, wickets_in_hand)
+            if match_id in cal_matches:
+                cal_probs.append(prob_mid)
+                cal_outcomes.append(outcome)
+            else:
+                test_probs.append(prob_mid)
+                test_outcomes.append(outcome)
+
+    cal_probs = np.array(cal_probs)
+    cal_outcomes = np.array(cal_outcomes)
+    test_probs = np.array(test_probs)
+    test_outcomes = np.array(test_outcomes)
+
+    print(f"Calibration set: {len(cal_probs)} predictions")
+    print(f"Test set: {len(test_probs)} predictions")
+
+    # Before calibration
+    pre_metrics = compute_all_metrics(test_outcomes, test_probs)
+    print(f"\nBefore calibration:")
+    print(f"  Brier Score: {pre_metrics['brier_score']:.4f}")
+    print(f"  ECE:         {pre_metrics['ece']:.4f}")
+    print(f"  Correlation: {pre_metrics['correlation']:.4f}")
+
+    # Fit calibrator
+    calibrator = PhaseCalibrator()
+    calibrator.fit(cal_outcomes, cal_probs)
+
+    # After calibration
+    cal_test_probs = calibrator.transform(test_probs)
+    post_metrics = compute_all_metrics(test_outcomes, cal_test_probs)
+    print(f"\nAfter calibration:")
+    print(f"  Brier Score: {post_metrics['brier_score']:.4f}")
+    print(f"  ECE:         {post_metrics['ece']:.4f}")
+    print(f"  Correlation: {post_metrics['correlation']:.4f}")
+
+    # Calibration by decile
+    print(f"\n  Calibration by decile (post-calibration):")
+    for pct in range(0, 100, 10):
+        lo = pct / 100
+        hi = (pct + 10) / 100
+        mask = (cal_test_probs >= lo) & (cal_test_probs < hi)
+        if mask.sum() > 0:
+            actual = test_outcomes[mask].mean()
+            predicted = cal_test_probs[mask].mean()
+            print(f"    [{lo:.1f}-{hi:.1f}): n={mask.sum():>4}, predicted={predicted:.3f}, actual={actual:.3f}, diff={abs(predicted-actual):.3f}")
+
+    update_progress(5, "DONE", f"Brier {pre_metrics['brier_score']:.4f} → {post_metrics['brier_score']:.4f}")
+    return calibrator, pre_metrics, post_metrics
+
+
 # ====== PHASE 6: Validate Against Captured Data ======
-def phase6_validate(dp, dp_ml, df):
+def phase6_validate(dp, dp_ml, df, calibrator=None):
     """Validate model against captured Polymarket event book data."""
     import numpy as np
     import openpyxl
@@ -575,6 +694,7 @@ def phase6_validate(dp, dp_ml, df):
 
     # Compute model prob at start of chase
     hist_probs = []
+    hist_probs_calibrated = []
     hist_outcomes = []
     for _, row in match_summaries.iterrows():
         target = int(row["target"])
@@ -582,29 +702,35 @@ def phase6_validate(dp, dp_ml, df):
             continue
         prob = dp_ml.lookup(120, target, 10)
         hist_probs.append(prob)
+        if calibrator:
+            hist_probs_calibrated.append(calibrator.transform(prob))
+        else:
+            hist_probs_calibrated.append(prob)
         hist_outcomes.append(int(row["batting_team_won"]))
 
     hist_probs = np.array(hist_probs)
+    hist_probs_cal = np.array(hist_probs_calibrated)
     hist_outcomes = np.array(hist_outcomes)
 
     if len(hist_probs) > 0:
-        hist_metrics = compute_all_metrics(hist_outcomes, hist_probs)
-        print(f"\nChase start predictions vs outcomes ({len(hist_probs)} matches):")
-        print(f"  Correlation:    {hist_metrics['correlation']:.4f}")
-        print(f"  Brier Score:    {hist_metrics['brier_score']:.4f}")
-        print(f"  ECE:            {hist_metrics['ece']:.4f}")
-        print(f"  Mean pred:      {hist_probs.mean():.4f}")
-        print(f"  Actual win rate:{hist_outcomes.mean():.4f}")
+        hist_metrics_raw = compute_all_metrics(hist_outcomes, hist_probs)
+        hist_metrics = compute_all_metrics(hist_outcomes, hist_probs_cal)
 
-        # Calibration by decile
-        print(f"\n  Calibration by decile:")
+        print(f"\nChase start predictions vs outcomes ({len(hist_probs)} matches):")
+        print(f"  RAW   — Brier: {hist_metrics_raw['brier_score']:.4f}, ECE: {hist_metrics_raw['ece']:.4f}, Corr: {hist_metrics_raw['correlation']:.4f}")
+        print(f"  CALIB — Brier: {hist_metrics['brier_score']:.4f}, ECE: {hist_metrics['ece']:.4f}, Corr: {hist_metrics['correlation']:.4f}")
+        print(f"  Mean pred (cal): {hist_probs_cal.mean():.4f}")
+        print(f"  Actual win rate: {hist_outcomes.mean():.4f}")
+
+        # Calibration by decile (calibrated)
+        print(f"\n  Calibration by decile (calibrated):")
         for pct in range(0, 100, 10):
             lo = pct / 100
             hi = (pct + 10) / 100
-            mask = (hist_probs >= lo) & (hist_probs < hi)
+            mask = (hist_probs_cal >= lo) & (hist_probs_cal < hi)
             if mask.sum() > 0:
                 actual = hist_outcomes[mask].mean()
-                predicted = hist_probs[mask].mean()
+                predicted = hist_probs_cal[mask].mean()
                 print(f"    [{lo:.1f}-{hi:.1f}): n={mask.sum():>4}, predicted={predicted:.3f}, actual={actual:.3f}, diff={abs(predicted-actual):.3f}")
 
         results["historical_brier_score"] = hist_metrics["brier_score"]
@@ -744,11 +870,17 @@ def main():
         dp_ml = phase5_integrate(dp, model, df, features_dict)
         dp_checks = dp_ml.verify_sanity()
 
+        # Phase 5.5: Calibration
+        print("\n" + "=" * 60)
+        print("PHASE 5.5: Calibrate Probabilities")
+        print("=" * 60)
+        calibrator, pre_cal_metrics, post_cal_metrics = phase5_5_calibrate(dp_ml, df)
+
         # Phase 6
         print("\n" + "=" * 60)
         print("PHASE 6: Validate Against Market Data")
         print("=" * 60)
-        results = phase6_validate(dp, dp_ml, df)
+        results = phase6_validate(dp, dp_ml, df, calibrator=calibrator)
 
         # Phase 7
         print("\n" + "=" * 60)
