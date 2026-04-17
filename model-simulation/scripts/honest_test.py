@@ -32,76 +32,70 @@ CAPTURES = Path("/Users/sobhagyaxd/DeepWork/totem-mm/captures")
 
 
 def load_dp_and_model():
-    """Load the trained DP table and LightGBM model."""
+    """Load DP table using MODERN ERA (2023-2026) transition probabilities."""
     from src.dp.solver import DPTable
     from src.dp.states import TransitionProbs
-    import lightgbm as lgb
 
-    # Load LightGBM
-    model_path = ROOT / "models" / "lgbm_ball_outcome.txt"
-    if model_path.exists():
-        model = lgb.Booster(model_file=str(model_path))
-        print(f"Loaded LightGBM from {model_path}")
-    else:
-        model = None
-        print("No LightGBM model found — using base DP only")
-
-    # Load deliveries for feature lookup
+    # Compute transition probabilities from recent data ONLY (2023-2026)
     del_path = ROOT / "data" / "deliveries.parquet"
-    df = pd.read_parquet(del_path) if del_path.exists() else None
+    df = pd.read_parquet(del_path)
 
-    # Build ML-DP table
-    batting_stats = pd.read_parquet(ROOT / "data" / "features" / "batting_phase_stats.parquet")
-    bowling_stats = pd.read_parquet(ROOT / "data" / "features" / "bowling_phase_stats.parquet")
+    # Filter to modern era
+    def season_to_year(s):
+        s = str(s)
+        return int(s.split("/")[0]) if "/" in s else int(s)
 
-    from src.transitions.outcome_model import OUTCOME_CLASSES, get_feature_columns, predict_transition_probs
+    df["year"] = df["season"].apply(season_to_year)
+    modern = df[df["year"] >= 2023].copy()
+    print(f"Using MODERN ERA data: {modern['year'].min()}-{modern['year'].max()}, "
+          f"{modern['match_id'].nunique()} matches, {len(modern)} deliveries")
 
+    # Compute actual phase transition probabilities from modern data
     phase_transitions = {}
-    if model:
-        for phase in ["powerplay", "middle", "death"]:
-            phase_num = {"powerplay": 0, "middle": 1, "death": 2}[phase]
-            bat_phase = batting_stats[batting_stats["phase"] == phase]
-            bowl_phase = bowling_stats[bowling_stats["phase"] == phase]
-            context = {
-                "phase_num": phase_num,
-                "balls_remaining": {"powerplay": 90, "middle": 50, "death": 20}[phase],
-                "cumulative_runs": {"powerplay": 40, "middle": 100, "death": 150}[phase],
-                "cumulative_wickets": {"powerplay": 1, "middle": 3, "death": 5}[phase],
-                "current_run_rate": {"powerplay": 7.5, "middle": 7.8, "death": 9.0}[phase],
-                "is_second_innings": 1,
-                "batter_sr": bat_phase["strike_rate"].median() if len(bat_phase) > 0 else 130,
-                "batter_dot_pct": bat_phase["dot_pct"].median() if len(bat_phase) > 0 else 38,
-                "batter_boundary_pct": bat_phase["boundary_pct"].median() if len(bat_phase) > 0 else 15,
-                "batter_dismissal_rate": bat_phase["dismissal_rate"].median() if len(bat_phase) > 0 else 0.05,
-                "batter_balls_career": 500,
-                "batter_phase_sr": bat_phase["strike_rate"].median() if len(bat_phase) > 0 else 130,
-                "batter_phase_boundary_pct": bat_phase["boundary_pct"].median() if len(bat_phase) > 0 else 15,
-                "batter_phase_dismissal_rate": bat_phase["dismissal_rate"].median() if len(bat_phase) > 0 else 0.05,
-                "bowler_economy": bowl_phase["economy"].median() if len(bowl_phase) > 0 else 8.0,
-                "bowler_dot_pct": bowl_phase["dot_pct"].median() if len(bowl_phase) > 0 else 35,
-                "bowler_boundary_rate": bowl_phase["boundary_concession_rate"].median() if len(bowl_phase) > 0 else 15,
-                "bowler_wpm": bowl_phase["wickets_per_match"].median() if len(bowl_phase) > 0 else 1.0,
-                "bowler_balls_career": 300,
-                "bowler_phase_economy": bowl_phase["economy"].median() if len(bowl_phase) > 0 else 8.0,
-                "bowler_phase_dot_pct": bowl_phase["dot_pct"].median() if len(bowl_phase) > 0 else 35,
-            }
-            probs = predict_transition_probs(model, context)
-            phase_transitions[phase] = TransitionProbs(**probs).normalize()
+    outcome_map = {
+        "dot": "dot", "single": "single", "double": "double", "triple": "triple",
+        "four": "four", "six": "six", "wicket": "wicket", "wide": "wide", "noball": "noball",
+    }
 
+    for phase in ["powerplay", "middle", "death"]:
+        sub = modern[modern["phase"] == phase]
+        total = len(sub)
+        if total == 0:
+            phase_transitions[phase] = TransitionProbs.from_phase_averages(phase)
+            continue
+
+        counts = sub["outcome_class"].value_counts()
+        probs = {}
+        for outcome in ["dot", "single", "double", "triple", "four", "six", "wicket", "wide", "noball"]:
+            probs[outcome] = counts.get(outcome, 0) / total
+
+        tp = TransitionProbs(**probs).normalize()
+        phase_transitions[phase] = tp
+        print(f"  {phase}: dot={probs['dot']:.3f} single={probs['single']:.3f} "
+              f"four={probs['four']:.3f} six={probs['six']:.3f} wicket={probs['wicket']:.3f} "
+              f"wide={probs['wide']:.3f}")
+
+    # Solve DP with modern transition probabilities
     dp = DPTable()
 
-    def get_ml_tp(b, w):
+    def get_modern_tp(b, w):
         overs_bowled = (120 - b) // 6
         if overs_bowled < 6:
-            return phase_transitions.get("powerplay", TransitionProbs.from_phase_averages("powerplay"))
+            return phase_transitions["powerplay"]
         elif overs_bowled < 15:
-            return phase_transitions.get("middle", TransitionProbs.from_phase_averages("middle"))
+            return phase_transitions["middle"]
         else:
-            return phase_transitions.get("death", TransitionProbs.from_phase_averages("death"))
+            return phase_transitions["death"]
 
-    dp.solve(get_transition_probs=get_ml_tp if phase_transitions else None)
-    print(f"DP table solved. Sanity: target170={dp.lookup(120, 170, 10):.4f}")
+    dp.solve(get_transition_probs=get_modern_tp)
 
+    print(f"\nDP solved with MODERN (2023-2026) transitions:")
+    print(f"  Target 170: {dp.lookup(120, 170, 10):.4f} ({dp.lookup(120, 170, 10)*100:.1f}%)")
+    print(f"  Target 190: {dp.lookup(120, 190, 10):.4f} ({dp.lookup(120, 190, 10)*100:.1f}%)")
+    print(f"  Target 200: {dp.lookup(120, 200, 10):.4f} ({dp.lookup(120, 200, 10)*100:.1f}%)")
+    print(f"  Target 220: {dp.lookup(120, 220, 10):.4f} ({dp.lookup(120, 220, 10)*100:.1f}%)")
+
+    model = None
     return dp, model, phase_transitions
 
 
