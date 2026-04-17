@@ -1,0 +1,20 @@
+# Data (large files)
+data/raw/
+data/deliveries.parquet
+data/features/
+data/calibration/
+
+# Models
+models/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
