@@ -391,7 +391,7 @@ def phase5_5_calibrate(dp_ml, df):
 
         # Also add mid-innings states for richer calibration data
         match_deliveries = second_innings[second_innings["match_id"] == match_id]
-        for check_ball in [30, 60, 90]:
+        for check_ball in [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90, 96, 102, 108, 114]:
             ball_rows = match_deliveries[match_deliveries["cumulative_legal_balls"] == check_ball]
             if len(ball_rows) == 0:
                 continue
@@ -692,21 +692,40 @@ def phase6_validate(dp, dp_ml, df, calibrator=None):
 
     match_summaries = match_summaries.merge(first_inn_totals, on="match_id", how="inner")
 
-    # Compute model prob at start of chase
+    # Compute model prob at multiple points during each chase (more comprehensive)
     hist_probs = []
     hist_probs_calibrated = []
     hist_outcomes = []
+
     for _, row in match_summaries.iterrows():
         target = int(row["target"])
         if target > dp_ml.MAX_RUNS or target <= 0:
             continue
+        outcome = int(row["batting_team_won"])
+        match_id = row["match_id"]
+
+        # Chase start
         prob = dp_ml.lookup(120, target, 10)
         hist_probs.append(prob)
-        if calibrator:
-            hist_probs_calibrated.append(calibrator.transform(prob))
-        else:
-            hist_probs_calibrated.append(prob)
-        hist_outcomes.append(int(row["batting_team_won"]))
+        hist_probs_calibrated.append(calibrator.transform(prob) if calibrator else prob)
+        hist_outcomes.append(outcome)
+
+        # Mid-innings checkpoints for richer evaluation
+        match_dels = second_innings[second_innings["match_id"] == match_id]
+        for check_ball in [12, 30, 60, 90, 108]:
+            ball_rows = match_dels[match_dels["cumulative_legal_balls"] == check_ball]
+            if len(ball_rows) == 0:
+                continue
+            br = ball_rows.iloc[0]
+            runs_needed = target - int(br["cumulative_runs"])
+            wkts = 10 - int(br["cumulative_wickets"])
+            balls_rem = 120 - check_ball
+            if runs_needed <= 0 or wkts <= 0 or balls_rem <= 0:
+                continue
+            p = dp_ml.lookup(balls_rem, runs_needed, wkts)
+            hist_probs.append(p)
+            hist_probs_calibrated.append(calibrator.transform(p) if calibrator else p)
+            hist_outcomes.append(outcome)
 
     hist_probs = np.array(hist_probs)
     hist_probs_cal = np.array(hist_probs_calibrated)

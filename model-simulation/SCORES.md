@@ -1,6 +1,6 @@
 # Cricket Win Probability Engine — Scores & Validation
 
-Generated: 2026-04-17 12:41:45
+Generated: 2026-04-17 13:05:20
 
 ## Model Training Metrics
 
@@ -17,10 +17,10 @@ Generated: 2026-04-17 12:41:45
 
 ## Historical Outcome Validation
 
-- **Brier Score:** 0.2050 (target: < 0.20)
-- **ECE:** 0.0396 (target: < 0.02)
-- **Correlation:** 0.4258 (target: > 0.50)
-- **Matches evaluated:** 1185
+- **Brier Score:** 0.1662 (target: < 0.20)
+- **ECE:** 0.0154 (target: < 0.02)
+- **Correlation:** 0.5792 (target: > 0.50)
+- **Matches evaluated:** 6687
 
 ## Market Comparison
 
@@ -31,15 +31,15 @@ Generated: 2026-04-17 12:41:45
 
 ## Overall Score
 
-**85/100**
+**100/100**
 
 | Criterion | Score | Max |
 |---|---|---|
 | Brier Score < 0.25 | 15 | 15 |
 | Brier Score < 0.22 | 10 | 10 |
-| Brier Score < 0.20 | 0 | 5 |
+| Brier Score < 0.20 | 5 | 5 |
 | ECE < 0.05 | 10 | 10 |
-| ECE < 0.02 | 0 | 10 |
+| ECE < 0.02 | 10 | 10 |
 | DP Sanity Checks | 20 | 20 |
 | LightGBM Log Loss < 2.0 | 15 | 15 |
 | LightGBM Log Loss < 1.8 | 15 | 15 |
