@@ -220,24 +220,22 @@ class MatchState:
         # Prediction tracking
         self.last_model_prob = None
         self.last_market_prob = None
+        self.last_predicted_outcome = None  # what we predicted as most likely next
         self.last_signal = None
         self.predictions_correct = 0
         self.predictions_total = 0
+        self.prediction_log = []
 
     def update(self, runs, wickets, balls) -> tuple[bool, str]:
         """Update state. Returns (changed, signal)."""
+        # Detect innings change: score resets (balls drops significantly)
         if self.innings == 1 and self._prev_balls > 6 and balls < self._prev_balls - 6:
-            self.inn1_runs = self._prev_runs
-            self.inn1_wickets = self._prev_wickets
-            self.inn1_balls = self._prev_balls
-            self.innings = 2
+            self._do_innings_break()
 
         run_diff = runs - self._prev_runs
         wkt_diff = wickets - self._prev_wickets
 
-        if self.innings == 1 and balls < self._prev_balls - 6:
-            signal = "IO"
-        elif wkt_diff > 0:
+        if wkt_diff > 0:
             signal = "W"
         elif run_diff == 6:
             signal = "6"
@@ -260,86 +258,133 @@ class MatchState:
 
         return changed, signal
 
+    def _do_innings_break(self):
+        """Lock 1st innings totals and switch to 2nd innings."""
+        self.inn1_runs = self._prev_runs
+        self.inn1_wickets = self._prev_wickets
+        self.inn1_balls = self._prev_balls
+        self.innings = 2
+        # Reset prev so 2nd innings tracking starts fresh
+        self._prev_runs = 0
+        self._prev_wickets = 0
+        self._prev_balls = 0
+        self.runs = 0
+        self.wickets = 0
+        self.balls = 0
+        target = self.inn1_runs + 1
+        print(f"\n{C_MAGENTA}{C_BOLD}{'='*70}")
+        print(f"  INNINGS BREAK — {self.team1} scored {self.inn1_runs}/{self.inn1_wickets} "
+              f"({balls_to_overs_str(self.inn1_balls)} ov)")
+        print(f"  {self.team2} to chase {target}")
+        print(f"{'='*70}{C_RESET}\n")
+
+    def force_innings_over(self):
+        """Manual innings break trigger."""
+        if self.innings == 1:
+            self._do_innings_break()
+
 
 # ── Display ───────────────────────────────────────────────────────────────
 
 def print_update(state: MatchState, dp, odds_store: dict, signal: str, outcome_names: list[str]):
     ts = ist_now()
-
-    if state.innings == 1:
-        ov = balls_to_overs_str(state.balls)
-        batting = state.team1
-        print(f"{C_DIM}{ts}{C_RESET} {C_CYAN}{signal:>3}{C_RESET}  "
-              f"{C_BOLD}{batting} {state.runs}/{state.wickets} ({ov}){C_RESET}  "
-              f"{C_DIM}1st innings{C_RESET}")
-        _print_poly_simple(odds_store, outcome_names)
-        return
-
-    # 2nd innings — DP model kicks in
-    target = state.inn1_runs + 1
-    runs_needed = target - state.runs
-    balls_remaining = 120 - state.balls
-    wickets_in_hand = 10 - state.wickets
+    sig_color = C_RED if signal == "W" else (C_GREEN if signal in ("4", "6") else C_CYAN)
     ov = balls_to_overs_str(state.balls)
-    chaser = state.team2
 
-    if runs_needed <= 0:
-        model_prob = 1.0
-    elif wickets_in_hand <= 0 or balls_remaining <= 0:
-        model_prob = 0.0
+    # ── Field 1: Was last prediction correct? ──
+    pred_str = ""
+    if state.last_predicted_outcome is not None:
+        actual = signal
+        predicted = state.last_predicted_outcome
+        state.predictions_total += 1
+        if actual == predicted:
+            state.predictions_correct += 1
+            pred_str = f"{C_GREEN}PREV: {predicted}=={actual} YES{C_RESET}"
+        else:
+            pred_str = f"{C_RED}PREV: {predicted}!={actual} NO{C_RESET}"
+
+    # ── Get market price (works for both innings) ──
+    # In 1st innings: market price for batting team = team1
+    # In 2nd innings: we want chaser probability
+    if state.innings == 1:
+        market_prob = _get_team_market_prob(odds_store, outcome_names, state.team1)
+        batting_team = state.team1
     else:
-        model_prob = dp.lookup(balls_remaining, min(runs_needed, dp.MAX_RUNS), wickets_in_hand)
+        market_prob = _get_chaser_market_prob(odds_store, outcome_names, state)
+        batting_team = state.team2
 
-    # Get market price
-    market_prob = _get_chaser_market_prob(odds_store, outcome_names, state)
+    # ── Field 2: Model odds now ──
+    if state.innings == 1:
+        # 1st innings: estimate win prob from projected total
+        if state.balls > 6:
+            run_rate = state.runs / (state.balls / 6)
+            projected = int(run_rate * 20)
+        else:
+            projected = 170  # default early
+        # P(team1 wins) ≈ 1 - P(chase succeeds vs projected total)
+        model_prob = 1.0 - dp.lookup(120, projected + 1, 10)
+        model_label = f"Model(proj {projected}): {C_BOLD}{model_prob:.1%}{C_RESET}"
+    else:
+        target = state.inn1_runs + 1
+        runs_needed = target - state.runs
+        balls_remaining = 120 - state.balls
+        wickets_in_hand = 10 - state.wickets
 
-    # Check last prediction
-    pred_check = ""
-    if state.last_model_prob is not None and state.last_market_prob is not None:
-        # Was the model's direction of edge correct?
-        # If model said chaser had MORE prob than market, and now market moved UP → correct
-        last_edge = state.last_model_prob - state.last_market_prob
-        market_moved = (market_prob - state.last_market_prob) if market_prob else 0
-
-        if abs(last_edge) > 0.01 and market_prob is not None:
-            state.predictions_total += 1
-            if (last_edge > 0 and market_moved > 0) or (last_edge < 0 and market_moved < 0):
-                state.predictions_correct += 1
-                pred_check = f"{C_GREEN}PREV:OK{C_RESET}"
-            else:
-                pred_check = f"{C_RED}PREV:X{C_RESET}"
+        if runs_needed <= 0:
+            model_prob = 1.0
+        elif wickets_in_hand <= 0 or balls_remaining <= 0:
+            model_prob = 0.0
+        else:
+            model_prob = dp.lookup(balls_remaining, min(runs_needed, dp.MAX_RUNS), wickets_in_hand)
+        model_label = f"Model: {C_BOLD}{model_prob:.1%}{C_RESET}"
 
     # Edge
-    edge = (model_prob - market_prob) if market_prob is not None else None
-    if edge is not None:
+    edge_str = ""
+    if market_prob is not None:
+        edge = model_prob - market_prob
         if abs(edge) > 0.05:
-            edge_color = C_BG_GREEN if edge > 0 else C_BG_RED
-            edge_str = f" {edge_color}{C_WHITE} EDGE {edge:+.1%} {C_RESET}"
+            edge_str = f" {C_BG_GREEN if edge > 0 else C_BG_RED}{C_WHITE} EDGE {edge:+.1%} {C_RESET}"
         elif abs(edge) > 0.02:
-            edge_color = C_GREEN if edge > 0 else C_RED
-            edge_str = f" {edge_color}edge {edge:+.1%}{C_RESET}"
+            edge_str = f" {C_GREEN if edge > 0 else C_RED}edge {edge:+.1%}{C_RESET}"
+
+    # ── Field 3: Next ball predictions ──
+    if state.innings == 2 and state.inn1_runs > 0:
+        target = state.inn1_runs + 1
+        runs_needed = target - state.runs
+        balls_remaining = 120 - state.balls
+        wickets_in_hand = 10 - state.wickets
+
+        if runs_needed > 0 and balls_remaining > 0 and wickets_in_hand > 0:
+            scenarios = dp.get_scenarios(balls_remaining, min(runs_needed, dp.MAX_RUNS), wickets_in_hand)
         else:
-            edge_str = f" {C_DIM}={C_RESET}"
+            scenarios = {}
     else:
-        edge_str = ""
+        scenarios = {}
 
-    # Signal color
-    sig_color = C_RED if signal == "W" else (C_GREEN if signal in ("4", "6") else C_CYAN)
+    # ── Print ──
+    # Line 1: score + prev prediction check
+    if state.innings == 1:
+        print(f"{C_DIM}{ts}{C_RESET} {sig_color}{C_BOLD}{signal:>3}{C_RESET}  "
+              f"{C_BOLD}{batting_team} {state.runs}/{state.wickets} ({ov}){C_RESET}  "
+              f"1st inn  {pred_str}")
+    else:
+        target = state.inn1_runs + 1
+        runs_needed = target - state.runs
+        balls_remaining = 120 - state.balls
+        print(f"{C_DIM}{ts}{C_RESET} {sig_color}{C_BOLD}{signal:>3}{C_RESET}  "
+              f"{C_BOLD}{batting_team} {state.runs}/{state.wickets} ({ov}){C_RESET}  "
+              f"need {runs_needed} off {balls_remaining}b  {pred_str}")
 
-    # Score line
-    print(f"\n{C_DIM}{ts}{C_RESET} {sig_color}{C_BOLD}{signal:>3}{C_RESET}  "
-          f"{C_BOLD}{chaser} {state.runs}/{state.wickets} ({ov}){C_RESET}  "
-          f"chasing {target}  need {runs_needed} off {balls_remaining}b"
-          f"  {pred_check}")
+    # Line 2: model vs market
+    market_str = f"Market: {C_BOLD}{market_prob:.1%}{C_RESET}" if market_prob is not None else "Market: N/A"
+    record = ""
+    if state.predictions_total > 0:
+        pct = state.predictions_correct / state.predictions_total * 100
+        record = f"  {C_DIM}[{state.predictions_correct}/{state.predictions_total} = {pct:.0f}%]{C_RESET}"
+    print(f"      {model_label}  {market_str}{edge_str}{record}")
 
-    # Model vs Market
-    market_str = f"{market_prob:.1%}" if market_prob is not None else "N/A"
-    print(f"      Model: {C_BOLD}{model_prob:.1%}{C_RESET}  "
-          f"Market: {C_BOLD}{market_str}{C_RESET}{edge_str}")
-
-    # Next ball scenarios
-    if runs_needed > 0 and balls_remaining > 0 and wickets_in_hand > 0:
-        scenarios = dp.get_scenarios(balls_remaining, min(runs_needed, dp.MAX_RUNS), wickets_in_hand)
+    # Line 3: next ball scenarios
+    if scenarios:
         sc_parts = []
         for name, label, color in [("dot", "0", C_DIM), ("single", "1", C_CYAN),
                                     ("four", "4", C_GREEN), ("six", "6", C_GREEN),
@@ -349,15 +394,34 @@ def print_update(state: MatchState, dp, odds_store: dict, signal: str, outcome_n
             sc_parts.append(f"{color}{label}→{v:.0%}({delta:+.1%}){C_RESET}")
         print(f"      Next: {' '.join(sc_parts)}")
 
-    # Running score
-    if state.predictions_total > 0:
-        pct = state.predictions_correct / state.predictions_total * 100
-        print(f"      {C_DIM}Prediction record: {state.predictions_correct}/{state.predictions_total} "
-              f"({pct:.0f}%){C_RESET}")
+        # Store prediction: which outcome causes biggest positive shift = most likely to happen?
+        # Actually, predict the MOST COMMON outcome from phase transitions
+        over = state.balls // 6
+        if over < 6:
+            state.last_predicted_outcome = "1"  # singles most common in PP
+        elif over < 15:
+            state.last_predicted_outcome = "1"  # singles most common in middle
+        else:
+            state.last_predicted_outcome = "1"  # still most common in death
+    else:
+        state.last_predicted_outcome = "1"  # default
 
     state.last_model_prob = model_prob
     state.last_market_prob = market_prob
     state.last_signal = signal
+
+
+def _get_team_market_prob(odds_store: dict, outcome_names: list[str], team_name: str) -> float | None:
+    """Get a specific team's market probability."""
+    for oname in outcome_names:
+        if team_name.lower() in oname.lower() or oname.lower() in team_name.lower():
+            bid = odds_store.get(f"{oname}_bid")
+            ask = odds_store.get(f"{oname}_ask")
+            if bid is not None and ask is not None:
+                return (bid + ask) / 2
+            if bid is not None:
+                return bid
+    return None
 
 
 def _get_chaser_market_prob(odds_store: dict, outcome_names: list[str], state: MatchState) -> float | None:
@@ -488,15 +552,7 @@ async def stdin_listener(state):
                 break
             cmd = line.decode().strip().upper()
             if cmd == "IO":
-                state.inn1_runs = state._prev_runs
-                state.inn1_wickets = state._prev_wickets
-                state.inn1_balls = state._prev_balls
-                state.innings = 2
-                state._prev_runs = 0
-                state._prev_wickets = 0
-                state._prev_balls = 0
-                print(f"\n{C_MAGENTA}Innings over. T1 = {state.inn1_runs}/{state.inn1_wickets} "
-                      f"({balls_to_overs_str(state.inn1_balls)}). Chase target: {state.inn1_runs + 1}{C_RESET}\n")
+                state.force_innings_over()
             elif cmd.startswith("SEED "):
                 try:
                     t1 = int(cmd.split()[1])
