@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -201,6 +202,78 @@ def detect_match_state(match_key: str) -> dict:
     return result
 
 
+# ── SQLite Logger ─────────────────────────────────────────────────────────
+
+class DPLogger:
+    def __init__(self, slug: str):
+        db_dir = Path(__file__).parent.parent / "data"
+        db_dir.mkdir(exist_ok=True)
+        db_path = db_dir / f"dp_monitor_{slug}.sqlite"
+        self.conn = sqlite3.connect(str(db_path))
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ist_time TEXT NOT NULL,
+            ts_epoch REAL NOT NULL,
+            innings INTEGER,
+            signal TEXT,
+            runs INTEGER,
+            wickets INTEGER,
+            balls INTEGER,
+            overs TEXT,
+            target INTEGER,
+            runs_needed INTEGER,
+            balls_remaining INTEGER,
+            wickets_in_hand INTEGER,
+            model_prob REAL,
+            market_prob REAL,
+            edge REAL,
+            scenario_dot REAL,
+            scenario_single REAL,
+            scenario_four REAL,
+            scenario_six REAL,
+            scenario_wicket REAL,
+            predicted_next TEXT,
+            prev_prediction_correct INTEGER,
+            predictions_correct_total INTEGER,
+            predictions_total INTEGER,
+            team_batting TEXT,
+            team_bowling TEXT
+        )""")
+        self.conn.commit()
+        print(f"{C_DIM}Logging to {db_path}{C_RESET}")
+
+    def log(self, state, signal, model_prob, market_prob, scenarios, pred_correct):
+        ist = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        target = state.inn1_runs + 1 if state.innings == 2 else None
+        runs_needed = (target - state.runs) if target else None
+        balls_remaining = (120 - state.balls) if state.innings == 2 else None
+        wickets_in_hand = (10 - state.wickets) if state.innings == 2 else None
+        edge = (model_prob - market_prob) if model_prob is not None and market_prob is not None else None
+        batting = state.team1 if state.innings == 1 else state.team2
+        bowling = state.team2 if state.innings == 1 else state.team1
+
+        self.conn.execute(
+            """INSERT INTO events (ist_time, ts_epoch, innings, signal, runs, wickets, balls, overs,
+               target, runs_needed, balls_remaining, wickets_in_hand,
+               model_prob, market_prob, edge,
+               scenario_dot, scenario_single, scenario_four, scenario_six, scenario_wicket,
+               predicted_next, prev_prediction_correct, predictions_correct_total, predictions_total,
+               team_batting, team_bowling)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (ist, time.time(), state.innings, signal, state.runs, state.wickets, state.balls,
+             balls_to_overs_str(state.balls), target, runs_needed, balls_remaining, wickets_in_hand,
+             model_prob, market_prob, edge,
+             scenarios.get("dot"), scenarios.get("single"), scenarios.get("four"),
+             scenarios.get("six"), scenarios.get("wicket"),
+             state.last_predicted_outcome, pred_correct,
+             state.predictions_correct, state.predictions_total,
+             batting, bowling))
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
 # ── Match State Tracker ───────────────────────────────────────────────────
 
 class MatchState:
@@ -286,7 +359,7 @@ class MatchState:
 
 # ── Display ───────────────────────────────────────────────────────────────
 
-def print_update(state: MatchState, dp, odds_store: dict, signal: str, outcome_names: list[str]):
+def print_update(state: MatchState, dp, odds_store: dict, signal: str, outcome_names: list[str], db: DPLogger = None):
     ts = ist_now()
     sig_color = C_RED if signal == "W" else (C_GREEN if signal in ("4", "6") else C_CYAN)
     ov = balls_to_overs_str(state.balls)
@@ -406,6 +479,13 @@ def print_update(state: MatchState, dp, odds_store: dict, signal: str, outcome_n
     else:
         state.last_predicted_outcome = "1"  # default
 
+    # ── Log to SQLite ──
+    pred_correct = None
+    if pred_str:
+        pred_correct = 1 if "YES" in pred_str else 0
+    if db:
+        db.log(state, signal, model_prob, market_prob, scenarios, pred_correct)
+
     state.last_model_prob = model_prob
     state.last_market_prob = market_prob
     state.last_signal = signal
@@ -473,7 +553,7 @@ async def poll_polymarket(token_ids, outcome_names, odds_store, interval=3.0):
 
 # ── Cricket SSE ───────────────────────────────────────────────────────────
 
-async def cricket_sse(match_key, state, dp, odds_store, outcome_names):
+async def cricket_sse(match_key, state, dp, odds_store, outcome_names, db=None):
     base = os.getenv("CRICKET_API_KEY", "").rstrip("/")
     if not base:
         print(f"{C_RED}CRICKET_API_KEY not set in .env{C_RESET}")
@@ -506,13 +586,13 @@ async def cricket_sse(match_key, state, dp, odds_store, outcome_names):
                                 payload = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue
-                            _handle_score(payload, state, dp, odds_store, outcome_names)
+                            _handle_score(payload, state, dp, odds_store, outcome_names, db)
         except Exception as e:
             print(f"{C_RED}SSE error: {e}{C_RESET}")
         await asyncio.sleep(2)
 
 
-def _handle_score(payload, state, dp, odds_store, outcome_names):
+def _handle_score(payload, state, dp, odds_store, outcome_names, db=None):
     if not isinstance(payload, dict):
         return
     data = payload.get("data", payload)
@@ -534,7 +614,7 @@ def _handle_score(payload, state, dp, odds_store, outcome_names):
 
     changed, signal = state.update(runs, wickets, balls)
     if changed:
-        print_update(state, dp, odds_store, signal, outcome_names)
+        print_update(state, dp, odds_store, signal, outcome_names, db)
 
 
 # ── Stdin listener ────────────────────────────────────────────────────────
@@ -619,6 +699,7 @@ async def run(args):
 
     state = MatchState(team1, team2)
     odds_store = {}
+    db = DPLogger(args.slug)
 
     # Auto-seed if chase in progress
     if info.get("innings") == 2:
@@ -652,7 +733,7 @@ async def run(args):
     print(f"{'='*70}\n")
 
     tasks = [
-        cricket_sse(args.match, state, dp, odds_store, outcome_names),
+        cricket_sse(args.match, state, dp, odds_store, outcome_names, db),
         poll_polymarket(token_ids, outcome_names, odds_store),
     ]
     try:
