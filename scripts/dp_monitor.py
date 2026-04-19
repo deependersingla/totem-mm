@@ -585,10 +585,37 @@ async def run(args):
         print(f"{C_RED}Need 2 outcomes{C_RESET}")
         sys.exit(1)
 
-    # Detect match state
+    # Detect match state — MUST come from API, never guess
     info = detect_match_state(args.match) if args.match else {}
-    team1 = info.get("team1_name", outcome_names[0])
-    team2 = info.get("team2_name", outcome_names[1])
+
+    if not info.get("team1_name"):
+        print(f"{C_YELLOW}API didn't return batting order yet. Waiting...{C_RESET}")
+        # Poll until we get it
+        for attempt in range(60):
+            await asyncio.sleep(5)
+            info = detect_match_state(args.match)
+            if info.get("team1_name"):
+                break
+            if attempt % 6 == 0:
+                print(f"{C_DIM}  Still waiting for toss/batting order from API... ({attempt*5}s){C_RESET}")
+
+    if not info.get("team1_name"):
+        print(f"{C_RED}Could not determine batting order from API after 5 minutes.{C_RESET}")
+        print(f"{C_RED}Use --first-batting to specify manually.{C_RESET}")
+        if not args.first_batting:
+            sys.exit(1)
+
+    if args.first_batting:
+        # Manual override
+        idx = args.first_batting - 1
+        team1 = outcome_names[idx]
+        team2 = outcome_names[1 - idx]
+        print(f"{C_YELLOW}Manual override: {team1} bats first{C_RESET}")
+    else:
+        team1 = info["team1_name"]
+        team2 = info["team2_name"]
+
+    print(f"{C_GREEN}Batting order from API: {team1} bats first, {team2} chasing{C_RESET}")
 
     state = MatchState(team1, team2)
     odds_store = {}
@@ -598,6 +625,7 @@ async def run(args):
         state.innings = 2
         state.inn1_runs = info.get("t1_total", 0)
         state.inn1_balls = info.get("t1_balls", 120)
+        state.inn1_wickets = info.get("t1_wickets", 0)
         state.runs = info.get("t2_runs", 0)
         state.wickets = info.get("t2_wickets", 0)
         state.balls = info.get("t2_balls", 0)
@@ -639,6 +667,8 @@ def main():
     parser = argparse.ArgumentParser(description="DP Win Probability Live Monitor")
     parser.add_argument("--slug", required=True, help="Polymarket market slug")
     parser.add_argument("--match", required=True, help="Cricket match key (Firebase)")
+    parser.add_argument("--first-batting", type=int, default=None, choices=[1, 2],
+                        help="Override: which Polymarket outcome bats first (1 or 2)")
     parser.add_argument("--t1-total", type=int, default=None, help="Seed T1 total if joining mid-chase")
     args = parser.parse_args()
     asyncio.run(run(args))
