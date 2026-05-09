@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Start the Polymarket taker (Rust + UI on :3000) and the Telegram bot,
+# each in its OWN Terminal.app window. Close a window to kill that process.
+#
+# Usage:
+#   ./run                  # both: taker + telebot (release build)
+#   ./run --no-tele        # taker + UI only
+#   ./run --no-taker       # telebot only (assumes a taker is already running)
+#   ./run --debug          # cargo run (debug build, faster compile)
+#   ./run --port 3001      # override taker HTTP port (also tells telebot)
+#
+# This dispatches and exits — no foreground supervision. Each Terminal window
+# owns its child process; closing the window terminates it.
+#
+# macOS only (uses osascript + Terminal.app). On other OSes, run the two
+# commands manually in two shells:
+#   (cd polymarket-taker && cargo run --release)
+#   (cd polymarket-taker/telegram-bot && ./venv/bin/python bot.py)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAKER_DIR="$SCRIPT_DIR/polymarket-taker"
+TELEBOT_DIR="$TAKER_DIR/telegram-bot"
+
+# Defaults
+RUN_TAKER=1
+RUN_TELE=1
+CARGO_PROFILE="--release"
+PORT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-tele|--ui)        RUN_TELE=0;          shift ;;
+    --no-taker)            RUN_TAKER=0;         shift ;;
+    --debug)               CARGO_PROFILE="";    shift ;;
+    --release)             CARGO_PROFILE="--release"; shift ;;
+    --port)                PORT="$2";           shift 2 ;;
+    -h|--help)
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# macOS check
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "[run] this launcher uses macOS Terminal.app. On Linux just run:" >&2
+  echo "  (cd $TAKER_DIR && cargo run $CARGO_PROFILE)" >&2
+  echo "  (cd $TELEBOT_DIR && ./venv/bin/python bot.py)" >&2
+  exit 1
+fi
+
+# Pre-flight checks (fail fast before opening windows)
+if [[ "$RUN_TAKER" == 1 ]]; then
+  command -v cargo >/dev/null || { echo "cargo not found in PATH" >&2; exit 1; }
+  [[ -f "$TAKER_DIR/Cargo.toml" ]] || { echo "missing $TAKER_DIR/Cargo.toml" >&2; exit 1; }
+fi
+if [[ "$RUN_TELE" == 1 ]]; then
+  [[ -x "$TELEBOT_DIR/venv/bin/python" ]] || {
+    echo "missing $TELEBOT_DIR/venv — run:" >&2
+    echo "  cd $TELEBOT_DIR && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt" >&2
+    exit 1; }
+  [[ -f "$TELEBOT_DIR/config.json" ]] || {
+    echo "missing $TELEBOT_DIR/config.json — run: cp config.json.example config.json && edit" >&2
+    exit 1; }
+fi
+
+# Open a new Terminal.app window with a titled, persistent shell running `cmd`.
+open_window() {
+  local title="$1"
+  local cmd="$2"
+  # Escape for AppleScript: backslashes first, then double quotes.
+  local cmd_esc=${cmd//\\/\\\\}
+  cmd_esc=${cmd_esc//\"/\\\"}
+  local title_esc=${title//\"/\\\"}
+  osascript <<APPLESCRIPT
+    tell application "Terminal"
+      activate
+      do script "echo '=== $title_esc ===' && $cmd_esc"
+      set custom title of front window to "$title_esc"
+    end tell
+APPLESCRIPT
+}
+
+if [[ "$RUN_TAKER" == 1 ]]; then
+  port_prefix=""
+  [[ -n "$PORT" ]] && port_prefix="HTTP_PORT=$PORT "
+  open_window "totem-taker (:${PORT:-3000})" \
+    "cd '$TAKER_DIR' && ${port_prefix}cargo run $CARGO_PROFILE --bin polymarket-taker"
+fi
+
+if [[ "$RUN_TELE" == 1 ]]; then
+  taker_env=""
+  [[ -n "$PORT" ]] && taker_env="TAKER_URL=http://localhost:$PORT "
+  open_window "totem-tele" \
+    "cd '$TELEBOT_DIR' && ${taker_env}./venv/bin/python bot.py"
+fi
+
+echo "[run] launched in separate Terminal windows. Close each window to stop that process."
+echo "[run] dashboard: http://localhost:${PORT:-3000}"
