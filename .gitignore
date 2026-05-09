@@ -26,11 +26,19 @@ extras
 .ssh/
 .claudeRules/
 
-# Captures & docs
+# Captures
 captures/
 *.xlsx
-LIVE_CAPTURE_REQUIREMENTS.md
-VISUALIZATION_OPTIONS.md
+
+# Docs (markdown notes are local-only)
+*.md
+
+# OS junk
+.DS_Store
+**/.DS_Store
+
+# Claude local config
+.claude/
 
 # polymarket-taker (Rust)
 polymarket-taker/target/
@@ -40,3 +48,7 @@ polymarket-taker/telegram-bot/config.json
 *.db
 *.db-shm
 *.db-wal
+
+# Runtime / generated state
+scripts/schedule/upcoming_matches.json
+scripts/schedule/__pycache__/
