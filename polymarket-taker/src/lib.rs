@@ -1,11 +1,15 @@
 pub mod capture;
 pub mod clob_auth;
+pub mod clob_market;
 pub mod config;
 pub mod ctf;
 pub mod db;
+pub mod fees;
+pub mod dls;
 pub mod market_ws;
 pub mod order_cache;
 pub mod orders;
+pub mod orders_v2;
 pub mod position;
 pub mod server;
 pub mod signal;
@@ -22,6 +26,8 @@ pub mod trading;
 pub mod sweep_server;
 pub mod sweep_state;
 pub mod user_ws;
+pub mod ws_health;
+pub mod price_history;
 
 #[cfg(test)]
 mod tests;

@@ -1,10 +1,17 @@
 mod ctf_tests;
+mod db_tests;
+mod dispatch_tests;
+mod fees_tests;
 mod heartbeat_tests;
 mod latency_tests;
 mod maker_tests;
 mod orders_tests;
 mod pending_revert_tests;
 mod position_tests;
+mod signal_group_tests;
 mod signal_tests;
 mod strategy_tests;
 mod user_ws_tests;
+mod ws_health_tests;
+mod price_history_tests;
+mod entry_direction_tests;

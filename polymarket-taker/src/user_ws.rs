@@ -32,6 +32,10 @@ struct RawTradeMessage {
     msg_type: String,
     #[serde(default)]
     taker_order_id: String,
+    /// Polymarket-side trade id; included in MATCHED/CONFIRMED messages.
+    /// Optional because not every payload variant carries it.
+    #[serde(default, alias = "trade_id", alias = "id")]
+    trade_id: String,
     #[serde(default)]
     status: String,
     #[serde(default)]
@@ -75,8 +79,14 @@ fn parse_side(s: &str) -> Side {
     }
 }
 
-fn parse_decimal(s: &str) -> Decimal {
-    s.parse().unwrap_or(Decimal::ZERO)
+/// Parse a string into [`Decimal`].
+///
+/// D6 (TODO.md): the previous `unwrap_or(Decimal::ZERO)` silently turned
+/// malformed payloads (`"N/A"`, `"null"`, missing fields) into $0 fills,
+/// corrupting position math and P&L. Now returns `Err` so callers can drop
+/// the entire `FillEvent` and log the raw payload.
+fn parse_decimal(s: &str) -> Result<Decimal, rust_decimal::Error> {
+    s.parse()
 }
 
 /// Parse a raw JSON message from the user WebSocket into FillEvents.
@@ -109,33 +119,80 @@ fn parse_single_event(val: &serde_json::Value) -> Vec<FillEvent> {
     let is_trade = event_type == "trade" || msg_type == "trade";
     let is_order = event_type == "order" || msg_type == "order";
 
+    // Capture the raw payload exactly as it arrived so the user_fills ledger
+    // (B6) can persist a verbatim record. `to_string()` is lossless for any
+    // serde_json::Value.
+    let raw_json = serde_json::to_string(val).unwrap_or_default();
+
     if is_trade {
         if let Ok(trade) = serde_json::from_value::<RawTradeMessage>(val.clone()) {
             let status = trade.status.to_uppercase();
             // Only emit fills for MATCHED or CONFIRMED status
             if status == "MATCHED" || status == "CONFIRMED" {
-                results.push(FillEvent {
-                    order_id: trade.taker_order_id.clone(),
-                    filled_size: parse_decimal(&trade.size),
-                    avg_price: parse_decimal(&trade.price),
-                    status: trade.status.clone(),
-                    asset_id: trade.asset_id.clone(),
-                    side: parse_side(&trade.side),
-                });
+                // D6: drop the whole event on any field-parse failure rather
+                // than recording a $0 fill that would silently corrupt P&L.
+                match (parse_decimal(&trade.size), parse_decimal(&trade.price)) {
+                    (Ok(size), Ok(price)) => {
+                        let trade_id = if trade.trade_id.is_empty() {
+                            None
+                        } else {
+                            Some(trade.trade_id.clone())
+                        };
+                        results.push(FillEvent {
+                            order_id: trade.taker_order_id.clone(),
+                            filled_size: size,
+                            avg_price: price,
+                            status: trade.status.clone(),
+                            asset_id: trade.asset_id.clone(),
+                            side: parse_side(&trade.side),
+                            polymarket_trade_id: trade_id,
+                            raw_json: raw_json.clone(),
+                        });
+                    }
+                    (size_res, price_res) => {
+                        tracing::warn!(
+                            order_id = %trade.taker_order_id,
+                            size = %trade.size,
+                            price = %trade.price,
+                            size_err = ?size_res.err(),
+                            price_err = ?price_res.err(),
+                            raw_json = %raw_json,
+                            "[USER-WS] dropping trade event — unparseable size/price",
+                        );
+                    }
+                }
             }
         }
     } else if is_order {
         if let Ok(order) = serde_json::from_value::<RawOrderMessage>(val.clone()) {
-            let size_matched = parse_decimal(&order.size_matched);
-            if size_matched > Decimal::ZERO {
-                results.push(FillEvent {
-                    order_id: order.id.clone(),
-                    filled_size: size_matched,
-                    avg_price: parse_decimal(&order.price),
-                    status: order.status.clone(),
-                    asset_id: order.asset_id.clone(),
-                    side: parse_side(&order.side),
-                });
+            // D6: same — drop the event on any parse error rather than
+            // emitting a partial/zeroed FillEvent.
+            match (parse_decimal(&order.size_matched), parse_decimal(&order.price)) {
+                (Ok(size_matched), Ok(price)) => {
+                    if size_matched > Decimal::ZERO {
+                        results.push(FillEvent {
+                            order_id: order.id.clone(),
+                            filled_size: size_matched,
+                            avg_price: price,
+                            status: order.status.clone(),
+                            asset_id: order.asset_id.clone(),
+                            side: parse_side(&order.side),
+                            polymarket_trade_id: None,
+                            raw_json: raw_json.clone(),
+                        });
+                    }
+                }
+                (size_res, price_res) => {
+                    tracing::warn!(
+                        order_id = %order.id,
+                        size_matched = %order.size_matched,
+                        price = %order.price,
+                        size_err = ?size_res.err(),
+                        price_err = ?price_res.err(),
+                        raw_json = %raw_json,
+                        "[USER-WS] dropping order event — unparseable size/price",
+                    );
+                }
             }
         }
     }

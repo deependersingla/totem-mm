@@ -46,9 +46,7 @@ pub struct SweepSavedSettings {
     pub api_key: Option<String>,
     pub api_secret: Option<String>,
     pub api_passphrase: Option<String>,
-    pub builder_api_key: Option<String>,
-    pub builder_api_secret: Option<String>,
-    pub builder_api_passphrase: Option<String>,
+    pub builder_code: Option<String>,
     pub sweep_budget_usdc: Option<String>,
     pub grid_levels: Option<usize>,
     pub refresh_interval_secs: Option<u64>,
@@ -98,9 +96,7 @@ impl SweepSavedSettings {
             api_key: Some(config.api_key.clone()).filter(|s| !s.is_empty()),
             api_secret: Some(config.api_secret.clone()).filter(|s| !s.is_empty()),
             api_passphrase: Some(config.api_passphrase.clone()).filter(|s| !s.is_empty()),
-            builder_api_key: Some(config.builder_api_key.clone()).filter(|s| !s.is_empty()),
-            builder_api_secret: Some(config.builder_api_secret.clone()).filter(|s| !s.is_empty()),
-            builder_api_passphrase: Some(config.builder_api_passphrase.clone()).filter(|s| !s.is_empty()),
+            builder_code: Some(config.builder_code.clone()).filter(|s| !s.is_empty()),
             sweep_budget_usdc: Some(config.sweep_budget_usdc.to_string()),
             grid_levels: Some(config.grid_levels),
             refresh_interval_secs: Some(config.refresh_interval_secs),
@@ -147,12 +143,8 @@ pub struct SweepAppConfig {
 
     pub market_slug: String,
 
-    #[serde(skip)]
-    pub builder_api_key: String,
-    #[serde(skip)]
-    pub builder_api_secret: String,
-    #[serde(skip)]
-    pub builder_api_passphrase: String,
+    /// V2 builderCode — 32-byte hex (0x-prefixed). Empty = no attribution.
+    pub builder_code: String,
 
     pub sweep_budget_usdc: Decimal,
     pub grid_levels: usize,
@@ -206,12 +198,8 @@ impl SweepAppConfig {
 
             market_slug: saved.market_slug.unwrap_or_default(),
 
-            builder_api_key: saved.builder_api_key
-                .unwrap_or_else(|| env_or("POLYMARKET_BUILDER_API_KEY", "")),
-            builder_api_secret: saved.builder_api_secret
-                .unwrap_or_else(|| env_or("POLYMARKET_BUILDER_SECRET", "")),
-            builder_api_passphrase: saved.builder_api_passphrase
-                .unwrap_or_else(|| env_or("POLYMARKET_BUILDER_PASSPHRASE", "")),
+            builder_code: saved.builder_code
+                .unwrap_or_else(|| env_or("POLYMARKET_BUILDER_CODE", "")),
 
             sweep_budget_usdc: saved.sweep_budget_usdc
                 .and_then(|s| Decimal::from_str(&s).ok())
@@ -329,9 +317,14 @@ impl SweepAppConfig {
             revert_delay_ms: 3000,
             fill_poll_interval_ms: 500,
             fill_poll_timeout_ms: 10000,
+            signal_gap_secs: 0, // sweep is signal-driven by its own timer
+            max_book_age_ms: 0, // sweep mode does its own freshness checks
             tick_size: self.tick_size.clone(),
             order_min_size: self.order_min_size,
-            fee_rate_bps: 0,
+            fee_rate: 0.0,
+            fee_exponent: 0.0,
+            takers_only_fees: true,
+            revert_timeout_ms: 0,
             ws_ping_interval_secs: 10,
             dry_run: self.dry_run,
             log_level: self.log_level.clone(),
@@ -345,10 +338,10 @@ impl SweepAppConfig {
             edge_boundary_6: 0.0,
             fill_ws_timeout_ms: 5000,
             breakeven_timeout_ms: 3000,
+            move_lookback_ms: 0,           // sweep doesn't use move detection
+            move_threshold_multiplier: 0.0,
             maker_config: crate::config::MakerConfig::default(),
-            builder_api_key: self.builder_api_key.clone(),
-            builder_api_secret: self.builder_api_secret.clone(),
-            builder_api_passphrase: self.builder_api_passphrase.clone(),
+            builder_code: self.builder_code.clone(),
         }
     }
 }

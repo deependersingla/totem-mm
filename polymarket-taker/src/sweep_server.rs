@@ -42,12 +42,16 @@ pub fn start_book_ws(state: &Arc<SweepAppState>) {
     *state.book_rx.write().unwrap() = Some(book_rx);
     *state.book_tx.write().unwrap() = Some(book_tx.clone());
 
+    // Sweep mode does not consult ws_health (it has its own freshness checks),
+    // but `market_ws::run` requires the sender. The receiver is dropped.
+    let (health_tx, _health_rx) = watch::channel(crate::ws_health::WsHealth::default());
+
     let cancel = tokio_util::sync::CancellationToken::new();
     *state.ws_cancel.write().unwrap() = Some(cancel.clone());
 
     tokio::spawn(async move {
         tokio::select! {
-            res = market_ws::run(&cfg, book_tx) => {
+            res = market_ws::run(&cfg, book_tx, health_tx, None) => {
                 if let Err(e) = res { tracing::error!(error = %e, "book ws failed"); }
             }
             _ = cancel.cancelled() => {}
@@ -91,12 +95,12 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
     let config = state.config.read().unwrap();
     let eoa = config.eoa_address();
     let api_key_set = state.auth.read().unwrap().is_some();
-    let builder_masked = if config.builder_api_key.is_empty() { String::new() }
+    let builder_code_masked = if config.builder_code.is_empty() { String::new() }
         else {
-            let k = &config.builder_api_key;
-            let end = k.len().min(8);
-            let tail_start = k.len().saturating_sub(4);
-            format!("{}...{}", &k[..end], &k[tail_start..])
+            let k = &config.builder_code;
+            let end = k.len().min(10);
+            let tail_start = k.len().saturating_sub(6);
+            format!("{}…{}", &k[..end], &k[tail_start..])
         };
     Json(serde_json::json!({
         "team_a_name": config.team_a_name,
@@ -113,8 +117,8 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "market_slug": config.market_slug,
         "api_key_set": api_key_set,
         "private_key_set": config.has_wallet(),
-        "builder_key_set": !config.builder_api_key.is_empty(),
-        "builder_api_key_masked": builder_masked,
+        "builder_code_set": !config.builder_code.is_empty(),
+        "builder_code_masked": builder_code_masked,
     }))
 }
 
@@ -671,40 +675,37 @@ async fn get_sweep_status(State(state): State<S>) -> Json<serde_json::Value> {
         "dry_run": config.dry_run,
         "budget": config.sweep_budget_usdc.to_string(),
         "winning_team": winning,
-        "builder_key_set": !config.builder_api_key.is_empty(),
+        "builder_code_set": !config.builder_code.is_empty(),
         "latency": latency,
     }))
 }
 
-// ── Builder Keys ────────────────────────────────────────────────────────────
+// ── Builder Code ────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct BuilderKeysRequest {
-    builder_api_key: Option<String>,
-    builder_api_secret: Option<String>,
-    builder_api_passphrase: Option<String>,
+struct BuilderCodeRequest {
+    builder_code: Option<String>,
 }
 
 async fn post_builder(
     State(state): State<S>,
-    Json(body): Json<BuilderKeysRequest>,
+    Json(body): Json<BuilderCodeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut config = state.config.write().unwrap();
-    // Only update non-empty values — never overwrite with blank
-    if let Some(v) = body.builder_api_key {
-        if v.trim().is_empty() { return Err((StatusCode::BAD_REQUEST, "builder API key cannot be empty".into())); }
-        config.builder_api_key = v;
-    }
-    if let Some(v) = body.builder_api_secret {
-        if v.trim().is_empty() { return Err((StatusCode::BAD_REQUEST, "builder secret cannot be empty".into())); }
-        config.builder_api_secret = v;
-    }
-    if let Some(v) = body.builder_api_passphrase {
-        if v.trim().is_empty() { return Err((StatusCode::BAD_REQUEST, "builder passphrase cannot be empty".into())); }
-        config.builder_api_passphrase = v;
+    if let Some(v) = body.builder_code {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "builder code cannot be empty".into()));
+        }
+        // Validate it's a 32-byte hex string (with or without 0x prefix).
+        let stripped = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+        if stripped.len() != 64 || hex::decode(stripped).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "builder code must be 32-byte hex (e.g. 0x... 64 hex chars)".into()));
+        }
+        config.builder_code = if trimmed.starts_with("0x") { trimmed.into() } else { format!("0x{trimmed}") };
     }
     config.persist();
-    state.push_event("config", "builder keys saved");
+    state.push_event("config", "builder code saved");
     Ok(Json(serde_json::json!({"ok": true})))
 }
 

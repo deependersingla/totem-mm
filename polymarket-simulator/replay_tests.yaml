@@ -1,0 +1,39 @@
+defaults:
+  starting_cash_usdc: 0          # informational only — engine does not enforce
+  max_position_shares: null      # null = no cap; set per-test to constrain
+  category: SPORTS
+
+# 20 IPL replay tests. To add a new one: drop the .db into ../captures/ and
+# add a `- slug: ...` line below. Run with `scripts/run_suite.py`.
+#
+# tier in trailing comment:
+#   solid  — cricket events present, max book gap < 60s
+#   flawed — cricket events present, but at least one big WS reconnect mid-match
+#   nocrk  — cricket signal capture failed; useful only for non-event strategies
+tests:
+  # solid (9)
+  - slug: cricipl-roy-del-2026-04-18      # solid
+  - slug: cricipl-sun-che-2026-04-18      # solid
+  - slug: cricipl-kol-luc-2026-04-09      # solid
+  - slug: cricipl-raj-sun-2026-04-25      # solid
+  - slug: cricipl-roy-luc-2026-04-15      # solid
+  - slug: cricipl-che-kol-2026-04-14      # solid
+  - slug: cricipl-kol-raj-2026-04-19      # solid
+  - slug: cricipl-raj-roy-2026-04-10      # solid
+  - slug: cricipl-pun-sun-2026-04-11      # solid
+
+  # flawed but usable (10) — book has periodic stalls; most of match is fine
+  - slug: cricipl-guj-kol-2026-04-17      # flawed (95s gap)
+  - slug: cricipl-mum-che-2026-04-23      # flawed (95s gap)
+  - slug: cricipl-mum-pun-2026-04-16      # flawed (155s gap)
+  - slug: cricipl-del-pun-2026-04-25      # flawed (128s gap)
+  - slug: cricipl-roy-guj-2026-04-24      # flawed (478s gap)
+  - slug: cricipl-sun-del-2026-04-21      # flawed (694s gap)
+  - slug: cricipl-luc-raj-2026-04-22      # flawed (950s gap)
+  - slug: cricipl-pun-luc-2026-04-19      # flawed (1212s gap)
+  - slug: cricipl-raj-mum-2026-04-07      # flawed (2005s gap, only 1.7h captured)
+  - slug: cricipl-guj-mum-2026-04-20      # flawed (4455s gap)
+
+  # no cricket events captured (3 of 4 included to round to 20; useful for
+  # MM strategies that don't need cricket signals)
+  - slug: cricipl-sun-raj-2026-04-13      # nocrk

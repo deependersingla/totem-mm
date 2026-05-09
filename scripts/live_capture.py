@@ -81,6 +81,26 @@ def fetch_market(slug: str) -> dict:
     return markets[0]
 
 
+def fetch_toss_winner_market(slug: str) -> dict | None:
+    """Try to fetch the sibling `<slug>-toss-winner` sub-market. Returns None if
+    this event has no toss-winner market (older matches didn't expose one)."""
+    import requests
+    try:
+        # The toss-winner market lives inside the parent event, not as a standalone /markets entry.
+        resp = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=15)
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception:
+        return None
+    if not events:
+        return None
+    target = f"{slug}-toss-winner"
+    for m in events[0].get("markets", []) or []:
+        if m.get("slug") == target:
+            return m
+    return None
+
+
 def parse_tokens(market: dict) -> tuple[list[str], list[str]]:
     tokens = market.get("clobTokenIds", "")
     outcomes = market.get("outcomes", "[]")
@@ -206,6 +226,12 @@ class State:
         self.fill_buf: list[tuple] = []
         self.cricket_buf: list[tuple] = []
 
+        # TW (toss-winner) buffers — routed to a separate DB file
+        self.tw_book_buf: list[tuple] = []
+
+        # asset_id → "ml"|"tw"; populated in run() after both markets resolve
+        self.market_tag: dict[str, str] = {}
+
         # Dedup sets
         self.seen_tx_hashes: set[str] = set()
         self.enriched_tx_hashes: set[str] = set()
@@ -259,7 +285,11 @@ class State:
         ask_depth = sum(p * s for p, s in asks)
 
         row.extend([mid, spread, bid_depth, ask_depth])
-        self.book_buf.append(tuple(row))
+        # Route to the right buffer based on which market this asset belongs to
+        if self.market_tag.get(asset_id) == "tw":
+            self.tw_book_buf.append(tuple(row))
+        else:
+            self.book_buf.append(tuple(row))
         self.n_book += 1
 
     def apply_book_snapshot(self, asset_id: str, bids: list, asks: list):
@@ -670,15 +700,20 @@ def _handle_cricket(state: State, payload):
 
 # ── DB Flusher ─────────────────────────────────────────────────────────────
 
-async def db_flusher(state: State, db: aiosqlite.Connection):
-    """Flush insert buffers to SQLite periodically."""
+async def db_flusher(state: State, db: aiosqlite.Connection,
+                     tw_db: aiosqlite.Connection | None = None):
+    """Flush insert buffers to SQLite periodically.
+
+    ML buffers → db; TW book snapshots → tw_db (separate file, same schema).
+    """
     while True:
         await asyncio.sleep(DB_FLUSH_S)
-        await _flush(state, db)
+        await _flush(state, db, tw_db)
 
 
-async def _flush(state: State, db: aiosqlite.Connection):
-    """Flush all buffers to DB."""
+async def _flush(state: State, db: aiosqlite.Connection,
+                 tw_db: aiosqlite.Connection | None = None):
+    """Flush all buffers to DB(s)."""
     flushed = False
 
     if state.book_buf:
@@ -690,6 +725,17 @@ async def _flush(state: State, db: aiosqlite.Connection):
             rows,
         )
         flushed = True
+
+    # TW book snapshots go to the separate TW DB
+    if state.tw_book_buf and tw_db is not None:
+        rows = state.tw_book_buf[:]
+        state.tw_book_buf.clear()
+        await tw_db.executemany(
+            "INSERT INTO book_snapshots VALUES (NULL,"
+            + ",".join(["?"] * 27) + ")",
+            rows,
+        )
+        await tw_db.commit()
 
     if state.trade_buf:
         rows = state.trade_buf[:]
@@ -762,7 +808,7 @@ async def heartbeat(state: State):
 # ── Main ───────────────────────────────────────────────────────────────────
 
 async def run(args):
-    # Resolve market
+    # Resolve market (moneyline)
     log("INIT", f"resolving market '{args.slug}'...", "B")
     market = fetch_market(args.slug)
     question = market.get("question", args.slug)
@@ -773,39 +819,97 @@ async def run(args):
         print("No token IDs found")
         sys.exit(1)
 
-    print(f"  Market:    {question}")
-    print(f"  Condition: {condition_id}")
-    print(f"  Outcomes:  {', '.join(outcome_names)}")
-    print(f"  Tokens:    {len(token_ids)}")
+    # Also try to resolve the sibling toss-winner market.
+    tw_market = fetch_toss_winner_market(args.slug) if not args.no_toss_winner else None
+    tw_condition_id = ""
+    tw_tokens: list[str] = []
+    tw_outcomes: list[str] = []
+    if tw_market:
+        tw_condition_id = tw_market.get("conditionId", "")
+        tw_tokens, tw_outcomes = parse_tokens(tw_market)
+
+    # Merged subscription list + per-token market tag
+    all_tokens = list(token_ids) + list(tw_tokens)
+    all_outcomes = list(outcome_names) + list(tw_outcomes)
+    market_tag: dict[str, str] = {t: "ml" for t in token_ids}
+    for t in tw_tokens:
+        market_tag[t] = "tw"
+
+    print(f"  Market (ML): {question}")
+    print(f"  Condition:   {condition_id}")
+    print(f"  Outcomes:    {', '.join(outcome_names)}")
+    print(f"  Tokens (ML): {len(token_ids)}")
+    if tw_tokens:
+        print(f"  Toss-winner: {tw_market.get('question','?')}")
+        print(f"  TW cond:     {tw_condition_id}")
+        print(f"  TW tokens:   {len(tw_tokens)}  outcomes={tw_outcomes}")
+    else:
+        print(f"  Toss-winner: (none — this event has no -toss-winner sub-market)")
     if args.match:
-        print(f"  Match key: {args.match}")
+        print(f"  Match key:   {args.match}")
     print()
 
-    state = State(token_ids, outcome_names, condition_id)
+    state = State(all_tokens, all_outcomes, condition_id)
+    state.market_tag = market_tag
+    state.tw_condition_id = tw_condition_id
+    state.ml_token_ids = list(token_ids)
+    state.tw_token_ids = list(tw_tokens)
 
-    # Init DB
+    # Init DBs — ML stays in the legacy file; TW gets its own file
     os.makedirs("captures", exist_ok=True)
     date_str = time.strftime("%Y%m%d")
     db_path = os.path.join("captures", f"match_capture_{args.slug}_{date_str}.db")
     db = await init_db(db_path)
 
-    # Store metadata
-    meta = {
+    tw_db = None
+    tw_db_path = None
+    if tw_tokens:
+        tw_db_path = os.path.join("captures", f"tw_capture_{args.slug}_{date_str}.db")
+        tw_db = await init_db(tw_db_path)
+
+    # ─ ML metadata → ML DB ────────────────────────────────────────────────
+    ml_meta = {
         "slug": args.slug,
         "question": question,
-        "condition_id": condition_id,
-        "token_ids": json.dumps(token_ids),
+        "condition_id": condition_id,        # ML condition (legacy)
+        "token_ids": json.dumps(token_ids),  # ML tokens (legacy)
         "outcome_names": json.dumps(outcome_names),
+        "ml_condition_id": condition_id,
+        "ml_token_ids": json.dumps(token_ids),
+        "ml_outcome_names": json.dumps(outcome_names),
+        "tw_condition_id": tw_condition_id,
+        "tw_token_ids": json.dumps(tw_tokens),
+        "tw_outcome_names": json.dumps(tw_outcomes),
+        "tw_db_path": tw_db_path or "",
+        "market_tag": json.dumps(market_tag),
         "match_key": args.match or "",
         "start_time": datetime.now(IST).isoformat(),
     }
-    for k, v in meta.items():
-        await db.execute(
-            "INSERT OR REPLACE INTO match_meta VALUES (?, ?)", (k, v)
-        )
+    for k, v in ml_meta.items():
+        await db.execute("INSERT OR REPLACE INTO match_meta VALUES (?, ?)", (k, v))
     await db.commit()
 
-    log("INIT", f"DB: {db_path}", "G")
+    # ─ TW metadata → TW DB ────────────────────────────────────────────────
+    if tw_db is not None:
+        tw_meta = {
+            "slug": args.slug,
+            "market": "toss-winner",
+            "question": tw_market.get("question", f"{args.slug} -toss-winner"),
+            "condition_id": tw_condition_id,
+            "token_ids": json.dumps(tw_tokens),
+            "outcome_names": json.dumps(tw_outcomes),
+            "ml_db_path": db_path,
+            "ml_condition_id": condition_id,
+            "match_key": args.match or "",
+            "start_time": datetime.now(IST).isoformat(),
+        }
+        for k, v in tw_meta.items():
+            await tw_db.execute("INSERT OR REPLACE INTO match_meta VALUES (?, ?)", (k, v))
+        await tw_db.commit()
+
+    log("INIT", f"ML DB: {db_path}", "G")
+    if tw_db_path:
+        log("INIT", f"TW DB: {tw_db_path}", "G")
     print(f"  Streams: WS book+trades | Data-API enrichment | Goldsky fills"
           + (" | Cricket SSE" if args.match else ""))
     print(f"  {'='*60}")
@@ -816,7 +920,7 @@ async def run(args):
         trade_enricher(state),
         chain_fill_poller(state),
         cricket_sse(state, args.match),
-        db_flusher(state, db),
+        db_flusher(state, db, tw_db),
         heartbeat(state),
     ]
 
@@ -826,16 +930,21 @@ async def run(args):
         pass
     finally:
         # Final flush
-        await _flush(state, db)
+        await _flush(state, db, tw_db)
         await db.close()
+        if tw_db is not None:
+            await tw_db.close()
 
         print(f"\n{'='*60}")
         print(f"  CAPTURE COMPLETE")
-        print(f"  Book snapshots: {state.n_book}")
+        print(f"  Book snapshots: {state.n_book} "
+              f"(ML buf left: {len(state.book_buf)}, TW buf left: {len(state.tw_book_buf)})")
         print(f"  Trades:         {state.n_trades} ({state.n_enriched} enriched)")
         print(f"  Chain fills:    {state.n_fills}")
         print(f"  Cricket events: {state.n_cricket}")
-        print(f"  DB: {db_path}")
+        print(f"  ML DB: {db_path}")
+        if tw_db_path:
+            print(f"  TW DB: {tw_db_path}")
         print(f"{'='*60}")
 
 
@@ -843,6 +952,9 @@ def main():
     parser = argparse.ArgumentParser(description="Live Match Capture")
     parser.add_argument("--slug", required=True, help="Polymarket market slug")
     parser.add_argument("--match", help="Cricket match key (Firebase)")
+    parser.add_argument("--no-toss-winner", action="store_true",
+                        help="Skip subscribing to the -toss-winner sub-market "
+                             "(ML-only, legacy behavior).")
     args = parser.parse_args()
 
     try:

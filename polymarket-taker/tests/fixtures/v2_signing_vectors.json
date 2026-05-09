@@ -1,0 +1,167 @@
+{
+  "_meta": {
+    "description": "V2 EIP-712 signing test vectors. Source of truth for Rust orders_v2.rs.",
+    "domain_name": "Polymarket CTF Exchange",
+    "domain_version": "2",
+    "order_type_string": "Order(uint256 salt,address maker,address signer,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)",
+    "domain_type_string": "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    "exchange_v2": "0xE111180000d2663C0091e4f400237545B87B996B",
+    "neg_risk_exchange_v2": "0xe2222d279d744050d28e00520010520000310F59",
+    "chain_id": 137
+  },
+  "vectors": [
+    {
+      "name": "standard_eoa_no_builder",
+      "input": {
+        "privkey": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "chain_id": 137,
+        "exchange_address": "0xE111180000d2663C0091e4f400237545B87B996B",
+        "neg_risk": false,
+        "order": {
+          "salt": "12345678901234567890",
+          "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "token_id": "71321045679252586228888434884664116321016356868447968942908055175859089714324",
+          "maker_amount": "10000000",
+          "taker_amount": "20000000",
+          "side": 0,
+          "signature_type": 0,
+          "timestamp": "1714435200000",
+          "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "expiration": "0"
+        }
+      },
+      "expected": {
+        "type_hash": "0xbb86318a2138f5fa8ae32fbe8e659f8fcf13cc6ae4014a707893055433818589",
+        "domain_separator": "0x3264e159346253e26a64e00b69032db0e7d32f94628de3e6eecb50304d7af3d2",
+        "struct_hash": "0xfed1f4de065c2944e397323f04822bfadef9b77ee63235fee19db3cd48aa6379",
+        "eip712_digest": "0xbca244912fd1f44490dd3db39816c30ac52abc6e0e504b137b662954f66556ec",
+        "signature": "0xf05b42b4ce899d58caef8f7812dac0aa457ad8cce503b8d12965942edb054679637a84c4ca5d9b7772c573762da09485416191d4bbb7e20d31569bf5de9fa8d91b",
+        "json_body": {
+          "order": {
+            "salt": 12345678901234567890,
+            "maker": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "tokenId": "71321045679252586228888434884664116321016356868447968942908055175859089714324",
+            "makerAmount": "10000000",
+            "takerAmount": "20000000",
+            "side": "BUY",
+            "expiration": "0",
+            "signatureType": 0,
+            "timestamp": "1714435200000",
+            "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "builder": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "signature": "0xf05b42b4ce899d58caef8f7812dac0aa457ad8cce503b8d12965942edb054679637a84c4ca5d9b7772c573762da09485416191d4bbb7e20d31569bf5de9fa8d91b"
+          },
+          "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cfffB92266",
+          "orderType": "GTC",
+          "deferExec": false,
+          "postOnly": false
+        }
+      }
+    },
+    {
+      "name": "standard_proxy_with_builder",
+      "input": {
+        "privkey": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "chain_id": 137,
+        "exchange_address": "0xE111180000d2663C0091e4f400237545B87B996B",
+        "neg_risk": false,
+        "order": {
+          "salt": "987654321098765432",
+          "maker": "0x000000000000000000000000000000000000bEEF",
+          "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "token_id": "71321045679252586228888434884664116321016356868447968942908055175859089714324",
+          "maker_amount": "5000000",
+          "taker_amount": "12500000",
+          "side": 1,
+          "signature_type": 1,
+          "timestamp": "1714435260000",
+          "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "builder": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "expiration": "0"
+        }
+      },
+      "expected": {
+        "type_hash": "0xbb86318a2138f5fa8ae32fbe8e659f8fcf13cc6ae4014a707893055433818589",
+        "domain_separator": "0x3264e159346253e26a64e00b69032db0e7d32f94628de3e6eecb50304d7af3d2",
+        "struct_hash": "0x0ac41a8e5ccf1e64883d2a50f1edcdb821b9b7a18b09c7e7018af101c1aabbae",
+        "eip712_digest": "0x482ca4771c8d504a317c40ff569ac411dc27d8a3e9c5a68de6c678af90b514d9",
+        "signature": "0xa317c04d7e5fcf04e4ac14420bd096d85a16454252dae1745574d530f38d7dba00a33277b2641e002dd5db1f1c06f1e3fc269bf19e1759767140b368edcbb0cf1b",
+        "json_body": {
+          "order": {
+            "salt": 987654321098765432,
+            "maker": "0x000000000000000000000000000000000000bEEF",
+            "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "tokenId": "71321045679252586228888434884664116321016356868447968942908055175859089714324",
+            "makerAmount": "5000000",
+            "takerAmount": "12500000",
+            "side": "SELL",
+            "expiration": "0",
+            "signatureType": 1,
+            "timestamp": "1714435260000",
+            "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "builder": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "signature": "0xa317c04d7e5fcf04e4ac14420bd096d85a16454252dae1745574d530f38d7dba00a33277b2641e002dd5db1f1c06f1e3fc269bf19e1759767140b368edcbb0cf1b"
+          },
+          "owner": "0x000000000000000000000000000000000000Beef",
+          "orderType": "GTC",
+          "deferExec": false,
+          "postOnly": false
+        }
+      }
+    },
+    {
+      "name": "negrisk_proxy_with_builder",
+      "input": {
+        "privkey": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+        "chain_id": 137,
+        "exchange_address": "0xe2222d279d744050d28e00520010520000310F59",
+        "neg_risk": true,
+        "order": {
+          "salt": "42000000000",
+          "maker": "0x000000000000000000000000000000000000bEEF",
+          "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "token_id": "44444444444444444444444444444444444444444444444444444444444444444444444444444",
+          "maker_amount": "2500000",
+          "taker_amount": "10000000",
+          "side": 0,
+          "signature_type": 1,
+          "timestamp": "1714435320000",
+          "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "builder": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "expiration": "0"
+        }
+      },
+      "expected": {
+        "type_hash": "0xbb86318a2138f5fa8ae32fbe8e659f8fcf13cc6ae4014a707893055433818589",
+        "domain_separator": "0x9b858f53327b0bd13af8ec14cfb35234fb9eb7b0504d1a4e61f433840d30e81a",
+        "struct_hash": "0x03781141c99eaaf4cd6842ed4ee4202e4da90d7f03abeb6a1b8cecdd632ebefd",
+        "eip712_digest": "0xc5f1a430d012172599c28bd1ec8c76ac5657e2224b7899a038ce1d73c9dedef8",
+        "signature": "0xc42765cf2e274ad1602776ba5f05d2254e1df74995bf3a60458b773333c2052f4acc7b33cf1c59676790135ef7d9bcc4ccca979f9423a7a6ee26573e2592889f1b",
+        "json_body": {
+          "order": {
+            "salt": 42000000000,
+            "maker": "0x000000000000000000000000000000000000bEEF",
+            "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+            "tokenId": "44444444444444444444444444444444444444444444444444444444444444444444444444444",
+            "makerAmount": "2500000",
+            "takerAmount": "10000000",
+            "side": "BUY",
+            "expiration": "0",
+            "signatureType": 1,
+            "timestamp": "1714435320000",
+            "metadata": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "builder": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "signature": "0xc42765cf2e274ad1602776ba5f05d2254e1df74995bf3a60458b773333c2052f4acc7b33cf1c59676790135ef7d9bcc4ccca979f9423a7a6ee26573e2592889f1b"
+          },
+          "owner": "0x000000000000000000000000000000000000Beef",
+          "orderType": "GTC",
+          "deferExec": false,
+          "postOnly": false
+        }
+      }
+    }
+  ]
+}

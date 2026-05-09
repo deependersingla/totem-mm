@@ -9,7 +9,7 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;min-height:100vh;padding:0;padding-bottom:70px}
 h1{font-size:20px;color:#58a6ff}
 h2{font-size:14px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:900px;margin:0 auto;padding:16px}
+.grid{display:grid;grid-template-columns:1fr;gap:12px;max-width:none;margin:0;padding:16px}
 .full{grid-column:1/-1}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px}
 .status-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
@@ -55,7 +55,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 /* Sticky header */
 .sticky-header{position:sticky;top:0;z-index:50;background:#0f1117;border-bottom:1px solid #30363d;padding:10px 16px}
-.header-inner{max-width:900px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.header-inner{max-width:none;margin:0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
 
 /* Bottom tab bar */
 .bottom-bar{position:fixed;bottom:0;left:0;right:0;background:#161b22;border-top:1px solid #30363d;display:flex;justify-content:center;gap:0;padding:8px 16px;z-index:100}
@@ -75,6 +75,36 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 /* Latency bar */
 .latency-bar{font-size:12px;color:#8b949e;font-family:'SF Mono',Monaco,Consolas,monospace;padding:8px 12px;background:#0d1117;border-radius:6px;text-align:center}
+
+/* Signal-group panel (Trade Legs) */
+.sg-card{background:#0d1117;border:1px solid #1b1f27;border-radius:5px;margin-bottom:6px;font-size:12px}
+.sg-head{display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;user-select:none;flex-wrap:wrap}
+.sg-head:hover{background:#161b22}
+.sg-head .chev{color:#8b949e;font-size:10px;width:10px}
+.sg-tag{font-weight:700;color:#58a6ff;min-width:32px}
+.sg-evt{color:#484f58;font-size:10px;min-width:38px}
+.sg-teams{color:#c9d1d9;font-size:11px;flex:1;min-width:200px}
+.sg-pnl{font-weight:700;font-size:12px;min-width:80px;text-align:right}
+.sg-fee{color:#d29922;font-size:11px;min-width:64px;text-align:right}
+.sg-outcome{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:2px 6px;border-radius:3px;font-weight:600}
+.sg-outcome.open{background:#1f6feb33;color:#79c0ff}
+.sg-outcome.closed{background:#23863633;color:#3fb950}
+.sg-outcome.wait{background:#d2992233;color:#d29922}
+.sg-outcome.book_stale,.sg-outcome.out_of_range,.sg-outcome.no_liquidity,.sg-outcome.skipped{background:#30363d;color:#8b949e}
+.sg-outcome.augmented{background:#bc8cff33;color:#bc8cff}
+.sg-badges{display:flex;gap:3px}
+.sg-badge{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:#30363d;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px}
+.sg-badge.b-pending,.sg-badge.b-not_planned{background:#30363d;color:#8b949e}
+.sg-badge.b-posted{background:#1f6feb33;color:#79c0ff}
+.sg-badge.b-filled{background:#23863633;color:#3fb950}
+.sg-badge.b-partial{background:#d2992233;color:#d29922}
+.sg-badge.b-killed,.sg-badge.b-rejected,.sg-badge.b-cancelled{background:#f8514922;color:#f85149}
+.sg-badge.b-augmented{background:#bc8cff33;color:#bc8cff}
+.sg-badge.b-taker_exit{background:#d2992233;color:#d29922;border:1px solid #d2992288}
+.sg-body{display:none;padding:6px 10px 8px;border-top:1px solid #1b1f27;background:#0a0d12;font-size:11px}
+.sg-body.open{display:block}
+.sg-body table{width:100%;border-collapse:collapse}
+.sg-body td,.sg-body th{padding:3px 6px;font-size:11px}
 </style>
 </head>
 <body>
@@ -231,67 +261,53 @@ button:disabled{opacity:.4;cursor:not-allowed}
 <!-- ======================== TAKER TAB ======================== -->
 <div id="tab-taker" class="tab-content">
 
-  <!-- Taker Position Card -->
+  <!-- Position — compact stat row -->
   <div class="card full">
-    <h2>Position</h2>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <div class="stat"><span id="teamALabel">TEAM_A</span> <strong id="teamATokens">0</strong></div>
-      <div class="stat"><span id="teamBLabel">TEAM_B</span> <strong id="teamBTokens">0</strong></div>
-      <div class="stat"><span>Spent</span> <strong id="spent">0</strong> / <strong id="budget">100</strong></div>
-      <div class="stat"><span>Remaining</span> <strong id="remaining">100</strong></div>
-      <div class="stat"><span>Trades</span> <strong id="trades">0</strong></div>
-      <div class="stat"><span>Live Orders</span> <strong id="liveOrders">0</strong></div>
-      <div class="stat"><span>Batting</span> <strong id="batting">--</strong></div>
-      <div class="stat"><span>Bowling</span> <strong id="bowling">--</strong></div>
-      <div class="stat"><span>Innings</span> <strong id="innings">1</strong></div>
+    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;font-size:13px">
+      <span style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;font-weight:600">Position</span>
+      <span><span style="color:#8b949e" id="teamALabel">TEAM_A</span> <strong id="teamATokens">0</strong></span>
+      <span><span style="color:#8b949e" id="teamBLabel">TEAM_B</span> <strong id="teamBTokens">0</strong></span>
+      <span><span style="color:#8b949e">Spent</span> <strong id="spent">0</strong> / <strong id="budget">100</strong></span>
+      <span><span style="color:#8b949e">Remaining</span> <strong id="remaining">100</strong></span>
+      <span><span style="color:#8b949e">Trades</span> <strong id="trades">0</strong></span>
+      <span><span style="color:#8b949e">Live</span> <strong id="liveOrders">0</strong></span>
+      <span style="margin-left:auto"><span style="color:#8b949e">Batting</span> <strong id="batting">--</strong> / <span style="color:#8b949e">Bowling</span> <strong id="bowling">--</strong> · <span style="color:#8b949e">Innings</span> <strong id="innings">1</strong></span>
     </div>
   </div>
 
-  <!-- Taker Limits Card -->
+  <!-- Match Controls — small inline buttons -->
   <div class="card full">
-    <h2>Limits</h2>
-    <div class="row">
-      <div><label>Budget ($)</label><input id="lBudget" type="number" value="100"></div>
-      <div><label>Max Trade ($)</label><input id="lMaxTrade" type="number" value="10"></div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      <span style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-right:8px">Controls</span>
+      <button id="btnStart" class="ctrl-btn" style="background:#1c3325;color:#3fb950;border:none;border-radius:6px;font-size:12px;padding:6px 14px;font-weight:600;cursor:pointer" onclick="startInnings()">Start Innings</button>
+      <button id="btnStop" class="ctrl-btn" style="background:#3d2d00;color:#d29922;border:none;border-radius:6px;font-size:12px;padding:6px 14px;font-weight:600;cursor:pointer" onclick="stopInnings()" disabled>Stop Innings</button>
+      <button id="btnMO" class="ctrl-btn" style="background:#3d1014;color:#f85149;border:none;border-radius:6px;font-size:12px;padding:6px 14px;font-weight:600;cursor:pointer" onclick="matchOver()">Match Over</button>
+      <button class="ctrl-btn" style="background:#3d1014;color:#f85149;border:none;border-radius:6px;font-size:12px;padding:6px 14px;font-weight:600;cursor:pointer" onclick="cancelAll()">Cancel All</button>
+      <button class="ctrl-btn" style="background:#21262d;color:#c9d1d9;border:none;border-radius:6px;font-size:12px;padding:6px 14px;font-weight:600;cursor:pointer" onclick="resetMatch()">Reset</button>
     </div>
-    <div class="row">
-      <div><label>Safe % (cents)</label><input id="lSafePct" type="number" value="2" min="1" max="49"></div>
-      <div><label>Revert Delay (ms)</label><input id="lDelay" type="number" value="3000"></div>
-    </div>
-    <div class="row">
-      <div><label>Fill Poll (ms)</label><input id="lPollInterval" type="number" value="500" min="100"></div>
-      <div><label>Poll Timeout (ms)</label><input id="lPollTimeout" type="number" value="5000" min="1000"></div>
-    </div>
-    <div class="row">
-      <div><label>Dry Run</label>
-        <select id="lDryRun"><option value="true">Yes</option><option value="false">No</option></select>
-      </div>
-    </div>
-    <div style="border-top:1px solid #21262d;margin-top:10px;padding-top:8px">
-      <div style="font-size:12px;color:#8b949e;font-weight:600;margin-bottom:6px">Revert Edge (profit margin on GTC limit orders)</div>
-      <div class="row">
-        <div><label>Wicket W (%)</label><input id="lEdgeW" type="number" value="2" min="0" max="50" step="0.1"></div>
-        <div><label>Boundary 4 (%)</label><input id="lEdge4" type="number" value="1" min="0" max="50" step="0.1"></div>
-        <div><label>Boundary 6 (%)</label><input id="lEdge6" type="number" value="1" min="0" max="50" step="0.1"></div>
-      </div>
-      <div style="font-size:11px;color:#8b949e;margin-top:4px">SELL revert: limit = buy_price x (1 + edge%). BUY revert: limit = sell_price x (1 - edge%). Higher edge = more profit per fill but slower to fill.</div>
-    </div>
-    <div style="font-size:11px;color:#8b949e;margin-top:4px">Safe %: skip trades when price &lt; X cents or &gt; (100-X) cents. Fill poll: how often to check FAK fill status before placing GTC revert.</div>
-    <button class="btn-primary" style="margin-top:10px;width:100%" onclick="saveLimits()">Save Limits</button>
   </div>
 
-  <!-- Match Controls Card -->
+  <!-- Limits — compact inline form (tunable mid-match) -->
   <div class="card full">
-    <h2>Match Controls</h2>
-    <div class="row" style="margin-bottom:8px">
-      <button id="btnStart" class="btn-primary" onclick="startInnings()">Start Innings</button>
-      <button id="btnStop" class="btn-warn" onclick="stopInnings()" disabled>Stop Innings</button>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+      <span style="color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:1px;font-weight:600;margin-right:4px;align-self:center">Limits</span>
+      <div style="min-width:90px"><label style="font-size:10px">Budget $</label><input id="lBudget" type="number" value="100" style="font-size:12px;padding:4px 6px"></div>
+      <div style="min-width:90px"><label style="font-size:10px">Max $</label><input id="lMaxTrade" type="number" value="10" style="font-size:12px;padding:4px 6px"></div>
+      <div style="min-width:80px"><label style="font-size:10px">Safe %</label><input id="lSafePct" type="number" value="2" min="1" max="49" style="font-size:12px;padding:4px 6px" title="Skip when price < X¢ or > (100-X)¢"></div>
+      <div style="min-width:110px"><label style="font-size:10px">Revert Timeout ms</label><input id="lRevertTimeout" type="number" value="15000" min="0" step="1000" style="font-size:12px;padding:4px 6px" title="Maker→taker fallback. 0 disables."></div>
+      <div style="min-width:70px"><label style="font-size:10px">Edge W</label><input id="lEdgeW" type="number" value="2" min="0" max="50" step="0.1" style="font-size:12px;padding:4px 6px"></div>
+      <div style="min-width:70px"><label style="font-size:10px">Edge 4</label><input id="lEdge4" type="number" value="1" min="0" max="50" step="0.1" style="font-size:12px;padding:4px 6px"></div>
+      <div style="min-width:70px"><label style="font-size:10px">Edge 6</label><input id="lEdge6" type="number" value="1" min="0" max="50" step="0.1" style="font-size:12px;padding:4px 6px"></div>
+      <div style="min-width:80px"><label style="font-size:10px">Dry Run</label><select id="lDryRun" style="font-size:12px;padding:4px 6px"><option value="true">Yes</option><option value="false">No</option></select></div>
+      <button class="btn-signal" style="font-size:12px;padding:6px 14px;min-width:0;background:#1c3325;color:#3fb950" onclick="saveLimits()">Save</button>
     </div>
-    <div class="row">
-      <button id="btnMO" class="btn-danger" onclick="matchOver()">Match Over</button>
-      <button class="btn-danger" onclick="cancelAll()">Cancel All Orders</button>
-    </div>
-    <button class="btn-warn" style="margin-top:8px;width:100%" onclick="resetMatch()">Reset (New Match)</button>
+  </div>
+
+  <!-- Trade Legs (per-signal 4-leg lifecycle) -->
+  <div class="card full">
+    <h2>Trade Legs <span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:6px">— one row per trade-triggering signal · click to expand · 4 legs per row</span></h2>
+    <div id="signalGroups" style="max-height:360px;overflow-y:auto;font-family:'SF Mono',Monaco,Consolas,monospace"></div>
+    <div id="signalGroupsEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No signals yet</div>
   </div>
 
   <!-- Taker Trade Log -->
@@ -316,48 +332,56 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div id="tradeEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No trades yet</div>
   </div>
 
-  <!-- Open / Pending Orders + Round-Trip PnL -->
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" class="full">
-    <div class="card">
-      <h2>Open Orders <span style="font-size:10px;color:#484f58;font-weight:normal">(CLOB)</span></h2>
-      <div style="max-height:250px;overflow-y:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
-          <thead><tr style="border-bottom:2px solid #30363d">
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Size</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
-            <th style="padding:4px 6px"></th>
-          </tr></thead>
-          <tbody id="openOrdersBody"></tbody>
-        </table>
-      </div>
-      <div id="openOrdersEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No open orders</div>
-
-      <h2 style="margin-top:12px">Pending Reverts</h2>
-      <div style="max-height:200px;overflow-y:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
-          <thead><tr style="border-bottom:2px solid #30363d">
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Label</th>
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
-            <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Limit</th>
-            <th style="text-align:right;padding:4px 6px;color:#8b949e">Age</th>
-            <th style="padding:4px 6px"></th>
-          </tr></thead>
-          <tbody id="revertsBody"></tbody>
-        </table>
-      </div>
-      <div id="revertsEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No pending reverts</div>
+  <!-- Open Orders — full width -->
+  <div class="card full">
+    <h2>Open Orders <span style="font-size:10px;color:#484f58;font-weight:normal">(CLOB)</span></h2>
+    <div style="max-height:300px;overflow-y:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <thead><tr style="border-bottom:2px solid #30363d">
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Price</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Size</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Filled</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Status</th>
+          <th style="padding:4px 6px"></th>
+        </tr></thead>
+        <tbody id="openOrdersBody"></tbody>
+      </table>
     </div>
+    <div id="openOrdersEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No open orders</div>
+  </div>
 
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <h2>Round-Trip PnL</h2>
-        <span id="rtPnlTotal" style="font-size:16px;font-weight:700;color:#8b949e">$0.00</span>
+  <!-- Pending Reverts — full width -->
+  <div class="card full">
+    <h2>Pending Reverts</h2>
+    <div style="max-height:300px;overflow-y:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <thead><tr style="border-bottom:2px solid #30363d">
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Label</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Side</th>
+          <th style="text-align:left;padding:4px 6px;color:#8b949e">Team</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Entry</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Limit</th>
+          <th style="text-align:right;padding:4px 6px;color:#8b949e">Age</th>
+          <th style="padding:4px 6px"></th>
+        </tr></thead>
+        <tbody id="revertsBody"></tbody>
+      </table>
+    </div>
+    <div id="revertsEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No pending reverts</div>
+  </div>
+
+  <!-- Round-Trip PnL — full width -->
+  <div class="card full">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2>Round-Trip PnL</h2>
+      <span id="rtPnlTotal" style="font-size:16px;font-weight:700;color:#8b949e">$0.00</span>
+    </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:11px;margin-top:4px;margin-bottom:6px;font-family:'SF Mono',Monaco,Consolas,monospace">
+        <span>Gross: <strong id="grossPnl" style="color:#8b949e">$0.0000</strong></span>
+        <span style="color:#d29922">Fees: <strong id="feesPaid">$0.0000</strong></span>
+        <span>Net: <strong id="netPnl" style="color:#8b949e">$0.0000</strong></span>
       </div>
       <div style="max-height:450px;overflow-y:auto">
         <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'SF Mono',Monaco,Consolas,monospace">
@@ -373,8 +397,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <tbody id="rtBody"></tbody>
         </table>
       </div>
-      <div id="rtEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No round-trips yet</div>
-    </div>
+    <div id="rtEmpty" style="font-size:12px;color:#484f58;padding:8px 0">No round-trips yet</div>
   </div>
 
 </div>
@@ -442,63 +465,32 @@ button:disabled{opacity:.4;cursor:not-allowed}
     <div class="stat" style="margin-top:6px"><span>Status</span> <strong id="walletStatus">Not Set</strong></div>
   </div>
 
-  <!-- Wallets & Balances Card -->
+  <!-- Wallets & pUSD Balance Card (V2) -->
   <div class="card full">
-    <h2>Wallets &amp; Balances <button class="btn-primary" style="font-size:11px;padding:3px 10px;float:right" onclick="refreshWallets()">Refresh</button></h2>
+    <h2>Wallets &amp; pUSD Balance <button class="btn-primary" style="font-size:11px;padding:3px 10px;float:right" onclick="refreshWallets()">Refresh</button></h2>
     <div style="margin-bottom:8px">
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px">EOA (MetaMask -- signs, pays gas)</div>
       <div style="font-size:10px;color:#58a6ff;word-break:break-all;font-family:monospace" id="wBalEoa">--</div>
-      <div class="stat"><span>USDC (EOA)</span> <strong id="wBalEoaUsdc">--</strong></div>
     </div>
-    <div>
-      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Proxy (Polymarket -- holds USDC, maker of trades)</div>
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px">Proxy (Polymarket -- holds collateral, maker of trades)</div>
       <div style="font-size:10px;color:#3fb950;word-break:break-all;font-family:monospace" id="wBalProxy">--</div>
-      <div class="stat"><span>USDC (Proxy)</span> <strong id="wBalProxyUsdc">--</strong></div>
     </div>
-    <div id="wPositions" style="margin-top:8px;font-size:11px"></div>
+    <div style="border-top:1px solid #21262d;padding-top:8px">
+      <div class="stat"><span>pUSD balance</span> <strong id="wPusdBalance">--</strong></div>
+      <div class="stat"><span>V2 exchange allowance</span> <strong id="wPusdAllowance">--</strong></div>
+      <div id="wPusdStatus" style="font-size:11px;color:#8b949e;margin-top:4px"></div>
+    </div>
   </div>
 
-  <!-- CTF On-Chain Card -->
+  <!-- Polymarket Positions (read-only, enriched from data-api) -->
   <div class="card full">
-    <h2>CTF On-Chain</h2>
-    <div class="row" style="margin-bottom:8px">
-      <div style="flex:2">
-        <label>CTF Amount (USDC / tokens)</label>
-        <input id="ctfAmount" type="number" value="10" min="1" step="1">
-      </div>
-      <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
-        <button class="btn-primary" style="flex:1" onclick="ctfSplit()">Split USDC Tokens</button>
-        <button class="btn-warn" style="flex:1" onclick="ctfMerge()">Merge Tokens USDC</button>
-        <button class="btn-danger" style="flex:1" onclick="ctfRedeem()">Redeem (Post-Resolve)</button>
-      </div>
-    </div>
-    <div style="border-top:1px solid #21262d;padding-top:8px;margin-top:4px">
-      <div style="font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:600">Move Funds (EOA / Proxy)</div>
-      <div class="row" style="margin-bottom:6px">
-        <button class="btn-primary" style="flex:1" onclick="moveTokens('to_proxy')">Move All Tokens to Proxy</button>
-        <button class="btn-warn" style="flex:1" onclick="moveTokens('to_eoa')">Move All Tokens to EOA</button>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <div style="flex:2">
-          <label>USDC Amount ($)</label>
-          <input id="moveUsdcAmt" type="number" value="50" min="1" step="1">
-        </div>
-        <div style="flex:3;display:flex;gap:8px;align-items:flex-end">
-          <button class="btn-primary" style="flex:1" onclick="moveUsdc('to_proxy')">USDC to Proxy</button>
-          <button class="btn-warn" style="flex:1" onclick="moveUsdc('to_eoa')">USDC to EOA</button>
-        </div>
-      </div>
-    </div>
-    <div style="margin-top:8px;display:flex;gap:8px">
-      <button class="btn-primary" style="background:#30363d" onclick="ctfSyncBalance()">Sync On-Chain Balances</button>
-      <button class="btn-primary" style="background:#6e40c9" onclick="megaResolve()">Mega Resolve (All Positions)</button>
-    </div>
-    <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.6">
-      <b>Split:</b> $X USDC into X YES + X NO |
-      <b>Merge:</b> X YES + X NO into $X USDC |
-      <b>Redeem:</b> winning tokens into USDC (post-resolve) |
-      <b>Tokens to Proxy:</b> move YES+NO from your MetaMask wallet into the proxy for CLOB trading |
-      <b>USDC to Proxy:</b> deposit USDC into proxy before splitting
+    <h2>Polymarket Positions <span style="font-size:10px;color:#484f58">(live, polls every 10s)</span></h2>
+    <div id="positions-status" style="font-size:11px;color:#8b949e;margin-bottom:6px">loading…</div>
+    <div id="positions-table"></div>
+    <div style="font-size:11px;color:#8b949e;margin-top:6px;line-height:1.5">
+      Read-only view of your Polymarket holdings. To split / merge / redeem / migrate
+      USDC.e → pUSD, use <a href="https://polymarket.com" target="_blank" rel="noopener" style="color:#58a6ff">polymarket.com</a> directly.
     </div>
   </div>
 
@@ -590,10 +582,10 @@ async function pollStatus() {
 
     el('bookALabel').textContent = s.team_a_name;
     el('bookBLabel').textContent = s.team_b_name;
-    el('aBid').textContent = s.book_a_bid != null ? s.book_a_bid+'c' : '--';
-    el('aAsk').textContent = s.book_a_ask != null ? s.book_a_ask+'c' : '--';
-    el('bBid').textContent = s.book_b_bid != null ? s.book_b_bid+'c' : '--';
-    el('bAsk').textContent = s.book_b_ask != null ? s.book_b_ask+'c' : '--';
+    el('aBid').textContent = s.book_a_bid != null ? fmtPx(s.book_a_bid)+'c' : '--';
+    el('aAsk').textContent = s.book_a_ask != null ? fmtPx(s.book_a_ask)+'c' : '--';
+    el('bBid').textContent = s.book_b_bid != null ? fmtPx(s.book_b_bid)+'c' : '--';
+    el('bAsk').textContent = s.book_b_ask != null ? fmtPx(s.book_b_ask)+'c' : '--';
 
     el('batting').textContent = s.batting;
     el('bowling').textContent = s.bowling;
@@ -653,9 +645,7 @@ async function loadConfig() {
     document.getElementById('lBudget').value = c.total_budget_usdc;
     document.getElementById('lMaxTrade').value = c.max_trade_usdc;
     document.getElementById('lSafePct').value = c.safe_percentage;
-    document.getElementById('lDelay').value = c.revert_delay_ms;
-    document.getElementById('lPollInterval').value = c.fill_poll_interval_ms;
-    document.getElementById('lPollTimeout').value = c.fill_poll_timeout_ms;
+    if (c.revert_timeout_ms != null) document.getElementById('lRevertTimeout').value = c.revert_timeout_ms;
     document.getElementById('lDryRun').value = String(c.dry_run);
     if (c.edge_wicket != null) document.getElementById('lEdgeW').value = c.edge_wicket;
     if (c.edge_boundary_4 != null) document.getElementById('lEdge4').value = c.edge_boundary_4;
@@ -683,25 +673,54 @@ async function refreshWallets() {
     const w = await api('/api/wallets');
     document.getElementById('wBalEoa').textContent = w.eoa_address || '--';
     document.getElementById('wBalProxy').textContent = w.proxy_address || '--';
-    document.getElementById('wBalEoaUsdc').textContent = w.eoa_usdc != null ? '$' + parseFloat(w.eoa_usdc).toFixed(2) : '--';
-    document.getElementById('wBalProxyUsdc').textContent = w.proxy_usdc != null ? '$' + parseFloat(w.proxy_usdc).toFixed(2) : '--';
-    // Render positions
-    const pos = document.getElementById('wPositions');
-    const positions = Array.isArray(w.positions) ? w.positions : [];
-    if (positions.length === 0) {
-      pos.textContent = '';
-    } else {
-      pos.innerHTML = '<div style="color:#8b949e;margin-bottom:4px">Open Positions (proxy)</div>' +
-        positions.slice(0, 10).map(p => {
-          const slug = p.market?.slug || p.conditionId || '?';
-          const outcome = p.outcome || p.side || '?';
-          const size = parseFloat(p.size || 0).toFixed(2);
-          const val = p.currentValue != null ? ' ($' + parseFloat(p.currentValue).toFixed(2) + ')' : '';
-          return '<div style="display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid #21262d"><span style="color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">' + slug + '</span><span style="color:#3fb950;white-space:nowrap">' + outcome + ' ' + size + val + '</span></div>';
-        }).join('');
-    }
     if (w.eoa_address) document.getElementById('wEoa').value = w.eoa_address;
   } catch(e) {}
+  // Pull V2 pUSD balance + V2 exchange allowance from CLOB.
+  pollBalance();
+}
+
+async function pollBalance() {
+  const balEl = document.getElementById('wPusdBalance');
+  const allowEl = document.getElementById('wPusdAllowance');
+  const statusEl = document.getElementById('wPusdStatus');
+  if (!balEl) return;
+  try {
+    const r = await fetch('/api/balance');
+    if (!r.ok) {
+      const t = await r.text();
+      balEl.textContent = '--';
+      allowEl.textContent = '--';
+      statusEl.textContent = 'balance: ' + r.status + ' — ' + t.slice(0, 120);
+      statusEl.style.color = '#8b949e';
+      return;
+    }
+    const j = await r.json();
+    // CLOB returns 6-decimal strings. Normalize to USD.
+    const toUsd = (v) => {
+      if (v === null || v === undefined) return null;
+      const n = typeof v === 'string' ? parseFloat(v) : Number(v);
+      return isNaN(n) ? null : n / 1e6;
+    };
+    const bal = toUsd(j.balance);
+    const allow = toUsd(j.allowance);
+    balEl.textContent = bal != null ? '$' + bal.toFixed(2) + ' pUSD' : '--';
+    if (allow == null) {
+      allowEl.textContent = '--';
+    } else if (allow >= 1e9) {
+      allowEl.textContent = '∞ (max-approved)';
+      allowEl.style.color = '#3fb950';
+    } else if (allow > 0) {
+      allowEl.textContent = '$' + allow.toFixed(2) + ' approved';
+      allowEl.style.color = '#3fb950';
+    } else {
+      allowEl.textContent = 'NOT APPROVED — visit polymarket.com to approve';
+      allowEl.style.color = '#f85149';
+    }
+    statusEl.textContent = '';
+  } catch(e) {
+    statusEl.textContent = 'balance: error — ' + e.message;
+    statusEl.style.color = '#f85149';
+  }
 }
 
 async function saveSetup() {
@@ -739,9 +758,7 @@ async function saveLimits() {
     total_budget_usdc: document.getElementById('lBudget').value,
     max_trade_usdc: document.getElementById('lMaxTrade').value,
     safe_percentage: parseInt(document.getElementById('lSafePct').value),
-    revert_delay_ms: parseInt(document.getElementById('lDelay').value),
-    fill_poll_interval_ms: parseInt(document.getElementById('lPollInterval').value),
-    fill_poll_timeout_ms: parseInt(document.getElementById('lPollTimeout').value),
+    revert_timeout_ms: parseInt(document.getElementById('lRevertTimeout').value),
     dry_run: document.getElementById('lDryRun').value === 'true',
     edge_wicket: parseFloat(document.getElementById('lEdgeW').value),
     edge_boundary_4: parseFloat(document.getElementById('lEdge4').value),
@@ -763,46 +780,8 @@ async function resetMatch() {
 }
 async function sendSignal(sig) { await api('/api/signal', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({signal:sig})}); }
 
-async function ctfSplit() {
-  const amt = parseInt(document.getElementById('ctfAmount').value);
-  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
-  if (!confirm('Split $' + amt + ' USDC into ' + amt + ' YES + ' + amt + ' NO tokens?')) return;
-  await api('/api/ctf-split', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({amount_usdc: amt})});
-}
-async function ctfMerge() {
-  const amt = parseInt(document.getElementById('ctfAmount').value);
-  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
-  if (!confirm('Merge ' + amt + ' YES + ' + amt + ' NO tokens back into $' + amt + ' USDC?')) return;
-  await api('/api/ctf-merge', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({amount_tokens: amt})});
-}
-async function ctfRedeem() {
-  if (!confirm('Redeem all winning tokens for USDC? (market must be resolved)')) return;
-  await api('/api/ctf-redeem', {method:'POST'});
-}
-async function ctfSyncBalance() {
-  await api('/api/ctf-balance', {method:'POST'});
-}
-async function moveTokens(direction) {
-  const label = direction === 'to_proxy' ? 'EOA to Proxy' : 'Proxy to EOA';
-  if (!confirm('Move ALL YES + NO tokens (' + label + ')?\nThis transfers your full token balance.')) return;
-  await api('/api/move-tokens', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({direction: direction})});
-}
-async function moveUsdc(direction) {
-  const amt = parseInt(document.getElementById('moveUsdcAmt').value);
-  if (!amt || amt <= 0) { showToast('enter a positive amount'); return; }
-  const label = direction === 'to_proxy' ? 'EOA to Proxy' : 'Proxy to EOA';
-  if (!confirm('Move $' + amt + ' USDC (' + label + ')?')) return;
-  await api('/api/move-usdc', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({amount_usdc: amt, direction: direction})});
-}
 async function toggleTeam(team, enabled) {
   await api('/api/toggle-team', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({team: team, enabled: enabled})});
-}
-
-async function megaResolve() {
-  if (!confirm('Try to redeem ALL resolved positions? This will attempt redeem on every condition_id found in your open positions.')) return;
-  await api('/api/mega-resolve', {method:'POST'});
 }
 
 async function fetchMarket() {
@@ -993,16 +972,26 @@ function drawChart(dataA, dataB, nameA, nameB) {
     '<span style="color:' + colorB + '">&#9679; ' + nameB + ' ' + lastB + '</span>';
 }
 
+// Adaptive price formatter — 0.01-tick markets show "0.21", 0.001-tick
+// markets (endgame) show "0.001" / "0.999". Up to 4 decimals, trailing
+// zeros stripped. Avoids the toFixed(2) bug that flattened sub-cent ticks
+// to 0.00 / 0.01.
+function fmtPx(s) {
+  const p = parseFloat(s);
+  if (!isFinite(p)) return s;
+  return p.toFixed(4).replace(/\.?0+$/, '') || '0';
+}
+
 function renderBookTable(bodyId, bids, asks) {
   const rows = Math.max(bids.length, asks.length, 5);
   let html = '';
   for (let i = 0; i < rows; i++) {
     const bid = bids[i], ask = asks[i];
     html += '<tr>' +
-      '<td style="text-align:left;color:#3fb950;padding:3px 6px">' + (bid ? parseFloat(bid.price).toFixed(2) : '--') + '</td>' +
+      '<td style="text-align:left;color:#3fb950;padding:3px 6px">' + (bid ? fmtPx(bid.price) : '--') + '</td>' +
       '<td style="text-align:right;color:#3fb950;padding:3px 6px">' + (bid ? parseFloat(bid.size).toFixed(1) : '') + '</td>' +
       '<td style="border-left:1px solid #21262d"></td>' +
-      '<td style="text-align:left;color:#f85149;padding:3px 6px">' + (ask ? parseFloat(ask.price).toFixed(2) : '--') + '</td>' +
+      '<td style="text-align:left;color:#f85149;padding:3px 6px">' + (ask ? fmtPx(ask.price) : '--') + '</td>' +
       '<td style="text-align:right;color:#f85149;padding:3px 6px">' + (ask ? parseFloat(ask.size).toFixed(1) : '') + '</td>' +
       '</tr>';
   }
@@ -1043,6 +1032,10 @@ async function pollTakerOrders() {
     if (!text) return;
     const d = JSON.parse(text);
 
+    // Trim any tail noise like "0.21000000000000000043715031591" → "0.21".
+    const fmtPrice = (v) => { const n = parseFloat(v); return isFinite(n) ? n.toFixed(4).replace(/\.?0+$/, '') : v; };
+    const fmtSize  = (v) => { const n = parseFloat(v); return isFinite(n) ? n.toFixed(2).replace(/\.?0+$/, '') : v; };
+
     // Open orders
     const ooBody = document.getElementById('openOrdersBody');
     const ooEmpty = document.getElementById('openOrdersEmpty');
@@ -1050,7 +1043,7 @@ async function pollTakerOrders() {
       ooEmpty.style.display = 'none';
       ooBody.innerHTML = d.open_orders.map(o => {
         const sc = o.side === 'BUY' ? 'color:#3fb950' : 'color:#f85149';
-        return `<tr><td style="${sc}">${o.side}</td><td>${o.team}</td><td style="text-align:right">${o.price}</td><td style="text-align:right">${o.original_size}</td><td style="text-align:right">${o.size_matched}</td><td>${o.status}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${o.order_id}')">x</button></td></tr>`;
+        return `<tr><td style="${sc}">${o.side}</td><td>${o.team}</td><td style="text-align:right">${fmtPrice(o.price)}</td><td style="text-align:right">${fmtSize(o.original_size)}</td><td style="text-align:right">${fmtSize(o.size_matched)}</td><td>${o.status}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${o.order_id}')">x</button></td></tr>`;
       }).join('');
     } else {
       ooBody.innerHTML = '';
@@ -1064,25 +1057,38 @@ async function pollTakerOrders() {
       rvEmpty.style.display = 'none';
       rvBody.innerHTML = d.pending_reverts.map(r => {
         const sc = r.side === 'BUY' ? 'color:#3fb950' : 'color:#f85149';
-        return `<tr><td>${r.label}</td><td style="${sc}">${r.side}</td><td>${r.team}</td><td style="text-align:right">${r.entry_price}</td><td style="text-align:right">${r.revert_limit}</td><td style="text-align:right">${r.age_secs.toFixed(0)}s</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${r.order_id}')">x</button></td></tr>`;
+        return `<tr><td>${r.label}</td><td style="${sc}">${r.side}</td><td>${r.team}</td><td style="text-align:right">${fmtPrice(r.entry_price)}</td><td style="text-align:right">${fmtPrice(r.revert_limit)}</td><td style="text-align:right">${r.age_secs.toFixed(0)}s</td><td><button class="btn-danger" style="padding:2px 8px;font-size:10px" onclick="cancelOrder('${r.order_id}')">x</button></td></tr>`;
       }).join('');
     } else {
       rvBody.innerHTML = '';
       rvEmpty.style.display = '';
     }
 
-    // Round-trip PnL
-    const rtPnl = parseFloat(d.round_trip_pnl) || 0;
+    // Round-trip PnL summary — Gross / Fees / Net
+    const grossPnl = parseFloat(d.round_trip_pnl) || 0;
+    const fees = parseFloat(d.total_fee_paid) || 0;
+    const netPnl = (d.net_pnl !== undefined && d.net_pnl !== null) ? parseFloat(d.net_pnl) : grossPnl - fees;
+
     const rtEl = document.getElementById('rtPnlTotal');
-    rtEl.textContent = '$' + rtPnl.toFixed(4);
-    rtEl.style.color = rtPnl > 0 ? '#3fb950' : rtPnl < 0 ? '#f85149' : '#8b949e';
+    rtEl.textContent = '$' + netPnl.toFixed(4);
+    rtEl.style.color = netPnl > 0 ? '#3fb950' : netPnl < 0 ? '#f85149' : '#8b949e';
+
+    const grossEl = document.getElementById('grossPnl');
+    grossEl.textContent = '$' + grossPnl.toFixed(4);
+    grossEl.style.color = grossPnl > 0 ? '#3fb950' : grossPnl < 0 ? '#f85149' : '#8b949e';
+    document.getElementById('feesPaid').textContent = '$' + fees.toFixed(4);
+    const netEl = document.getElementById('netPnl');
+    netEl.textContent = '$' + netPnl.toFixed(4);
+    netEl.style.color = netPnl > 0 ? '#3fb950' : netPnl < 0 ? '#f85149' : '#8b949e';
 
     const rtBody = document.getElementById('rtBody');
     const rtEmpty = document.getElementById('rtEmpty');
     if (d.round_trips && d.round_trips.length > 0) {
       rtEmpty.style.display = 'none';
       rtBody.innerHTML = d.round_trips.map(r => {
-        const p = parseFloat(r.pnl) || 0;
+        // Prefer net_pnl when present (round_trips post-L2 migration);
+        // fall back to gross pnl for legacy rows.
+        const p = parseFloat(r.net_pnl != null ? r.net_pnl : r.pnl) || 0;
         const pc = p > 0 ? '#3fb950' : p < 0 ? '#f85149' : '#8b949e';
         return `<tr><td>${r.label}</td><td>${r.entry_side}</td><td>${r.team}</td><td style="text-align:right">${r.entry_price}</td><td style="text-align:right">${r.exit_price}</td><td style="text-align:right">${r.size}</td><td style="text-align:right;color:${pc}">$${p.toFixed(4)}</td></tr>`;
       }).join('');
@@ -1090,7 +1096,95 @@ async function pollTakerOrders() {
       rtBody.innerHTML = '';
       rtEmpty.style.display = '';
     }
+
+    // Trade Legs panel (per-signal 4-leg lifecycle)
+    renderSignalGroups(d.signal_groups || []);
   } catch(e) { console.error('pollTakerOrders', e); }
+}
+
+// Track expanded signal-group rows so re-renders preserve user state.
+const _expandedGroups = new Set();
+
+function _legBadge(role, state) {
+  const label = role === 'fak_sell' ? 'S-FAK'
+              : role === 'fak_buy'  ? 'B-FAK'
+              : role === 'revert_buy'  ? 'R-BUY'
+              : role === 'revert_sell' ? 'R-SELL' : role;
+  const kind = state && state.kind ? state.kind : 'pending';
+  return `<span class="sg-badge b-${kind}" title="${role}: ${kind}">${label}</span>`;
+}
+
+function _legDetailRow(leg) {
+  const role = leg.role;
+  const s = leg.state || {};
+  const k = s.kind || 'pending';
+  let detail = '';
+  if (k === 'filled') {
+    detail = `${s.size} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${s.order_id}</span>`;
+  } else if (k === 'partial') {
+    detail = `${s.filled} of ${s.requested} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${s.order_id}</span>`;
+  } else if (k === 'posted') {
+    detail = `posted ${s.size} @ ${s.price} · <span style="color:#484f58">${s.order_id}</span>`;
+  } else if (k === 'killed') {
+    detail = `killed (no fill) · <span style="color:#484f58">${s.order_id}</span>`;
+  } else if (k === 'cancelled') {
+    detail = `cancelled — ${s.reason} · <span style="color:#484f58">${s.order_id}</span>`;
+  } else if (k === 'augmented') {
+    detail = `augmented ${s.from} → ${s.to} @ ${s.new_price} sz ${s.new_size}`;
+  } else if (k === 'rejected') {
+    detail = `rejected — ${s.reason}`;
+  } else if (k === 'not_planned') {
+    detail = `not planned — ${s.reason}`;
+  } else if (k === 'pending') {
+    detail = 'pending';
+  } else if (k === 'taker_exit') {
+    detail = `<strong style="color:#d29922">TIMEOUT TAKER EXIT</strong> ${s.size} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${s.order_id}</span>`;
+  }
+  const labelMap = {fak_sell:'FAK SELL', fak_buy:'FAK BUY', revert_buy:'REVERT BUY', revert_sell:'REVERT SELL'};
+  return `<tr><td style="color:#8b949e;width:100px">${labelMap[role]||role}</td><td>${detail}</td></tr>`;
+}
+
+function renderSignalGroups(groups) {
+  const el = document.getElementById('signalGroups');
+  const empty = document.getElementById('signalGroupsEmpty');
+  if (!groups || groups.length === 0) {
+    el.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  el.innerHTML = groups.map(g => {
+    const isOpen = _expandedGroups.has(g.correlation_id);
+    const totalFee = parseFloat(g.total_fee_paid || 0);
+    const net = (g.net_pnl !== null && g.net_pnl !== undefined) ? parseFloat(g.net_pnl) : null;
+    const pnlCell = net !== null
+      ? `<span style="color:${net>0?'#3fb950':net<0?'#f85149':'#8b949e'}">$${net.toFixed(4)}</span>`
+      : `<span style="color:#8b949e">—</span>`;
+    const feeCell = totalFee > 0 ? `$${totalFee.toFixed(4)}` : '—';
+    const badges = (g.legs || []).map(l => _legBadge(l.role, l.state)).join('');
+    const detailRows = (g.legs || []).map(_legDetailRow).join('');
+    return `<div class="sg-card">
+      <div class="sg-head" onclick="toggleSignalGroup('${g.correlation_id}')">
+        <span class="chev">${isOpen ? '▾' : '▸'}</span>
+        <span class="sg-evt">e${g.event_seq}</span>
+        <span class="sg-tag">${g.signal_tag}</span>
+        <span class="sg-teams">${g.label} · ${g.batting} batting / ${g.bowling} bowling · <span style="color:#484f58">${g.ts_ist}</span></span>
+        <span class="sg-badges">${badges}</span>
+        <span class="sg-fee">fee ${feeCell}</span>
+        <span class="sg-pnl">${pnlCell}</span>
+        <span class="sg-outcome ${g.outcome}">${g.outcome}</span>
+      </div>
+      <div class="sg-body ${isOpen ? 'open' : ''}">
+        <table>${detailRows}</table>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleSignalGroup(cid) {
+  if (_expandedGroups.has(cid)) _expandedGroups.delete(cid);
+  else _expandedGroups.add(cid);
+  pollTakerOrders();
 }
 
 async function cancelOrder(oid) {
@@ -1101,6 +1195,74 @@ async function cancelOrder(oid) {
   } catch(e) { console.error(e); }
 }
 
+// Polymarket positions (data-api passthrough). Read-only.
+async function pollPositions() {
+  const status = document.getElementById('positions-status');
+  const tbl = document.getElementById('positions-table');
+  if (!tbl) return;
+  try {
+    const r = await fetch('/api/positions');
+    if (!r.ok) {
+      status.textContent = 'positions: HTTP ' + r.status;
+      status.style.color = '#f85149';
+      return;
+    }
+    const data = await r.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      status.textContent = 'no open positions';
+      status.style.color = '#8b949e';
+      tbl.innerHTML = '';
+      return;
+    }
+    status.textContent = data.length + ' open position' + (data.length === 1 ? '' : 's');
+    status.style.color = '#3fb950';
+    const fmtNum = (n, dp) => (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(dp);
+    const fmtUsd = (n) => '$' + fmtNum(n, 2);
+    const fmtPct = (n) => (n === null || n === undefined || isNaN(n)) ? '—' : (Number(n) * 100).toFixed(2) + '%';
+    const pnlColor = (n) => (n > 0 ? '#3fb950' : n < 0 ? '#f85149' : '#8b949e');
+    const rows = data.map(p => {
+      const pnl = Number(p.cashPnl) || 0;
+      const pct = Number(p.percentPnl) || 0;
+      const link = p.slug ? `<a href="https://polymarket.com/event/${p.eventSlug || p.slug}" target="_blank" rel="noopener" style="color:#58a6ff;text-decoration:none">${p.title || p.slug}</a>` : (p.title || '—');
+      const redeemBadge = p.redeemable
+        ? `<span style="font-size:10px;background:#6e40c9;color:#fff;padding:2px 6px;border-radius:3px">REDEEMABLE — use polymarket.com</span>`
+        : '';
+      const negRiskBadge = p.negativeRisk
+        ? `<span style="font-size:10px;background:#30363d;color:#8b949e;padding:1px 5px;border-radius:3px;margin-left:4px">neg-risk</span>`
+        : '';
+      return `<tr>
+        <td>${link}${negRiskBadge}</td>
+        <td>${p.outcome || '—'}</td>
+        <td style="text-align:right">${fmtNum(p.size, 2)}</td>
+        <td style="text-align:right">${fmtNum(p.avgPrice, 4)}</td>
+        <td style="text-align:right">${fmtNum(p.curPrice, 4)}</td>
+        <td style="text-align:right">${fmtUsd(p.currentValue)}</td>
+        <td style="text-align:right;color:${pnlColor(pnl)}">${pnl >= 0 ? '+' : ''}${fmtUsd(pnl)}</td>
+        <td style="text-align:right;color:${pnlColor(pct)}">${pct >= 0 ? '+' : ''}${fmtPct(pct)}</td>
+        <td>${redeemBadge}</td>
+      </tr>`;
+    }).join('');
+    tbl.innerHTML = `<table style="width:100%;font-size:11px">
+      <thead><tr>
+        <th style="text-align:left">Market</th>
+        <th style="text-align:left">Outcome</th>
+        <th style="text-align:right">Size</th>
+        <th style="text-align:right">Avg</th>
+        <th style="text-align:right">Cur</th>
+        <th style="text-align:right">Value</th>
+        <th style="text-align:right">P&amp;L</th>
+        <th style="text-align:right">%</th>
+        <th></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch(e) {
+    console.error('pollPositions', e);
+    status.textContent = 'positions: error — ' + e.message;
+    status.style.color = '#f85149';
+  }
+}
+
 // Init
 loadConfig();
 pollStatus();
@@ -1109,12 +1271,16 @@ pollTrades();
 pollBook();
 pollLatency();
 pollTakerOrders();
+pollPositions();
+pollBalance();
 setInterval(pollStatus, 1500);
 setInterval(pollEvents, 1500);
 setInterval(pollTrades, 2000);
 setInterval(pollBook, 500);
 setInterval(pollLatency, 3000);
 setInterval(pollTakerOrders, 3000);
+setInterval(pollPositions, 10000);
+setInterval(pollBalance, 10000);
 </script>
 </body>
 </html>
@@ -1294,25 +1460,21 @@ td{padding:4px 6px;border-bottom:1px solid #21262d}
   <div id="split-status" style="font-size:11px;color:#8b949e;margin-top:6px"></div>
 </div>
 
-<!-- Builder Keys -->
+<!-- Builder Code -->
 <div class="card">
-  <h2>Builder Keys <span style="font-size:10px;color:#484f58">(sweep only)</span></h2>
+  <h2>Builder Code <span style="font-size:10px;color:#484f58">(V2 — on-order attribution)</span></h2>
   <div id="builder-locked" style="display:none">
     <div class="wallet-box">
-      <span class="label">Key</span>
+      <span class="label">Code</span>
       <span class="addr" id="builder-key-display">—</span>
       <span style="font-size:11px;color:#3fb950;font-weight:600">SET</span>
     </div>
-    <button class="btn-sm btn-warn" style="margin-top:6px" onclick="unlockBuilder()">Edit Builder Keys</button>
+    <button class="btn-sm btn-warn" style="margin-top:6px" onclick="unlockBuilder()">Edit Builder Code</button>
   </div>
   <div id="builder-form">
-    <label>Builder API Key</label>
-    <input type="password" id="builder-key" placeholder="from polymarket.com/settings?tab=builder">
-    <label>Builder Secret</label>
-    <input type="password" id="builder-secret" placeholder="secret">
-    <label>Builder Passphrase</label>
-    <input type="password" id="builder-pass" placeholder="passphrase">
-    <button class="btn-primary btn-sm" style="margin-top:8px" onclick="saveBuilder()">Save Builder Keys</button>
+    <label>Builder Code (32-byte hex)</label>
+    <input type="password" id="builder-key" placeholder="0x… 64 hex chars (polymarket.com/settings)">
+    <button class="btn-primary btn-sm" style="margin-top:8px" onclick="saveBuilder()">Save Builder Code</button>
     <div id="builder-status" style="font-size:11px;color:#8b949e;margin-top:4px"></div>
   </div>
 </div>
@@ -1692,35 +1854,31 @@ async function doSplit() {
 }
 
 async function saveBuilder() {
-  const key = document.getElementById('builder-key').value.trim();
-  const secret = document.getElementById('builder-secret').value.trim();
-  const pass = document.getElementById('builder-pass').value.trim();
-  if (!key || !secret || !pass) {
-    document.getElementById('builder-status').textContent = 'All 3 fields required';
+  const code = document.getElementById('builder-key').value.trim();
+  if (!code) {
+    document.getElementById('builder-status').textContent = 'Builder code required';
     document.getElementById('builder-status').style.color = '#da3633';
     return;
   }
   const r = await api('/api/sweep/builder', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      builder_api_key: key,
-      builder_api_secret: secret,
-      builder_api_passphrase: pass,
-    })
+    body: JSON.stringify({ builder_code: code })
   });
   if (r?.ok) {
-    document.getElementById('builder-status').textContent = 'Builder keys saved';
+    document.getElementById('builder-status').textContent = 'Builder code saved';
     document.getElementById('builder-status').style.color = '#3fb950';
-    lockBuilder(key);
+    lockBuilder(code);
   } else {
     document.getElementById('builder-status').textContent = r?.error || 'Error';
     document.getElementById('builder-status').style.color = '#da3633';
   }
 }
 
-function lockBuilder(keyOrMasked) {
-  const masked = keyOrMasked.length > 12 ? keyOrMasked.slice(0,8) + '...' + keyOrMasked.slice(-4) : keyOrMasked;
+function lockBuilder(codeOrMasked) {
+  const masked = codeOrMasked.length > 16
+    ? codeOrMasked.slice(0,10) + '…' + codeOrMasked.slice(-6)
+    : codeOrMasked;
   document.getElementById('builder-key-display').textContent = masked;
   document.getElementById('builder-locked').style.display = '';
   document.getElementById('builder-form').style.display = 'none';
@@ -1761,9 +1919,9 @@ async function loadConfig() {
     lockWallet(r.eoa_address || '', r.polymarket_address || '', r.signature_type || 1);
   }
 
-  // Lock builder keys if already set
-  if (r.builder_key_set && r.builder_api_key_masked) {
-    lockBuilder(r.builder_api_key_masked);
+  // Lock builder code if already set
+  if (r.builder_code_set && r.builder_code_masked) {
+    lockBuilder(r.builder_code_masked);
   }
 }
 
@@ -1834,6 +1992,35 @@ tr:hover{background:#161b22}
 .event-kind.filled{color:#3fb950}.event-kind.error{color:#f85149}.event-kind.warn{color:#d29922}
 .event-kind.trade{color:#58a6ff}.event-kind.tg-signal{color:#bc8cff}.event-kind.pnl{color:#3fb950}
 .empty{color:#484f58;text-align:center;padding:12px}
+/* Signal-group panel */
+.sg-card{background:#0d1117;border:1px solid #1b1f27;border-radius:5px;margin-bottom:6px;font-size:12px}
+.sg-head{display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;user-select:none}
+.sg-head:hover{background:#161b22}
+.sg-head .chev{color:#8b949e;font-size:10px;width:10px}
+.sg-tag{font-weight:700;color:#58a6ff;min-width:32px}
+.sg-evt{color:#484f58;font-size:10px;min-width:38px}
+.sg-teams{color:#c9d1d9;font-size:11px;flex:1}
+.sg-pnl{font-weight:700;font-size:12px;min-width:74px;text-align:right}
+.sg-fee{color:#d29922;font-size:11px;min-width:64px;text-align:right}
+.sg-outcome{font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:2px 6px;border-radius:3px;font-weight:600}
+.sg-outcome.open{background:#1f6feb33;color:#79c0ff}
+.sg-outcome.closed{background:#23863633;color:#3fb950}
+.sg-outcome.wait{background:#d2992233;color:#d29922}
+.sg-outcome.book_stale,.sg-outcome.out_of_range,.sg-outcome.no_liquidity,.sg-outcome.skipped{background:#30363d;color:#8b949e}
+.sg-outcome.augmented{background:#bc8cff33;color:#bc8cff}
+.sg-badges{display:flex;gap:3px}
+.sg-badge{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:#30363d;color:#8b949e;text-transform:uppercase;letter-spacing:0.5px}
+.sg-badge.b-pending,.sg-badge.b-not_planned{background:#30363d;color:#8b949e}
+.sg-badge.b-posted{background:#1f6feb33;color:#79c0ff}
+.sg-badge.b-filled{background:#23863633;color:#3fb950}
+.sg-badge.b-partial{background:#d2992233;color:#d29922}
+.sg-badge.b-killed,.sg-badge.b-rejected,.sg-badge.b-cancelled{background:#f8514922;color:#f85149}
+.sg-badge.b-augmented{background:#bc8cff33;color:#bc8cff}
+.sg-badge.b-taker_exit{background:#d2992233;color:#d29922;border:1px solid #d2992288}
+.sg-body{display:none;padding:6px 10px 8px;border-top:1px solid #1b1f27;background:#0a0d12;font-size:11px}
+.sg-body.open{display:block}
+.sg-body table{font-size:11px}
+.sg-body td,.sg-body th{padding:3px 6px}
 .flash{animation:flash-bg 0.6s ease-out}
 @keyframes flash-bg{0%{background:#58a6ff33}100%{background:transparent}}
 label{font-size:11px;color:#8b949e;display:block;margin-bottom:2px;margin-top:6px}
@@ -1844,7 +2031,9 @@ input{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:4px 8px;
 <div class="header">
   <h1>TOTEM TAKER</h1>
   <div>
-    <span id="rt-pnl" class="pnl-zero" style="font-size:14px;font-weight:700;margin-right:12px">PnL: $0.00</span>
+    <span id="gross-pnl" class="pnl-zero" style="font-size:13px;font-weight:600;margin-right:10px">Gross: $0.00</span>
+    <span id="fees-paid" style="color:#d29922;font-size:13px;font-weight:600;margin-right:10px">Fees: $0.00</span>
+    <span id="rt-pnl" class="pnl-zero" style="font-size:14px;font-weight:700;margin-right:12px">Net PnL: $0.00</span>
     <span id="phase" class="phase phase-idle">IDLE</span>
     <span id="innings" style="color:#8b949e;font-size:12px;margin-left:8px"></span>
   </div>
@@ -1903,10 +2092,10 @@ input{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:4px 8px;
 <!-- ROW 3: Filled Orders + Open/Pending Orders side by side -->
 <div class="row">
   <div class="section">
-    <h2>Filled / Closed Orders</h2>
+    <h2>Match Trades (every fill, with fee)</h2>
     <div style="max-height:300px;overflow-y:auto">
     <table>
-      <thead><tr><th>Time</th><th>Signal</th><th>Side</th><th>Team</th><th>Size</th><th>Price</th><th>Cost</th><th>Type</th></tr></thead>
+      <thead><tr><th>Time</th><th>Signal</th><th>Side</th><th>Team</th><th>Size</th><th>Price</th><th>Cost</th><th>Fee</th><th>Type</th></tr></thead>
       <tbody id="trades"></tbody>
     </table>
     </div>
@@ -1927,6 +2116,12 @@ input{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:4px 8px;
     </table>
     </div>
   </div>
+</div>
+
+<!-- Trade Legs (per-signal lifecycle) -->
+<div class="section">
+  <h2>Trade Legs <span style="color:#484f58;font-weight:400;text-transform:none">— one row per trade-triggering signal · click to expand · 4 legs per row</span></h2>
+  <div id="signal-groups" style="max-height:360px;overflow-y:auto"></div>
 </div>
 
 <!-- Latency -->
@@ -1963,11 +2158,23 @@ function render(d) {
   phaseEl.className = 'phase ' + (d.dry_run ? 'phase-dry' : d.phase === 'innings_running' ? 'phase-running' : 'phase-idle');
   document.getElementById('innings').textContent = `Inn ${d.innings} | ${esc(d.batting)} batting`;
 
-  // PnL header
-  const rtPnl = parseFloat(d.round_trip_pnl) || 0;
+  // PnL header — Gross / Fees / Net
+  const grossPnl = parseFloat(d.round_trip_pnl) || 0;
+  const fees = parseFloat(d.total_fee_paid) || 0;
+  const netPnl = (d.net_pnl !== undefined ? parseFloat(d.net_pnl) : grossPnl - fees);
+
+  const grossEl = document.getElementById('gross-pnl');
+  grossEl.textContent = `Gross: $${grossPnl.toFixed(4)}`;
+  grossEl.className = grossPnl > 0 ? 'pnl-pos' : grossPnl < 0 ? 'pnl-neg' : 'pnl-zero';
+  grossEl.style.cssText = 'font-size:13px;font-weight:600;margin-right:10px';
+
+  const feesEl = document.getElementById('fees-paid');
+  feesEl.textContent = `Fees: $${fees.toFixed(4)}`;
+  feesEl.style.cssText = 'color:#d29922;font-size:13px;font-weight:600;margin-right:10px';
+
   const rtEl = document.getElementById('rt-pnl');
-  rtEl.textContent = `PnL: $${rtPnl.toFixed(4)}`;
-  rtEl.className = rtPnl > 0 ? 'pnl-pos' : rtPnl < 0 ? 'pnl-neg' : 'pnl-zero';
+  rtEl.textContent = `Net PnL: $${netPnl.toFixed(4)}`;
+  rtEl.className = netPnl > 0 ? 'pnl-pos' : netPnl < 0 ? 'pnl-neg' : 'pnl-zero';
   rtEl.style.cssText = 'font-size:14px;font-weight:700;margin-right:12px';
 
   // Book
@@ -1990,8 +2197,11 @@ function render(d) {
   rtDetail.className = 'val-sm ' + (rtPnl > 0 ? 'pnl-pos' : rtPnl < 0 ? 'pnl-neg' : 'pnl-zero');
 
   // Settings
+  const timeoutLabel = (d.revert_timeout_ms === 0 || d.revert_timeout_ms == null)
+    ? '<span style="color:#f85149">DISABLED</span>'
+    : `${d.revert_timeout_ms}ms`;
   document.getElementById('settings-info').innerHTML =
-    `slug: <strong>${esc(d.market_slug||'—')}</strong> | max_trade: $${d.max_trade_usdc} | edge W:${d.edge_wicket} 4:${d.edge_boundary_4} 6:${d.edge_boundary_6} | revert_delay: ${d.revert_delay_ms}ms`;
+    `slug: <strong>${esc(d.market_slug||'—')}</strong> | max_trade: $${d.max_trade_usdc} | edge W:${d.edge_wicket} 4:${d.edge_boundary_4} 6:${d.edge_boundary_6} | revert_delay: ${d.revert_delay_ms}ms | <strong>maker→taker timeout: ${timeoutLabel}</strong>`;
 
   // Filled orders (trades)
   const tbody = document.getElementById('trades');
@@ -2000,15 +2210,18 @@ function render(d) {
     if (d.trades.length === 0) {
       tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>';
     } else {
-      tbody.innerHTML = d.trades.slice().reverse().map(t =>
-        `<tr class="flash">
+      tbody.innerHTML = d.trades.slice().reverse().map(t => {
+        const fee = parseFloat(t.fee || 0);
+        const feeCell = fee > 0 ? `<td style="color:#d29922">$${fee.toFixed(4)}</td>` : `<td style="color:#484f58">—</td>`;
+        return `<tr class="flash">
           <td>${esc(t.ts)}</td><td>${esc(t.label)}</td>
           <td class="${t.side==='BUY'?'buy':'sell'}">${esc(t.side)}</td>
           <td>${esc(t.team)}</td><td>${esc(t.size)}</td><td>${esc(t.price)}</td>
           <td>$${parseFloat(t.cost).toFixed(2)}</td>
+          ${feeCell}
           <td class="${t.order_type==='FAK'?'fak':'gtc'}">${esc(t.order_type)}</td>
-        </tr>`
-      ).join('');
+        </tr>`;
+      }).join('');
     }
   }
 
@@ -2044,6 +2257,9 @@ function render(d) {
     ).join('');
   }
 
+  // Trade legs (signal groups) — collapsible cards, newest first
+  renderSignalGroups(d.signal_groups || []);
+
   // Latency
   const lat = d.latency;
   if (lat) {
@@ -2068,6 +2284,89 @@ function render(d) {
       `<div class="event-line"><span class="event-ts">${esc(e.ts)}</span><span class="event-kind ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.detail)}</div>`
     ).join('');
   }
+}
+
+// Track which signal-group rows the user has expanded so re-renders preserve state.
+const expandedGroups = new Set();
+
+function legBadge(role, state) {
+  const label = role === 'fak_sell' ? 'S-FAK'
+              : role === 'fak_buy'  ? 'B-FAK'
+              : role === 'revert_buy'  ? 'R-BUY'
+              : role === 'revert_sell' ? 'R-SELL' : role;
+  const kind = state && state.kind ? state.kind : 'pending';
+  return `<span class="sg-badge b-${esc(kind)}" title="${esc(role)}: ${esc(kind)}">${esc(label)}</span>`;
+}
+
+function legDetailRow(leg) {
+  const role = leg.role;
+  const s = leg.state || {};
+  const k = s.kind || 'pending';
+  let detail = '';
+  if (k === 'filled') {
+    detail = `${s.size} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  } else if (k === 'partial') {
+    detail = `${s.filled} of ${s.requested} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  } else if (k === 'posted') {
+    detail = `posted ${s.size} @ ${s.price} · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  } else if (k === 'killed') {
+    detail = `killed (no fill) · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  } else if (k === 'cancelled') {
+    detail = `cancelled — ${esc(s.reason)} · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  } else if (k === 'augmented') {
+    detail = `augmented ${esc(s.from)} → ${esc(s.to)} @ ${s.new_price} sz ${s.new_size}`;
+  } else if (k === 'rejected') {
+    detail = `rejected — ${esc(s.reason)}`;
+  } else if (k === 'not_planned') {
+    detail = `not planned — ${esc(s.reason)}`;
+  } else if (k === 'pending') {
+    detail = 'pending';
+  } else if (k === 'taker_exit') {
+    detail = `<strong style="color:#d29922">TIMEOUT TAKER EXIT</strong> ${s.size} @ ${s.avg_price} · fee $${parseFloat(s.fee).toFixed(4)} · <span style="color:#484f58">${esc(s.order_id)}</span>`;
+  }
+  const labelMap = {fak_sell:'FAK SELL', fak_buy:'FAK BUY', revert_buy:'REVERT BUY', revert_sell:'REVERT SELL'};
+  return `<tr><td style="color:#8b949e;width:90px">${labelMap[role]||role}</td><td>${detail}</td></tr>`;
+}
+
+function renderSignalGroups(groups) {
+  const el = document.getElementById('signal-groups');
+  if (!groups || groups.length === 0) {
+    el.innerHTML = '<div class="empty" style="font-size:11px">No signals yet</div>';
+    return;
+  }
+  el.innerHTML = groups.map(g => {
+    const isOpen = expandedGroups.has(g.correlation_id);
+    const totalFee = parseFloat(g.total_fee_paid || 0);
+    const net = g.net_pnl !== null && g.net_pnl !== undefined ? parseFloat(g.net_pnl) : null;
+    const pnlCell = net !== null
+      ? `<span class="${net>0?'pnl-pos':net<0?'pnl-neg':'pnl-zero'}">$${net.toFixed(4)}</span>`
+      : `<span class="pnl-zero">—</span>`;
+    const feeCell = totalFee > 0 ? `$${totalFee.toFixed(4)}` : '—';
+    const badges = (g.legs || []).map(l => legBadge(l.role, l.state)).join('');
+    const detailRows = (g.legs || []).map(legDetailRow).join('');
+    return `<div class="sg-card">
+      <div class="sg-head" onclick="toggleGroup('${esc(g.correlation_id)}')">
+        <span class="chev">${isOpen ? '▾' : '▸'}</span>
+        <span class="sg-evt">e${g.event_seq}</span>
+        <span class="sg-tag">${esc(g.signal_tag)}</span>
+        <span class="sg-teams">${esc(g.label)} · ${esc(g.batting)} batting / ${esc(g.bowling)} bowling · <span style="color:#484f58">${esc(g.ts_ist)}</span></span>
+        <span class="sg-badges">${badges}</span>
+        <span class="sg-fee">fee ${feeCell}</span>
+        <span class="sg-pnl">${pnlCell}</span>
+        <span class="sg-outcome ${esc(g.outcome)}">${esc(g.outcome)}</span>
+      </div>
+      <div class="sg-body ${isOpen ? 'open' : ''}">
+        <table>${detailRows}</table>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function toggleGroup(cid) {
+  if (expandedGroups.has(cid)) expandedGroups.delete(cid);
+  else expandedGroups.add(cid);
+  // Re-render with updated state from the last poll snapshot.
+  poll();
 }
 
 async function sig(s) {

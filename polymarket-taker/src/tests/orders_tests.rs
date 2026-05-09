@@ -1,6 +1,7 @@
-/// Tests for order amount computation, base unit conversion, EIP-712 struct
-/// hashing, and order status helpers.
-use crate::orders::{compute_amounts, order_struct_hash, to_base_units, ClobOrder, OpenOrder};
+/// Tests for order amount computation, base unit conversion, and order status
+/// helpers. EIP-712 struct hashing is covered by the cross-implementation test
+/// suite in tests/v2_signing.rs.
+use crate::orders::{compute_amounts, to_base_units, OpenOrder};
 use crate::types::Side;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -9,34 +10,41 @@ use rust_decimal_macros::dec;
 
 #[test]
 fn to_base_units_whole_usdc() {
-    assert_eq!(to_base_units(dec!(1)), 1_000_000);
-    assert_eq!(to_base_units(dec!(10)), 10_000_000);
-    assert_eq!(to_base_units(dec!(100)), 100_000_000);
+    assert_eq!(to_base_units(dec!(1)).unwrap(), 1_000_000);
+    assert_eq!(to_base_units(dec!(10)).unwrap(), 10_000_000);
+    assert_eq!(to_base_units(dec!(100)).unwrap(), 100_000_000);
 }
 
 #[test]
 fn to_base_units_common_prices() {
-    assert_eq!(to_base_units(dec!(0.50)), 500_000);
-    assert_eq!(to_base_units(dec!(0.63)), 630_000);
-    assert_eq!(to_base_units(dec!(0.01)), 10_000);
-    assert_eq!(to_base_units(dec!(0.99)), 990_000);
+    assert_eq!(to_base_units(dec!(0.50)).unwrap(), 500_000);
+    assert_eq!(to_base_units(dec!(0.63)).unwrap(), 630_000);
+    assert_eq!(to_base_units(dec!(0.01)).unwrap(), 10_000);
+    assert_eq!(to_base_units(dec!(0.99)).unwrap(), 990_000);
 }
 
 #[test]
 fn to_base_units_six_decimal_precision() {
-    assert_eq!(to_base_units(dec!(0.123456)), 123_456);
-    assert_eq!(to_base_units(dec!(99.999999)), 99_999_999);
+    assert_eq!(to_base_units(dec!(0.123456)).unwrap(), 123_456);
+    assert_eq!(to_base_units(dec!(99.999999)).unwrap(), 99_999_999);
 }
 
 #[test]
 fn to_base_units_floors_sub_usdc_remainder() {
     // 0.1234567 * 1_000_000 = 123456.7 — should floor to 123456
-    assert_eq!(to_base_units(dec!(0.1234567)), 123_456);
+    assert_eq!(to_base_units(dec!(0.1234567)).unwrap(), 123_456);
 }
 
 #[test]
 fn to_base_units_zero_returns_zero() {
-    assert_eq!(to_base_units(Decimal::ZERO), 0);
+    assert_eq!(to_base_units(Decimal::ZERO).unwrap(), 0);
+}
+
+#[test]
+fn to_base_units_negative_returns_err() {
+    // D4: negative amounts must error rather than silently encode as 0.
+    assert!(to_base_units(dec!(-1)).is_err());
+    assert!(to_base_units(dec!(-0.000001)).is_err());
 }
 
 // ── compute_amounts ───────────────────────────────────────────────────────────
@@ -44,7 +52,7 @@ fn to_base_units_zero_returns_zero() {
 #[test]
 fn buy_maker_is_usdc_taker_is_tokens() {
     // BUY 10 tokens @ 0.65: maker pays 6.5 USDC, taker receives 10 tokens
-    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.65), dec!(10));
+    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.65), dec!(10)).unwrap();
     assert_eq!(maker, "6500000");   // 6.5 USDC in base units
     assert_eq!(taker, "10000000"); // 10 tokens in base units
 }
@@ -52,7 +60,7 @@ fn buy_maker_is_usdc_taker_is_tokens() {
 #[test]
 fn sell_maker_is_tokens_taker_is_usdc() {
     // SELL 10 tokens @ 0.70: maker gives 10 tokens, taker pays 7 USDC
-    let (maker, taker) = compute_amounts(Side::Sell, dec!(0.70), dec!(10));
+    let (maker, taker) = compute_amounts(Side::Sell, dec!(0.70), dec!(10)).unwrap();
     assert_eq!(maker, "10000000"); // 10 tokens in base units
     assert_eq!(taker, "7000000");  // 7 USDC in base units
 }
@@ -60,16 +68,23 @@ fn sell_maker_is_tokens_taker_is_usdc() {
 #[test]
 fn buy_at_price_050_symmetry() {
     // At 0.50: 2 tokens costs 1 USDC
-    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.50), dec!(2));
+    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.50), dec!(2)).unwrap();
     assert_eq!(maker, "1000000");  // 1 USDC
     assert_eq!(taker, "2000000"); // 2 tokens
 }
 
 #[test]
 fn zero_size_produces_zero_amounts() {
-    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.50), Decimal::ZERO);
+    let (maker, taker) = compute_amounts(Side::Buy, dec!(0.50), Decimal::ZERO).unwrap();
     assert_eq!(maker, "0");
     assert_eq!(taker, "0");
+}
+
+#[test]
+fn compute_amounts_negative_size_errors() {
+    // D4: bubbling up the to_base_units error.
+    assert!(compute_amounts(Side::Buy, dec!(0.50), dec!(-1)).is_err());
+    assert!(compute_amounts(Side::Sell, dec!(0.50), dec!(-1)).is_err());
 }
 
 // ── OpenOrder status helpers ──────────────────────────────────────────────────
@@ -143,109 +158,93 @@ fn fill_price_returns_zero_when_missing() {
     assert_eq!(make_order("matched", Some("10"), None).fill_price(), Decimal::ZERO);
 }
 
-// ── EIP-712 struct hash ───────────────────────────────────────────────────────
+// EIP-712 struct hash invariants (incl. the u256 large-token-id regressions)
+// are now covered by tests/v2_signing.rs, which cross-checks every byte against
+// py-clob-client-v2 fixtures. No need to re-test here.
 
-/// A real Polymarket token ID — exceeds u128::MAX (~3.4e38), so it has 77 decimal
-/// digits. The old pad_u256 parsed this as u128 and silently returned 0, making
-/// every signature wrong.
-const REAL_TOKEN_ID: &str =
-    "71321045679252212594626385532706912750332728571942532289631379312455583992563";
+// ── post-only cross-reject detection ─────────────────────────────────────────
+//
+// Polymarket V2 rejects post-only orders that would cross the spread with a
+// `success:false` body whose `errorMsg` contains "cross". The strategy uses
+// `is_post_only_cross_reject` to differentiate this from other rejection
+// reasons (insufficient balance, malformed signature, etc) — the cross-reject
+// path retries with a plain GTC, all other rejects are terminal.
 
-fn sample_order() -> ClobOrder {
-    ClobOrder {
-        salt: "12345".to_string(),
-        maker: "0x1234567890123456789012345678901234567890".to_string(),
-        signer: "0x1234567890123456789012345678901234567890".to_string(),
-        taker: "0x0000000000000000000000000000000000000000".to_string(),
-        token_id: REAL_TOKEN_ID.to_string(),
-        maker_amount: "1000000".to_string(),
-        taker_amount: "1538461".to_string(),
-        side: 0,
-        expiration: "0".to_string(),
-        nonce: "0".to_string(),
-        fee_rate_bps: "0".to_string(),
-        signature_type: 1,
-        signature: String::new(),
-    }
+use crate::orders::is_post_only_cross_reject;
+
+#[test]
+fn cross_reject_recognised_from_canonical_phrasings() {
+    assert!(is_post_only_cross_reject("post-only order would cross"));
+    assert!(is_post_only_cross_reject("would cross the spread"));
+    assert!(is_post_only_cross_reject("Order would cross"));
+    assert!(is_post_only_cross_reject("post-only would cross the touch"));
 }
 
 #[test]
-fn struct_hash_is_deterministic() {
-    let order = sample_order();
-    assert_eq!(order_struct_hash(&order), order_struct_hash(&order));
+fn cross_reject_case_insensitive() {
+    assert!(is_post_only_cross_reject("POST-ONLY ORDER WOULD CROSS"));
+    assert!(is_post_only_cross_reject("Would Cross"));
 }
 
 #[test]
-fn struct_hash_is_non_zero() {
-    assert_ne!(order_struct_hash(&sample_order()), [0u8; 32]);
+fn cross_reject_rejects_unrelated_errors() {
+    assert!(!is_post_only_cross_reject("insufficient balance"));
+    assert!(!is_post_only_cross_reject("invalid signature"));
+    assert!(!is_post_only_cross_reject("rate limited"));
+    assert!(!is_post_only_cross_reject(""));
 }
 
 #[test]
-fn struct_hash_differs_by_side() {
-    let mut order = sample_order();
-    order.side = 0; // BUY
-    let buy_hash = order_struct_hash(&order);
-    order.side = 1; // SELL
-    let sell_hash = order_struct_hash(&order);
-    assert_ne!(buy_hash, sell_hash);
+fn cross_reject_avoids_false_positives_on_substring_cross() {
+    // These contain "cross" but are not post-only-would-cross errors.
+    assert!(!is_post_only_cross_reject("across the spread"));
+    assert!(!is_post_only_cross_reject("cross-market mismatch"));
+    assert!(!is_post_only_cross_reject("crossover detected"));
+    // "post-only" alone (without "cross") shouldn't match either.
+    assert!(!is_post_only_cross_reject("post-only orders not supported on this market"));
+}
+
+// ── post_only field plumbing on OrderSubmission ──────────────────────────────
+
+#[test]
+fn order_submission_with_post_only_sets_field() {
+    use crate::orders_v2::{OrderSubmission, OrderV2, SignedOrderV2};
+    let order = OrderV2 {
+        salt: "1".into(), maker: "0x".into(), signer: "0x".into(),
+        token_id: "1".into(), maker_amount: "1".into(), taker_amount: "1".into(),
+        side: 0, signature_type: 1, timestamp: "1".into(),
+        metadata: "0x0000000000000000000000000000000000000000000000000000000000000000".into(),
+        builder: "0x0000000000000000000000000000000000000000000000000000000000000000".into(),
+        expiration: "0".into(),
+    };
+    let signed = SignedOrderV2 {
+        order: order.clone(),
+        signature: "0x00".into(),
+    };
+    let plain = OrderSubmission::new(&signed, "owner", "GTC");
+    assert!(!plain.post_only, "default new() must keep post_only=false");
+
+    let post_only = OrderSubmission::with_post_only(&signed, "owner", "GTC", true);
+    assert!(post_only.post_only, "with_post_only(true) must set the field");
+    assert!(!post_only.defer_exec);
+    assert_eq!(post_only.order_type, "GTC");
 }
 
 #[test]
-fn struct_hash_differs_by_token_id() {
-    let mut order = sample_order();
-    let h1 = order_struct_hash(&order);
-    order.token_id = "111".to_string();
-    let h2 = order_struct_hash(&order);
-    assert_ne!(h1, h2);
-}
-
-#[test]
-fn struct_hash_differs_by_maker_amount() {
-    let mut order = sample_order();
-    let h1 = order_struct_hash(&order);
-    order.maker_amount = "2000000".to_string();
-    let h2 = order_struct_hash(&order);
-    assert_ne!(h1, h2);
-}
-
-#[test]
-fn struct_hash_differs_by_salt() {
-    let mut order = sample_order();
-    let h1 = order_struct_hash(&order);
-    order.salt = "99999".to_string();
-    let h2 = order_struct_hash(&order);
-    assert_ne!(h1, h2, "same order with different salt must produce different hash");
-}
-
-/// Regression: token IDs on Polymarket are 77-digit numbers that exceed u128::MAX.
-/// The old pad_u256 parsed them as u128 (fails → unwrap_or(0)), making every
-/// order with a real token ID hash to the same value as token_id="0".
-#[test]
-fn struct_hash_large_token_id_differs_from_zero() {
-    let mut order = sample_order();
-    order.token_id = REAL_TOKEN_ID.to_string();
-    let real_hash = order_struct_hash(&order);
-
-    order.token_id = "0".to_string();
-    let zero_hash = order_struct_hash(&order);
-
-    assert_ne!(
-        real_hash, zero_hash,
-        "real token ID must not hash the same as token_id=0 (u128 truncation regression)"
-    );
-}
-
-/// Regression: two different large token IDs must produce different struct hashes.
-#[test]
-fn struct_hash_large_token_ids_differ() {
-    let mut order = sample_order();
-    order.token_id = REAL_TOKEN_ID.to_string();
-    let h1 = order_struct_hash(&order);
-
-    order.token_id =
-        "52114319501245915516055106046884209969926127482827954674443846427813813222426"
-            .to_string();
-    let h2 = order_struct_hash(&order);
-
-    assert_ne!(h1, h2, "different large token IDs must produce different hashes");
+fn order_submission_post_only_serializes_to_correct_field_name() {
+    use crate::orders_v2::{OrderSubmission, OrderV2, SignedOrderV2};
+    let order = OrderV2 {
+        salt: "1".into(), maker: "0xa".into(), signer: "0xa".into(),
+        token_id: "9".into(), maker_amount: "1000000".into(),
+        taker_amount: "2000000".into(), side: 0, signature_type: 1,
+        timestamp: "1700000000000".into(),
+        metadata: "0x0000000000000000000000000000000000000000000000000000000000000000".into(),
+        builder: "0x0000000000000000000000000000000000000000000000000000000000000000".into(),
+        expiration: "0".into(),
+    };
+    let signed = SignedOrderV2 { order: order.clone(), signature: "0x00".into() };
+    let body = OrderSubmission::with_post_only(&signed, "owner", "GTC", true);
+    let json = serde_json::to_string(&body).unwrap();
+    assert!(json.contains("\"postOnly\":true"), "wire field must be camelCase 'postOnly': {json}");
+    assert!(!json.contains("post_only"), "snake_case must not leak into wire format");
 }

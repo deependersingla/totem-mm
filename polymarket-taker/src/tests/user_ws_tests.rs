@@ -56,6 +56,79 @@ fn test_parse_order_with_fill() {
 }
 
 #[test]
+fn test_parse_trade_includes_polymarket_trade_id() {
+    let json = r#"[{
+        "event_type": "trade",
+        "taker_order_id": "0xabc",
+        "trade_id": "trade-789",
+        "status": "MATCHED",
+        "asset_id": "tok",
+        "price": "0.5",
+        "size": "10",
+        "side": "BUY"
+    }]"#;
+    let events = parse_user_ws_message(json);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].polymarket_trade_id.as_deref(), Some("trade-789"));
+    assert!(!events[0].raw_json.is_empty());
+}
+
+#[test]
+fn test_parse_trade_drops_event_on_unparseable_size() {
+    // D6: malformed numeric fields must drop the entire event, not record $0.
+    let json = r#"[{
+        "event_type":"trade",
+        "taker_order_id":"0xbad",
+        "status":"MATCHED",
+        "asset_id":"tok",
+        "price":"0.5",
+        "size":"N/A",
+        "side":"BUY"
+    }]"#;
+    let events = parse_user_ws_message(json);
+    assert_eq!(events.len(), 0, "unparseable size must drop the event");
+}
+
+#[test]
+fn test_parse_trade_drops_event_on_unparseable_price() {
+    let json = r#"[{
+        "event_type":"trade",
+        "taker_order_id":"0xbad2",
+        "status":"CONFIRMED",
+        "asset_id":"tok",
+        "price":"null",
+        "size":"10",
+        "side":"SELL"
+    }]"#;
+    let events = parse_user_ws_message(json);
+    assert_eq!(events.len(), 0, "unparseable price must drop the event");
+}
+
+#[test]
+fn test_parse_order_drops_event_on_unparseable_size() {
+    let json = r#"[{
+        "event_type":"order",
+        "id":"0xord_bad",
+        "size_matched":"abc",
+        "original_size":"50",
+        "price":"0.4",
+        "side":"BUY",
+        "asset_id":"tok",
+        "status":"open"
+    }]"#;
+    let events = parse_user_ws_message(json);
+    assert_eq!(events.len(), 0);
+}
+
+#[test]
+fn test_parse_trade_omits_trade_id_when_absent() {
+    let json = r#"{"event_type":"trade","taker_order_id":"0xdef","status":"CONFIRMED","asset_id":"t1","price":"0.3","size":"5","side":"SELL"}"#;
+    let events = parse_user_ws_message(json);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].polymarket_trade_id, None);
+}
+
+#[test]
 fn test_parse_malformed_json() {
     let events = parse_user_ws_message("not json at all");
     assert!(events.is_empty());

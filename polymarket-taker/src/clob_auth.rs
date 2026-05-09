@@ -275,19 +275,6 @@ impl ClobAuth {
         Ok(headers)
     }
 
-    /// Sign an order using EIP-712 (Order struct for CTF Exchange)
-    pub fn sign_order(&self, order_hash: &[u8; 32], exchange_address: &str, chain_id: u64, neg_risk: bool) -> Result<String> {
-        let domain_sep = order_domain_separator(chain_id, exchange_address, neg_risk);
-        tracing::debug!(
-            domain_sep = %format!("0x{}", hex::encode(domain_sep)),
-            exchange = exchange_address,
-            chain_id,
-            signer = %self.address,
-            "EIP-712 order domain separator"
-        );
-        sign_eip712_hash(&domain_sep, order_hash, &self.wallet)
-    }
-
     pub fn wallet(&self) -> &LocalWallet {
         &self.wallet
     }
@@ -314,29 +301,3 @@ impl ClobAuth {
     }
 }
 
-/// EIP-712 domain separator for Polymarket CTF Exchange orders.
-/// The domain name is "Polymarket CTF Exchange" for BOTH standard and neg-risk
-/// exchanges. Only the verifyingContract address differs.
-fn order_domain_separator(chain_id: u64, exchange_address: &str, _neg_risk: bool) -> [u8; 32] {
-    let type_hash = keccak256(
-        b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
-    );
-    let name_hash = keccak256(b"Polymarket CTF Exchange");
-    let version_hash = keccak256(b"1");
-
-    let mut chain_buf = [0u8; 32];
-    chain_buf[24..].copy_from_slice(&chain_id.to_be_bytes());
-
-    let addr: Address = exchange_address.parse().unwrap_or_default();
-    let mut addr_buf = [0u8; 32];
-    addr_buf[12..].copy_from_slice(addr.as_bytes());
-
-    let mut encoded = Vec::with_capacity(160);
-    encoded.extend_from_slice(&type_hash);
-    encoded.extend_from_slice(&name_hash);
-    encoded.extend_from_slice(&version_hash);
-    encoded.extend_from_slice(&chain_buf);
-    encoded.extend_from_slice(&addr_buf);
-
-    keccak256(encoded)
-}

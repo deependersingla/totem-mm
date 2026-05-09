@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Stop processes started by ./run.
+#
+# Usage:
+#   ./stop                 # stop both taker and telebot
+#   ./stop --no-tele       # stop only the taker
+#   ./stop --no-taker      # stop only the telebot
+#   ./stop --port 3001     # taker is on a non-default port
+#
+# Strategy:
+#   - Taker: kill whatever is listening on the HTTP port (lsof).
+#   - Telebot: pgrep -f for the bot.py path.
+#
+# Sends SIGTERM, waits 2s, then SIGKILL anything still alive.
+# Written for macOS bash 3.2: no associative arrays, no `wait -n`.
+
+set -eo pipefail   # NB: no -u — empty pid strings would trip it.
+
+STOP_TAKER=1
+STOP_TELE=1
+PORT=3000
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-tele|--ui)   STOP_TELE=0;   shift ;;
+    --no-taker)       STOP_TAKER=0;  shift ;;
+    --port)           PORT="$2";     shift 2 ;;
+    -h|--help)
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    *) echo "unknown flag: $1" >&2; exit 2 ;;
+  esac
+done
+
+# kill_match <label> <newline-separated pids>
+# Returns 0 if it killed at least one, 1 if nothing was running.
+kill_match() {
+  local label="$1"
+  local pids="$2"
+  pids=$(printf '%s' "$pids" | tr -s ' \n' '\n' | grep -v '^$' || true)
+  if [[ -z "$pids" ]]; then
+    echo "[stop] no $label running"
+    return 1
+  fi
+  local pid_line
+  pid_line=$(printf '%s' "$pids" | tr '\n' ' ')
+  echo "[stop] stopping $label (PIDs:$pid_line)"
+  printf '%s\n' "$pids" | xargs kill 2>/dev/null || true
+  sleep 2
+  local survivors=""
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      survivors="$survivors $pid"
+    fi
+  done
+  if [[ -n "$survivors" ]]; then
+    echo "[stop] SIGKILL on stragglers:$survivors"
+    # shellcheck disable=SC2086
+    kill -9 $survivors 2>/dev/null || true
+  fi
+  return 0
+}
+
+stopped=0
+
+if [[ "$STOP_TAKER" == 1 ]]; then
+  pids=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)
+  if kill_match "taker (port $PORT)" "$pids"; then
+    stopped=1
+  fi
+fi
+
+if [[ "$STOP_TELE" == 1 ]]; then
+  pids=$(pgrep -f 'telegram-bot/bot\.py' 2>/dev/null || true)
+  if kill_match "telegram bot" "$pids"; then
+    stopped=1
+  fi
+fi
+
+[[ "$stopped" == 1 ]] || echo "[stop] nothing was running."

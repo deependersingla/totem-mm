@@ -1,0 +1,95 @@
+# Cricket Win Probability Engine — Configuration
+
+[data]
+# Cricsheet data paths
+cricsheet_ipl_zip = "data/raw/ipl_male_json.zip"
+cricsheet_all_t20_zip = "data/raw/all_json.zip"
+cricsheet_register = "data/raw/people.csv"
+deliveries_parquet = "data/deliveries.parquet"
+feature_store_dir = "data/features"
+bowler_types_path = "data/features/bowler_types.json"
+
+# Use all T20 data for priors, IPL for fine-tuning
+use_all_t20_for_priors = true
+ipl_weight = 1.0        # weight for IPL data in training
+other_t20_weight = 0.3   # weight for non-IPL T20 data
+
+[dp]
+# State space bounds
+max_balls = 120
+max_runs = 350          # upper bound on runs dimension
+max_wickets = 10
+use_player_identity = true  # 18.7M states (150MB) vs 467K states (3.7MB)
+use_float32 = true          # 75MB instead of 150MB, sufficient precision
+
+# Pre-computation
+precompute_targets_min = 80   # minimum first innings total to pre-compute chase for
+precompute_targets_max = 300  # maximum
+precompute_targets_step = 1   # every possible total
+
+# Wicket transition
+p_striker_dismissed = 0.90   # probability it's the striker who's out
+p_non_striker_dismissed = 0.10  # run-outs of non-striker
+
+# Tie handling
+tie_win_probability = 0.50   # super over treated as coin flip
+
+[transitions]
+# LightGBM model
+lgbm_model_path = "models/lgbm_ball_outcome.txt"
+lgbm_num_leaves = 63
+lgbm_learning_rate = 0.03
+lgbm_n_estimators = 1500
+lgbm_min_child_samples = 50
+lgbm_feature_fraction = 0.7
+lgbm_bagging_fraction = 0.8
+lgbm_objective = "cross_entropy"
+
+# GRU sequence model
+gru_model_path = "models/gru_momentum.pt"
+gru_hidden_dim = 128
+gru_num_layers = 2
+gru_sequence_length = 30     # last N balls as input sequence
+gru_input_dim = 24           # features per ball in sequence
+
+# Bayesian matchup
+matchup_kappa = 40           # prior strength (equivalent sample size in balls)
+form_decay_lambda = 0.004    # per-day decay (half-life ~170 days)
+
+[calibration]
+method = "isotonic"          # "isotonic" or "platt"
+phase_specific = true        # separate calibrators for PP/middle/death
+calibration_data_path = "data/calibration/polymarket_captured.parquet"
+min_calibration_samples = 500  # per phase
+
+[trading]
+# Edge thresholds
+min_edge_to_trade = 0.025    # 2.5% minimum edge after fees
+max_position_size = 200      # max USDC per trade
+polymarket_taker_fee = 0.03  # 3% fee rate
+
+# Scenario pre-computation
+precompute_next_ball = true  # compute all outcomes for next ball
+
+[phases]
+powerplay_start = 0    # over (0-indexed)
+powerplay_end = 5
+middle_start = 6
+middle_end = 14
+death_start = 15
+death_end = 19
+
+[venues]
+# Known venue characteristics (fallback when insufficient data)
+# These are overridden by computed venue stats when available
+[venues.defaults]
+avg_first_innings_score = 170
+avg_second_innings_score = 160
+chase_success_rate = 0.52
+dew_factor = false
+
+[logging]
+level = "INFO"
+log_every_ball = true
+log_edge_signals = true
+log_dp_diagnostics = false   # very verbose, only for debugging
