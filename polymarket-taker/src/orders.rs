@@ -1,22 +1,19 @@
 use anyhow::Result;
-use ethers::types::Address;
-use ethers::utils::keccak256;
 use rand::Rng;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use crate::clob_auth::ClobAuth;
 use crate::config::Config;
+use crate::orders_v2::{OrderSubmission, OrderV2, SignedOrderV2};
 use crate::types::{FakOrder, Side};
 
 const USDC_DECIMALS: u64 = 1_000_000;
+const BYTES32_ZERO: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Fee rate in basis points. Must match what the market expects.
-/// Sports markets use ~200 bps (2%). Fetched from Gamma API during market setup.
-/// The exact rate varies by category — always verify via GET /fee-rate endpoint.
-fn fee_rate_bps(config: &Config) -> u32 {
-    config.fee_rate_bps
-}
+/// V2 alias — external callers and the order cache hold this opaque type.
+pub type ClobOrder = SignedOrderV2;
 
 fn side_to_u8(side: Side) -> u8 {
     match side {
@@ -25,115 +22,82 @@ fn side_to_u8(side: Side) -> u8 {
     }
 }
 
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Builder code from config, validated to a 0x-prefixed 32-byte hex.
+/// Empty config value → all-zero bytes32 (no attribution).
+fn builder_code(config: &Config) -> String {
+    let raw = config.builder_code.trim();
+    if raw.is_empty() {
+        return BYTES32_ZERO.to_string();
+    }
+    if raw.starts_with("0x") { raw.to_string() } else { format!("0x{raw}") }
+}
+
 /// Convert a Decimal amount to 6-decimal base units (USDC / CTF token precision).
 /// Uses Decimal::floor() for exact integer truncation — avoids the f64 precision
 /// loss that the previous implementation had (f64 can't represent many 6-decimal
 /// values exactly, causing off-by-one errors in order amounts).
-pub(crate) fn to_base_units(amount: Decimal) -> u128 {
+///
+/// D4 (TODO.md): returns `Err` on negative amounts and on values that exceed
+/// `u128::MAX` (the previous `unwrap_or(0)` silently produced 0-size orders
+/// that the CLOB then rejected with no signal to the strategy).
+pub(crate) fn to_base_units(amount: Decimal) -> Result<u128> {
+    if amount.is_sign_negative() {
+        anyhow::bail!("to_base_units: negative amount {amount}");
+    }
     let scaled = (amount * Decimal::from(USDC_DECIMALS)).floor();
-    scaled.to_string().parse::<u128>().unwrap_or(0)
+    scaled
+        .to_string()
+        .parse::<u128>()
+        .map_err(|e| anyhow::anyhow!("to_base_units: cannot encode {amount} as u128: {e}"))
 }
 
-pub(crate) fn compute_amounts(side: Side, price: Decimal, size: Decimal) -> (String, String) {
+pub(crate) fn compute_amounts(
+    side: Side,
+    price: Decimal,
+    size: Decimal,
+) -> Result<(String, String)> {
     match side {
         Side::Buy => {
-            let taker_amount = to_base_units(size);
-            let maker_amount = to_base_units(size * price);
-            (maker_amount.to_string(), taker_amount.to_string())
+            let taker_amount = to_base_units(size)?;
+            let maker_amount = to_base_units(size * price)?;
+            Ok((maker_amount.to_string(), taker_amount.to_string()))
         }
         Side::Sell => {
-            let maker_amount = to_base_units(size);
-            let taker_amount = to_base_units(size * price);
-            (maker_amount.to_string(), taker_amount.to_string())
+            let maker_amount = to_base_units(size)?;
+            let taker_amount = to_base_units(size * price)?;
+            Ok((maker_amount.to_string(), taker_amount.to_string()))
         }
     }
 }
 
-pub(crate) fn order_struct_hash(order: &ClobOrder) -> [u8; 32] {
-    let type_hash = keccak256(
-        b"Order(uint256 salt,address maker,address signer,address taker,uint256 tokenId,uint256 makerAmount,uint256 takerAmount,uint256 expiration,uint256 nonce,uint256 feeRateBps,uint8 side,uint8 signatureType)",
-    );
-
-    fn pad_u256(val: &str) -> [u8; 32] {
-        use ethers::types::U256;
-        let v = U256::from_dec_str(val)
-            .or_else(|_| {
-                let s = val.strip_prefix("0x").unwrap_or(val);
-                U256::from_str_radix(s, 16).map_err(|_| ())
-            })
-            .unwrap_or(U256::zero());
-        let mut buf = [0u8; 32];
-        v.to_big_endian(&mut buf);
-        buf
+/// True iff `error_msg` indicates a post-only order was rejected because it
+/// would cross the spread. The match is intentionally tight to avoid false
+/// positives on unrelated errors that happen to contain "cross" as a
+/// substring (e.g., "across the spread", "cross-market", "crossover").
+///
+/// Recognised phrasings (case-insensitive):
+///   - "would cross"          (canonical Polymarket V2 reject)
+///   - "post-only" + "cross"  (compound — covers wording variants)
+///   - "post_only" + "cross"  (snake-case variant)
+///
+/// Used by the revert post path: on a cross-reject we immediately retry the
+/// same order without `postOnly` so the crossing portion fills as taker at
+/// the now-better market price, residual rests as a passive maker.
+pub fn is_post_only_cross_reject(error_msg: &str) -> bool {
+    if error_msg.is_empty() {
+        return false;
     }
-
-    fn pad_address(addr: &str) -> [u8; 32] {
-        let a: Address = addr.parse().unwrap_or_default();
-        let mut buf = [0u8; 32];
-        buf[12..].copy_from_slice(a.as_bytes());
-        buf
-    }
-
-    fn pad_u8(val: u8) -> [u8; 32] {
-        let mut buf = [0u8; 32];
-        buf[31] = val;
-        buf
-    }
-
-    let mut encoded = Vec::with_capacity(13 * 32);
-    encoded.extend_from_slice(&type_hash);
-    encoded.extend_from_slice(&pad_u256(&order.salt));
-    encoded.extend_from_slice(&pad_address(&order.maker));
-    encoded.extend_from_slice(&pad_address(&order.signer));
-    encoded.extend_from_slice(&pad_address(&order.taker));
-    encoded.extend_from_slice(&pad_u256(&order.token_id));
-    encoded.extend_from_slice(&pad_u256(&order.maker_amount));
-    encoded.extend_from_slice(&pad_u256(&order.taker_amount));
-    encoded.extend_from_slice(&pad_u256(&order.expiration));
-    encoded.extend_from_slice(&pad_u256(&order.nonce));
-    encoded.extend_from_slice(&pad_u256(&order.fee_rate_bps));
-    encoded.extend_from_slice(&pad_u8(order.side));
-    encoded.extend_from_slice(&pad_u8(order.signature_type));
-
-    keccak256(encoded)
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClobOrder {
-    pub salt: String,
-    pub maker: String,
-    pub signer: String,
-    pub taker: String,
-    pub token_id: String,
-    pub maker_amount: String,
-    pub taker_amount: String,
-    pub side: u8,
-    pub expiration: String,
-    pub nonce: String,
-    pub fee_rate_bps: String,
-    pub signature_type: u8,
-    pub signature: String,
-}
-
-/// Single-order request body — POST /order
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PostOrderRequest {
-    order: PostOrderBody,
-    owner: String,
-    order_type: String,
-    tick_size: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchOrderItem {
-    order: PostOrderBody,
-    owner: String,
-    order_type: String,
-    tick_size: String,
-    defer_exec: bool,
+    let lower = error_msg.to_lowercase();
+    lower.contains("would cross")
+        || (lower.contains("post-only") && lower.contains("cross"))
+        || (lower.contains("post_only") && lower.contains("cross"))
 }
 
 /// Response from POST /orders — one element per submitted order.
@@ -149,61 +113,6 @@ pub struct BatchOrderResult {
     pub error_msg: Option<String>,
 }
 
-/// Serialize salt as JSON number; API expects integer, not string.
-fn serialize_salt_as_int<S>(s: &str, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    let n: u64 = s.parse().unwrap_or(0);
-    serializer.serialize_u64(n)
-}
-
-/// Pass through the token ID as-is for the API payload.
-/// The CLOB indexes orderbooks by the original token ID string (usually decimal).
-/// The EIP-712 struct hash handles the uint256 encoding internally.
-fn token_id_for_api(s: &str) -> String {
-    s.trim().to_string()
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PostOrderBody {
-    #[serde(serialize_with = "serialize_salt_as_int")]
-    salt: String,
-    maker: String,
-    signer: String,
-    taker: String,
-    token_id: String,
-    maker_amount: String,
-    taker_amount: String,
-    side: String,
-    expiration: String,
-    nonce: String,
-    fee_rate_bps: String,
-    signature_type: u8,
-    signature: String,
-}
-
-impl From<&ClobOrder> for PostOrderBody {
-    fn from(o: &ClobOrder) -> Self {
-        Self {
-            salt: o.salt.clone(),
-            maker: o.maker.clone(),
-            signer: o.signer.clone(),
-            taker: o.taker.clone(),
-            token_id: token_id_for_api(&o.token_id),
-            maker_amount: o.maker_amount.clone(),
-            taker_amount: o.taker_amount.clone(),
-            side: if o.side == 0 { "BUY".into() } else { "SELL".into() },
-            expiration: o.expiration.clone(),
-            nonce: o.nonce.clone(),
-            fee_rate_bps: o.fee_rate_bps.clone(),
-            signature_type: o.signature_type,
-            signature: o.signature.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub struct PostOrderResponse {
     #[serde(rename = "orderID")]
@@ -213,19 +122,35 @@ pub struct PostOrderResponse {
     pub status: Option<String>,
 }
 
-/// Internal helper that builds and signs a CLOB order with a given expiration.
-/// `expiration` should be "0" for GTC/FAK or a unix timestamp string for GTD.
+/// Internal helper that builds and signs a V2 CLOB order with a given expiration.
+/// `expiration` should be "0" for GTC/FAK or a unix-seconds timestamp string for GTD.
+///
+/// V2 changes vs V1:
+///   - removed from signed struct: `taker`, `nonce`, `feeRateBps`
+///   - added: `timestamp` (ms), `metadata` (bytes32 zero), `builder` (bytes32 builderCode)
+///   - `expiration` stays in the JSON body but is NOT part of the signed struct hash
 fn build_signed_order_inner(
     config: &Config,
     auth: &ClobAuth,
     order: &FakOrder,
     expiration: &str,
-) -> Result<ClobOrder> {
+) -> Result<SignedOrderV2> {
     // Salt must fit in IEEE 754 double precision (backend parses as float).
     // Mask to <= 2^53 - 1 to avoid precision loss.
     let salt: u64 = rand::thread_rng().gen::<u64>() & ((1u64 << 53) - 1);
     let token_id = config.token_id(order.team).to_string();
-    let (maker_amount, taker_amount) = compute_amounts(order.side, order.price, order.size);
+    let (maker_amount, taker_amount) = compute_amounts(order.side, order.price, order.size)
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                side = %order.side,
+                team = ?order.team,
+                price = %order.price,
+                size = %order.size,
+                "compute_amounts failed — refusing to build order",
+            );
+            e
+        })?;
 
     let signer_addr = auth.address().to_string();
     // maker = who provides the funds:
@@ -234,61 +159,48 @@ fn build_signed_order_inner(
     //   type 2 (GNOSIS_SAFE): maker == funder/proxy wallet address
     let maker_addr = auth.funder_address().to_string();
 
-    let fee_rate_bps = fee_rate_bps(config);
-
-    tracing::debug!(
-        maker = %maker_addr,
-        signer = %signer_addr,
-        signature_type = config.signature_type,
-        token_id = %token_id,
-        side = %order.side,
-        fee_rate_bps,
-        "building signed order"
-    );
-
-    let mut clob_order = ClobOrder {
+    let v2_order = OrderV2 {
         salt: salt.to_string(),
         maker: maker_addr,
         signer: signer_addr,
-        taker: "0x0000000000000000000000000000000000000000".to_string(),
         token_id,
         maker_amount,
         taker_amount,
         side: side_to_u8(order.side),
-        expiration: expiration.to_string(),
-        nonce: "0".to_string(),
-        fee_rate_bps: fee_rate_bps.to_string(),
         signature_type: config.signature_type,
-        signature: String::new(),
+        timestamp: now_ms().to_string(),
+        metadata: BYTES32_ZERO.to_string(),
+        builder: builder_code(config),
+        expiration: expiration.to_string(),
     };
 
-    let struct_hash = order_struct_hash(&clob_order);
     let exchange = config.exchange_address();
-
     tracing::info!(
-        struct_hash = %format!("0x{}", hex::encode(struct_hash)),
         exchange,
         chain_id = config.chain_id,
         neg_risk = config.neg_risk,
-        salt = %clob_order.salt,
-        maker = %clob_order.maker,
-        signer = %clob_order.signer,
-        token_id = %clob_order.token_id,
-        maker_amount = %clob_order.maker_amount,
-        taker_amount = %clob_order.taker_amount,
-        side = clob_order.side,
-        fee_rate_bps = %clob_order.fee_rate_bps,
-        signature_type = clob_order.signature_type,
-        "order EIP-712 signing"
+        salt = %v2_order.salt,
+        maker = %v2_order.maker,
+        signer = %v2_order.signer,
+        token_id = %v2_order.token_id,
+        maker_amount = %v2_order.maker_amount,
+        taker_amount = %v2_order.taker_amount,
+        side = v2_order.side,
+        signature_type = v2_order.signature_type,
+        timestamp = %v2_order.timestamp,
+        builder_set = v2_order.builder != BYTES32_ZERO,
+        "V2 order EIP-712 signing"
     );
 
-    let signature = auth.sign_order(&struct_hash, exchange, config.chain_id, config.neg_risk)?;
-    clob_order.signature = signature;
-
-    Ok(clob_order)
+    SignedOrderV2::build(
+        &config.polymarket_private_key,
+        v2_order,
+        exchange,
+        config.chain_id,
+    )
 }
 
-pub(crate) fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<ClobOrder> {
+pub(crate) fn build_signed_order(config: &Config, auth: &ClobAuth, order: &FakOrder) -> Result<SignedOrderV2> {
     build_signed_order_inner(config, auth, order, "0")
 }
 
@@ -298,7 +210,7 @@ fn build_signed_order_with_expiry(
     auth: &ClobAuth,
     order: &FakOrder,
     expiry_secs: u64,
-) -> Result<ClobOrder> {
+) -> Result<SignedOrderV2> {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -308,19 +220,30 @@ fn build_signed_order_with_expiry(
 }
 
 async fn post_order(
-    config: &Config,
+    _config: &Config,
     auth: &ClobAuth,
-    clob_order: &ClobOrder,
+    clob_order: &SignedOrderV2,
     order_type: &str,
     tag: &str,
 ) -> Result<PostOrderResponse> {
-    let body = PostOrderRequest {
-        order: PostOrderBody::from(clob_order),
-        owner: auth.api_key.clone(),
-        order_type: order_type.to_string(),
-        tick_size: config.tick_size.clone(),
-    };
+    post_order_with_post_only(_config, auth, clob_order, order_type, tag, false).await
+}
 
+/// Post a signed order with explicit control over the `postOnly` wire flag.
+///
+/// `post_only=true` is only meaningful for `order_type` of `"GTC"` or
+/// `"GTD"`; the matcher rejects FAK + post_only as nonsense. We don't
+/// validate at this layer — callers (strategy.rs, maker.rs) are expected to
+/// only set `true` on resting-order purposes.
+async fn post_order_with_post_only(
+    _config: &Config,
+    auth: &ClobAuth,
+    clob_order: &SignedOrderV2,
+    order_type: &str,
+    tag: &str,
+    post_only: bool,
+) -> Result<PostOrderResponse> {
+    let body = OrderSubmission::with_post_only(clob_order, auth.api_key.clone(), order_type, post_only);
     let body_json = serde_json::to_string(&body)?;
     let path = "/order";
     let headers = auth.l2_headers("POST", path, Some(&body_json))?;
@@ -339,7 +262,7 @@ async fn post_order(
     let resp_body = resp.text().await?;
 
     if !status.is_success() {
-        tracing::warn!(tag, status = %status, body = resp_body, "order HTTP error");
+        tracing::warn!(tag, status = %status, body = resp_body, post_only, "order HTTP error");
     }
 
     let result: PostOrderResponse = serde_json::from_str(&resp_body)
@@ -350,11 +273,11 @@ async fn post_order(
         });
 
     if let Some(ref oid) = result.order_id {
-        tracing::info!(tag, order_id = oid, "order accepted");
+        tracing::info!(tag, order_id = oid, post_only, "order accepted");
     }
     if let Some(ref err) = result.error_msg {
         if result.order_id.is_none() {
-            tracing::warn!(tag, error = err, "order rejected");
+            tracing::warn!(tag, error = err, post_only, "order rejected");
         }
     }
 
@@ -378,7 +301,7 @@ pub async fn post_fak_order(
 pub async fn post_presigned_fak(
     config: &Config,
     auth: &ClobAuth,
-    signed: &ClobOrder,
+    signed: &SignedOrderV2,
     tag: &str,
 ) -> Result<PostOrderResponse> {
     post_order(config, auth, signed, "FAK", tag).await
@@ -395,13 +318,7 @@ pub async fn post_fak_orders_batch(
         tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
             price = %order.price, size = %order.size, "batch FAK order");
         let signed = build_signed_order(config, auth, order)?;
-        items.push(BatchOrderItem {
-            order: PostOrderBody::from(&signed),
-            owner: auth.api_key.clone(),
-            order_type: "FAK".to_string(),
-            tick_size: config.tick_size.clone(),
-            defer_exec: false,
-        });
+        items.push(OrderSubmission::new(&signed, auth.api_key.clone(), "FAK"));
     }
     let body_json = serde_json::to_string(&items)?;
     let path = "/orders";
@@ -457,20 +374,14 @@ pub async fn post_fak_orders_batch(
 /// Post multiple pre-signed FAK orders in a single HTTP call (POST /orders).
 /// Skips the build+sign step entirely — orders were already signed by the order cache.
 pub async fn post_presigned_fak_batch(
-    config: &Config,
+    _config: &Config,
     auth: &ClobAuth,
-    orders: &[(ClobOrder, &str)],
+    orders: &[(SignedOrderV2, &str)],
 ) -> Result<Vec<BatchOrderResult>> {
     let mut items = Vec::with_capacity(orders.len());
     for (signed, tag) in orders {
         tracing::info!(tag, "batch pre-signed FAK order");
-        items.push(BatchOrderItem {
-            order: PostOrderBody::from(signed),
-            owner: auth.api_key.clone(),
-            order_type: "FAK".to_string(),
-            tick_size: config.tick_size.clone(),
-            defer_exec: false,
-        });
+        items.push(OrderSubmission::new(signed, auth.api_key.clone(), "FAK"));
     }
     let body_json = serde_json::to_string(&items)?;
     let path = "/orders";
@@ -524,13 +435,7 @@ pub async fn post_gtc_orders_batch(
         tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
             price = %order.price, size = %order.size, "batch GTC order");
         let signed = build_signed_order(config, auth, order)?;
-        items.push(BatchOrderItem {
-            order: PostOrderBody::from(&signed),
-            owner: auth.api_key.clone(),
-            order_type: "GTC".to_string(),
-            tick_size: config.tick_size.clone(),
-            defer_exec: false,
-        });
+        items.push(OrderSubmission::new(&signed, auth.api_key.clone(), "GTC"));
     }
     let body_json = serde_json::to_string(&items)?;
     let path = "/orders";
@@ -578,11 +483,27 @@ pub async fn post_limit_order(
     order: &FakOrder,
     tag: &str,
 ) -> Result<PostOrderResponse> {
-    tracing::info!(tag, side = %order.side, team = %config.team_name(order.team),
-        price = %order.price, size = %order.size, "posting GTC limit order");
+    post_limit_order_with_post_only(config, auth, order, tag, false).await
+}
 
+/// Post a GTC with explicit `post_only` control. When `post_only=true` and
+/// the matcher would cross the spread, the response carries `success:false`
+/// + `errorMsg ~ "cross"` — the caller checks
+/// [`is_post_only_cross_reject`] and decides whether to retry plain.
+pub async fn post_limit_order_with_post_only(
+    config: &Config,
+    auth: &ClobAuth,
+    order: &FakOrder,
+    tag: &str,
+    post_only: bool,
+) -> Result<PostOrderResponse> {
+    tracing::info!(
+        tag, side = %order.side, team = %config.team_name(order.team),
+        price = %order.price, size = %order.size, post_only,
+        "posting GTC limit order",
+    );
     let signed = build_signed_order(config, auth, order)?;
-    post_order(config, auth, &signed, "GTC", tag).await
+    post_order_with_post_only(config, auth, &signed, "GTC", tag, post_only).await
 }
 
 #[derive(Debug, Deserialize)]

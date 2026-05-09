@@ -6,8 +6,12 @@ use std::str::FromStr;
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use std::sync::Arc;
+
 use crate::config::Config;
+use crate::price_history::PriceHistory;
 use crate::types::{OrderBook, OrderBookSide, PriceLevel};
+use crate::ws_health::WsHealth;
 
 /// Market-level price update: {"market":"0x...","price_changes":[{asset_id,price,size,side}]}
 /// This is a different format from per-asset events — no top-level event_type or asset_id.
@@ -49,6 +53,8 @@ struct WsEvent {
 pub async fn run(
     config: &Config,
     book_tx: watch::Sender<(OrderBook, OrderBook)>,
+    health_tx: watch::Sender<WsHealth>,
+    price_history: Option<Arc<PriceHistory>>,
 ) -> Result<()> {
     let url = &config.clob_ws;
     let ping_interval = std::time::Duration::from_secs(config.ws_ping_interval_secs);
@@ -61,6 +67,7 @@ pub async fn run(
         match connect_async(url).await {
             Ok((ws_stream, _)) => {
                 tracing::info!("market websocket connected");
+                health_tx.send_modify(|h| h.on_connect());
                 let (mut write, mut read) = ws_stream.split();
 
                 // Plain object — Polymarket market channel subscription format
@@ -93,16 +100,24 @@ pub async fn run(
                                         &mut a_book,
                                         &mut b_book,
                                         &book_tx,
+                                        &health_tx,
+                                        price_history.as_deref(),
                                     ) {
                                         tracing::warn!(error = %e, "market ws parse error");
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) | None => {
                                     tracing::warn!("market websocket closed, reconnecting...");
+                                    health_tx.send_modify(|h| h.on_disconnect());
+                                    // Deltas may have been missed during the gap;
+                                    // pre-disconnect touches no longer reflect live book.
+                                    if let Some(ref ph) = price_history { ph.clear(); }
                                     break;
                                 }
                                 Some(Err(e)) => {
                                     tracing::error!(error = %e, "market websocket error");
+                                    health_tx.send_modify(|h| h.on_disconnect());
+                                    if let Some(ref ph) = price_history { ph.clear(); }
                                     break;
                                 }
                                 _ => {}
@@ -111,6 +126,8 @@ pub async fn run(
                         _ = ping_timer.tick() => {
                             if let Err(e) = write.send(Message::Text("PING".to_string().into())).await {
                                 tracing::error!(error = %e, "failed to send PING");
+                                health_tx.send_modify(|h| h.on_disconnect());
+                                if let Some(ref ph) = price_history { ph.clear(); }
                                 break;
                             }
                         }
@@ -134,6 +151,8 @@ fn handle_message(
     a_book: &mut OrderBook,
     b_book: &mut OrderBook,
     book_tx: &watch::Sender<(OrderBook, OrderBook)>,
+    health_tx: &watch::Sender<WsHealth>,
+    price_history: Option<&PriceHistory>,
 ) -> Result<()> {
     if text == "PONG" {
         return Ok(());
@@ -185,6 +204,7 @@ fn handle_message(
                     ask = ?book.best_ask().map(|l| l.price),
                     "book snapshot"
                 );
+                health_tx.send_modify(|h| h.on_snapshot());
                 book_changed = true;
             }
             Some("price_change") => {
@@ -252,7 +272,11 @@ fn handle_message(
     }
 
     if book_changed {
-        let _ = book_tx.send((a_book.clone(), b_book.clone()));
+        let snapshot = (a_book.clone(), b_book.clone());
+        if let Some(ph) = price_history {
+            ph.record(&snapshot);
+        }
+        let _ = book_tx.send(snapshot);
     }
     Ok(())
 }

@@ -8,12 +8,16 @@ use polymarket_taker::{clob_auth, config, db, server, state};
 async fn main() -> Result<()> {
     let config = config::Config::from_env()?;
 
+    // B1 (TODO.md): trader-facing logs run on IST; the subscriber's timer is
+    // the single place we configure that, so every `tracing::info!`/`warn!`/
+    // `error!` line is timestamped IST without per-call instrumentation.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| config.log_level.parse().unwrap_or_default()),
         )
         .with_target(false)
+        .with_timer(polymarket_taker::state::IstTimer)
         .init();
 
     let port = config.http_port;

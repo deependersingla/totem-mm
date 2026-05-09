@@ -92,15 +92,17 @@ async fn test_derive_then_sell_order() {
     eprintln!("  api_key:    {}", auth.api_key);
     eprintln!("  funder:     {}", auth.funder_address());
 
-    // Build a tiny SELL order for Team B (ZIM) at $0.01 (minimum tick)
-    // This is a GTC order at an absurdly low price — unlikely to fill
+    // Build a tiny SELL order for Team B (ZIM) at $0.99 (deep OOM for SELL)
+    // Deep-OOM rule: BUY tests use 1¢ (nobody sells that low), SELL tests use 99¢
+    // (nobody buys that high). Posting a SELL at 1¢ would be filled instantly
+    // and give away real tokens for free.
     use polymarket_taker::types::{FakOrder, Side, Team};
     use rust_decimal_macros::dec;
 
     let _order = FakOrder {
         side: Side::Sell,
         team: Team::TeamB,
-        price: dec!(0.01), // $0.01 — minimum price, won't fill
+        price: dec!(0.99), // $0.99 — deep OOM for SELL, won't fill
         size: dec!(1),      // 1 token
     };
 

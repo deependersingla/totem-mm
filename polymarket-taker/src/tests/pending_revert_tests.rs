@@ -30,9 +30,14 @@ fn test_config() -> Config {
         revert_delay_ms: 9500,
         fill_poll_interval_ms: 500,
         fill_poll_timeout_ms: 5000,
+        signal_gap_secs: 0,
+        max_book_age_ms: 0,
         tick_size: "0.01".to_string(),
         order_min_size: rust_decimal::Decimal::ONE,
-        fee_rate_bps: 0,
+        fee_rate: 0.0,
+        fee_exponent: 0.0,
+        takers_only_fees: true,
+        revert_timeout_ms: 0, // disabled in pending-revert tests
         ws_ping_interval_secs: 10,
         dry_run: true,
         log_level: "info".to_string(),
@@ -46,10 +51,10 @@ fn test_config() -> Config {
         edge_boundary_6: 1.0,
         fill_ws_timeout_ms: 5000,
         breakeven_timeout_ms: 3000,
+        move_lookback_ms: 3000,
+        move_threshold_multiplier: 2.0,
         maker_config: crate::config::MakerConfig::default(),
-        builder_api_key: String::new(),
-        builder_api_secret: String::new(),
-        builder_api_passphrase: String::new(),
+        builder_code: String::new(),
     }
 }
 
@@ -65,6 +70,8 @@ fn make_revert(order_id: &str, team: Team, side: Side) -> PendingRevert {
         label: "TEST_REVERT".to_string(),
         event_seq: 0,
         signal_tag: String::new(),
+        correlation_id: String::new(),
+        entry_fee: rust_decimal::Decimal::ZERO,
     }
 }
 

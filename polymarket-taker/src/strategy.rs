@@ -12,8 +12,10 @@ use crate::config::Config;
 use crate::latency::LatencyMetric;
 use crate::orders::{self, ClobOrder};
 use crate::position::Position;
-use crate::state::{AppState, PendingRevert, TradeRecord};
+use crate::state::{AppState, DispatchedSignal, PendingRevert, TradeRecord};
+use crate::price_history::TouchSnapshot;
 use crate::types::{CricketSignal, FakOrder, FillEvent, OrderBook, Side, SignalDirection, Team};
+use crate::ws_health::{ws_blocks_trading_reason, WsHealth};
 
 fn random_tag(prefix: &str) -> String {
     let suffix: String = rand::thread_rng()
@@ -86,7 +88,7 @@ pub(crate) fn decide_dispatch_action(
 pub async fn run(
     config: &Config,
     auth: &ClobAuth,
-    mut signal_rx: broadcast::Receiver<CricketSignal>,
+    mut signal_rx: broadcast::Receiver<DispatchedSignal>,
     book_rx: watch::Receiver<(OrderBook, OrderBook)>,
     position: Position,
     app: Arc<AppState>,
@@ -103,12 +105,33 @@ pub async fn run(
         "strategy engine started"
     );
 
-    while let Ok(signal) = signal_rx.recv().await {
+    while let Ok(dispatched) = signal_rx.recv().await {
         let signal_time = Instant::now();
         let config = app.config.read().unwrap().clone();
 
+        // event_seq, correlation_id, and ts_ist are allocated by the HTTP
+        // handler at receive time (see `AppState::make_dispatch`). The
+        // handler also wrote the corresponding ledger row before broadcasting
+        // — see `db.update_oracle_event_decision` below for the WAIT/AUGMENT/
+        // NORMAL update path.
+        let signal = dispatched.signal.clone();
+        let event_seq = dispatched.event_seq;
+        let signal_tag = dispatched.signal.short_tag();
+
         // Drain any pending fill events into a shared buffer for this cycle
         drain_fill_events(&mut fill_rx, &app);
+
+        // ── DLS state update ──────────────────────────────────────────────
+        // Feed the signal into the DLS engine before dispatch so /api/status
+        // and downstream consumers see the latest par score. Pure state —
+        // does not influence trade decisions yet, so we deliberately do NOT
+        // push to the events ribbon (would otherwise log a "dls" line on
+        // every ball, drowning out the trade events).
+        {
+            let mut dls = app.dls.write().unwrap();
+            dls.apply(&signal);
+            tracing::debug!(dls = %dls.describe(), "dls updated");
+        }
 
         // ── Stale-revert dispatch ──────────────────────────────────────────
         // For trade-triggering signals, decide whether to fire a fresh trade
@@ -116,11 +139,6 @@ pub async fn run(
         // (WAIT), or re-price the pending reverts at current book (AUGMENT).
         // See helpers near top of file for the rule definitions.
         let new_direction = signal.trade_direction();
-        let (event_seq, signal_tag) = if new_direction.is_some() {
-            (app.next_event_seq(), signal.short_tag())
-        } else {
-            (0u64, String::new())
-        };
 
         if let Some(dir) = new_direction {
             match decide_dispatch_action(&app, state.batting, dir) {
@@ -131,6 +149,17 @@ pub async fn run(
                     );
                     tracing::info!("{msg}");
                     app.push_event("dispatch", &msg);
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.update_oracle_event_decision(event_seq, "WAIT");
+                    }
+                    // Surface in the per-signal panel so the user sees why no FAK fired.
+                    app.open_skipped_signal_group(
+                        format!("{event_seq}-{signal_tag}"),
+                        event_seq, &signal_tag, &signal_label_for_panel(&signal),
+                        config.team_name(state.batting), config.team_name(state.bowling()),
+                        crate::state::GroupOutcome::Wait,
+                        &format!("WAIT — {n} pending revert(s) oppose"),
+                    );
                     continue;
                 }
                 DispatchAction::Augment => {
@@ -140,6 +169,9 @@ pub async fn run(
                     );
                     tracing::info!("{msg}");
                     app.push_event("dispatch", &msg);
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.update_oracle_event_decision(event_seq, "AUGMENT");
+                    }
                     perform_augment(
                         &config,
                         auth,
@@ -160,6 +192,9 @@ pub async fn run(
                         signal_tag = %signal_tag,
                         "dispatch: NORMAL (no pending reverts)"
                     );
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.update_oracle_event_decision(event_seq, "NORMAL");
+                    }
                 }
             }
         }
@@ -203,6 +238,20 @@ pub async fn run(
 
                 let books = book_rx.borrow().clone();
 
+                // D2: refuse to trade if the market WS is down or hasn't
+                // delivered a snapshot since the last (re)connect. A
+                // connected, snapshotted feed keeps the local book current
+                // via deltas — quiet markets are fine. See `crate::ws_health`.
+                if let Some(reason) = ws_blocks_signal(&app) {
+                    let msg = format!("{reason} — wicket trade skipped");
+                    tracing::warn!("{msg}");
+                    app.push_event("skip", &msg);
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.update_oracle_event_decision(event_seq, reason);
+                    }
+                    continue;
+                }
+
                 if !price_in_safe_range(&config, &books) {
                     let (min, max) = config.safe_price_range();
                     let msg = format!("price outside {min}-{max} safe range — skipping trade");
@@ -214,30 +263,41 @@ pub async fn run(
                 // Record signal-to-decision latency
                 app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
 
-                let (batting_book, bowling_book) = team_books(&books, batting);
+                // Decide directional vs reverse entry based on pre-signal
+                // book move. WICKET legs default to SELL batting + BUY bowling;
+                // reverse swaps to BUY batting + SELL bowling.
+                let direction = resolve_entry_direction_for(
+                    &app, &config, LegPair::SellBattingBuyBowling, "WICKET", batting, &books,
+                );
+                if let Some(ref db) = *app.db.read().unwrap() {
+                    db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
+                }
+                let (sell_team, buy_team) = entry_legs(LegPair::SellBattingBuyBowling, batting, direction);
+                let (sell_book, _) = team_books(&books, sell_team);
+                let (buy_book, _) = team_books(&books, buy_team);
 
                 // Try pre-signed cache first, fall back to fresh build
-                let sell_order = if app.is_team_enabled(batting) {
-                    let held = position.lock().unwrap().token_balance(batting);
-                    resolve_sell_order(&config, &app, auth, batting, &batting_book, held, signal_time).await
+                let sell_order = if app.is_team_enabled(sell_team) {
+                    let held = position.lock().unwrap().token_balance(sell_team);
+                    resolve_sell_order(&config, &app, auth, sell_team, &sell_book, held, signal_time).await
                 } else {
-                    tracing::debug!(team = %config.team_name(batting), "team disabled — sell skipped");
+                    tracing::debug!(team = %config.team_name(sell_team), "team disabled — sell skipped");
                     None
                 };
-                let buy_order = if app.is_team_enabled(bowling) {
-                    resolve_buy_order(&config, &app, auth, bowling, &bowling_book, signal_time).await
+                let buy_order = if app.is_team_enabled(buy_team) {
+                    resolve_buy_order(&config, &app, auth, buy_team, &buy_book, signal_time).await
                 } else {
-                    tracing::debug!(team = %config.team_name(bowling), "team disabled — buy skipped");
+                    tracing::debug!(team = %config.team_name(buy_team), "team disabled — buy skipped");
                     None
                 };
 
                 if sell_order.is_none() {
-                    let msg = format!("no bid on {} — sell leg skipped", config.team_name(batting));
+                    let msg = format!("no bid on {} — sell leg skipped", config.team_name(sell_team));
                     tracing::warn!("{msg}");
                     app.push_event("warn", &msg);
                 }
                 if buy_order.is_none() {
-                    let msg = format!("no ask on {} — buy leg skipped", config.team_name(bowling));
+                    let msg = format!("no ask on {} — buy leg skipped", config.team_name(buy_team));
                     tracing::warn!("{msg}");
                     app.push_event("warn", &msg);
                 }
@@ -267,9 +327,23 @@ pub async fn run(
                 app.push_event("ball", &format!("{r} runs"));
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
-                    if price_in_safe_range(&config, &books) {
+                    if let Some(reason) = ws_blocks_signal(&app) {
+                        let msg = format!("RUN{r}: {reason} — boundary skipped");
+                        tracing::warn!("{msg}");
+                        app.push_event("skip", &msg);
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, reason);
+                        }
+                    } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN", event_seq, signal_tag.clone(), signal_time).await;
+                        let label = format!("RUN{r}");
+                        let direction = resolve_entry_direction_for(
+                            &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
+                        );
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
+                        }
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "RUN", direction, event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("RUN{r}: price outside safe range — boundary skipped"));
                     }
@@ -280,9 +354,23 @@ pub async fn run(
                 app.push_event("ball", &format!("Wd+{r}"));
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
-                    if price_in_safe_range(&config, &books) {
+                    if let Some(reason) = ws_blocks_signal(&app) {
+                        let msg = format!("WD{r}: {reason} — boundary skipped");
+                        tracing::warn!("{msg}");
+                        app.push_event("skip", &msg);
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, reason);
+                        }
+                    } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD", event_seq, signal_tag.clone(), signal_time).await;
+                        let label = format!("WD{r}");
+                        let direction = resolve_entry_direction_for(
+                            &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
+                        );
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
+                        }
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "WD", direction, event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("WD{r}: price outside safe range — boundary skipped"));
                     }
@@ -293,9 +381,23 @@ pub async fn run(
                 app.push_event("ball", &format!("N+{r}"));
                 if is_boundary(r) {
                     let books = book_rx.borrow().clone();
-                    if price_in_safe_range(&config, &books) {
+                    if let Some(reason) = ws_blocks_signal(&app) {
+                        let msg = format!("NB{r}: {reason} — boundary skipped");
+                        tracing::warn!("{msg}");
+                        app.push_event("skip", &msg);
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, reason);
+                        }
+                    } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
-                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB", event_seq, signal_tag.clone(), signal_time).await;
+                        let label = format!("NB{r}");
+                        let direction = resolve_entry_direction_for(
+                            &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
+                        );
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
+                        }
+                        spawn_boundary_trade(config.clone(), auth.clone(), position.clone(), app.clone(), book_rx.clone(), books, state.batting, r, "NB", direction, event_seq, signal_tag.clone(), signal_time).await;
                     } else {
                         app.push_event("skip", &format!("NB{r}: price outside safe range — boundary skipped"));
                     }
@@ -431,12 +533,95 @@ async fn execute_event_trade(
     let sell_tag = random_tag("sell");
     let buy_tag  = random_tag("buy");
 
+    // B5: stable id that joins the FAK pair, the revert, and any AUGMENTs.
+    let correlation_id = format!("{event_seq}-{signal_tag}");
+
+    // Capture intended sizes before fire_fak_batch consumes the orders.
+    let intended_sell = sell_order.as_ref().map(|o| (o.fak.team, o.fak.price, o.fak.size));
+    let intended_buy = buy_order.as_ref().map(|o| (o.fak.team, o.fak.price, o.fak.size));
+
+    // Open the signal group. SELL/BUY legs go Pending if we have an order to
+    // post; NotPlanned otherwise. Revert legs always start NotPlanned —
+    // they're only planned once the matching FAK fills.
+    let (group_batting, group_bowling) = match label {
+        // Wicket favours bowling: SELL leg is on batting team, BUY on bowling.
+        "WICKET" => (
+            intended_sell.map(|(t, _, _)| config.team_name(t).to_string()).unwrap_or_default(),
+            intended_buy.map(|(t, _, _)| config.team_name(t).to_string()).unwrap_or_default(),
+        ),
+        // Boundary favours batting: SELL leg is on bowling, BUY on batting.
+        _ => (
+            intended_buy.map(|(t, _, _)| config.team_name(t).to_string()).unwrap_or_default(),
+            intended_sell.map(|(t, _, _)| config.team_name(t).to_string()).unwrap_or_default(),
+        ),
+    };
+    app.open_signal_group(crate::state::SignalGroup {
+        correlation_id: correlation_id.clone(),
+        event_seq,
+        signal_tag: signal_tag.clone(),
+        label: label.to_string(),
+        ts_ist: crate::state::ist_now(),
+        batting: group_batting,
+        bowling: group_bowling,
+        legs: vec![
+            crate::state::LegStatus {
+                role: crate::state::LegRole::FakSell,
+                state: if intended_sell.is_some() {
+                    crate::state::LegState::Pending
+                } else {
+                    crate::state::LegState::NotPlanned { reason: "sell skipped at gate".into() }
+                },
+            },
+            crate::state::LegStatus {
+                role: crate::state::LegRole::FakBuy,
+                state: if intended_buy.is_some() {
+                    crate::state::LegState::Pending
+                } else {
+                    crate::state::LegState::NotPlanned { reason: "buy skipped at gate".into() }
+                },
+            },
+            crate::state::LegStatus {
+                role: crate::state::LegRole::RevertBuy,
+                state: crate::state::LegState::NotPlanned { reason: "awaits SELL fill".into() },
+            },
+            crate::state::LegStatus {
+                role: crate::state::LegRole::RevertSell,
+                state: crate::state::LegState::NotPlanned { reason: "awaits BUY fill".into() },
+            },
+        ],
+        total_fee_paid: Decimal::ZERO,
+        net_pnl: None,
+        outcome: crate::state::GroupOutcome::Open,
+    });
+
     let (sell_result, buy_result) = fire_fak_batch(
         config, auth, position, app,
         sell_order, &sell_tag,
         buy_order,  &buy_tag,
+        &correlation_id,
         signal_time,
     ).await;
+
+    // Promote each FAK leg from Pending → Posted (or Rejected if the batch
+    // didn't return an order_id).
+    if let Some((_, price, size)) = intended_sell {
+        let oid = sell_result.as_ref().and_then(|r| r.order_id.clone());
+        app.update_leg(&correlation_id, crate::state::LegRole::FakSell, |leg| {
+            leg.state = match oid {
+                Some(o) => crate::state::LegState::Posted { order_id: o, price, size },
+                None => crate::state::LegState::Rejected { reason: "FAK rejected at submit".into() },
+            };
+        });
+    }
+    if let Some((_, price, size)) = intended_buy {
+        let oid = buy_result.as_ref().and_then(|r| r.order_id.clone());
+        app.update_leg(&correlation_id, crate::state::LegRole::FakBuy, |leg| {
+            leg.state = match oid {
+                Some(o) => crate::state::LegState::Posted { order_id: o, price, size },
+                None => crate::state::LegState::Rejected { reason: "FAK rejected at submit".into() },
+            };
+        });
+    }
 
     let poll_interval = Duration::from_millis(config.fill_poll_interval_ms.max(200));
     let poll_timeout  = Duration::from_millis(config.fill_poll_timeout_ms);
@@ -447,12 +632,24 @@ async fn execute_event_trade(
         detect_fill(auth, app, buy_result,  poll_interval, poll_timeout, config, signal_time),
     );
 
+    // V2 platform fee per FAK fill, in USDC. FAK orders are takers by intent
+    // (`build_*_order` prices them at L+1 to cross the book) — the matching
+    // engine charges the fee on every fill. `fee_usdc_sell` returns the fee
+    // expressed in USDC for both BUY and SELL since
+    // `fee_tokens_buy · p == fee_usdc_sell`.
+    let fee_e = crate::fees::fee_exponent_as_u32(config.fee_exponent);
+    let mut sell_entry_fee = Decimal::ZERO;
+    let mut buy_entry_fee = Decimal::ZERO;
+
     if let Some(ref f) = sell_fill {
         let cost = f.filled_size * f.avg_price;
+        let fee = crate::fees::fee_usdc_sell(f.filled_size, f.avg_price, config.fee_rate, fee_e);
+        sell_entry_fee = fee;
         let mut pos = position.lock().unwrap();
         pos.on_fill(&FakOrder { team: f.order.team, side: f.order.side, price: f.avg_price, size: f.filled_size });
-        let msg = format!("{label}: SELL {} {} @ {} = ${} filled",
-            f.filled_size, config.team_name(f.order.team), f.avg_price, cost.round_dp(2));
+        let msg = format!("{label}: SELL {} {} @ {} = ${} filled (fee ${})",
+            f.filled_size, config.team_name(f.order.team), f.avg_price,
+            cost.round_dp(2), fee.round_dp(4));
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
@@ -465,14 +662,38 @@ async fn execute_event_trade(
             order_type: "FAK".into(),
             label: label.to_string(),
             order_id: f.order_id.clone(),
+            fee,
+        });
+        // Mark FAK_SELL leg as Filled (or Partial vs requested).
+        let requested = intended_sell.map(|(_, _, s)| s).unwrap_or(f.filled_size);
+        let oid = f.order_id.clone();
+        let filled_size = f.filled_size;
+        let avg_price = f.avg_price;
+        app.update_leg(&correlation_id, crate::state::LegRole::FakSell, |leg| {
+            leg.state = if filled_size >= requested {
+                crate::state::LegState::Filled { order_id: oid, size: filled_size, avg_price, fee }
+            } else {
+                crate::state::LegState::Partial { order_id: oid, filled: filled_size, requested, avg_price, fee }
+            };
+        });
+    } else if intended_sell.is_some() {
+        // Posted but no fill within the timeout → killed.
+        app.update_leg(&correlation_id, crate::state::LegRole::FakSell, |leg| {
+            if let crate::state::LegState::Posted { order_id, .. } = &leg.state {
+                let oid = order_id.clone();
+                leg.state = crate::state::LegState::Killed { order_id: oid };
+            }
         });
     }
     if let Some(ref f) = buy_fill {
         let cost = f.filled_size * f.avg_price;
+        let fee = crate::fees::fee_usdc_sell(f.filled_size, f.avg_price, config.fee_rate, fee_e);
+        buy_entry_fee = fee;
         let mut pos = position.lock().unwrap();
         pos.on_fill(&FakOrder { team: f.order.team, side: f.order.side, price: f.avg_price, size: f.filled_size });
-        let msg = format!("{label}: BUY {} {} @ {} = ${} filled",
-            f.filled_size, config.team_name(f.order.team), f.avg_price, cost.round_dp(2));
+        let msg = format!("{label}: BUY {} {} @ {} = ${} filled (fee ${})",
+            f.filled_size, config.team_name(f.order.team), f.avg_price,
+            cost.round_dp(2), fee.round_dp(4));
         tracing::info!("{msg}");
         app.push_event("filled", &msg);
         app.log_trade(TradeRecord {
@@ -485,8 +706,30 @@ async fn execute_event_trade(
             order_type: "FAK".into(),
             label: label.to_string(),
             order_id: f.order_id.clone(),
+            fee,
+        });
+        let requested = intended_buy.map(|(_, _, s)| s).unwrap_or(f.filled_size);
+        let oid = f.order_id.clone();
+        let filled_size = f.filled_size;
+        let avg_price = f.avg_price;
+        app.update_leg(&correlation_id, crate::state::LegRole::FakBuy, |leg| {
+            leg.state = if filled_size >= requested {
+                crate::state::LegState::Filled { order_id: oid, size: filled_size, avg_price, fee }
+            } else {
+                crate::state::LegState::Partial { order_id: oid, filled: filled_size, requested, avg_price, fee }
+            };
+        });
+    } else if intended_buy.is_some() {
+        app.update_leg(&correlation_id, crate::state::LegRole::FakBuy, |leg| {
+            if let crate::state::LegState::Posted { order_id, .. } = &leg.state {
+                let oid = order_id.clone();
+                leg.state = crate::state::LegState::Killed { order_id: oid };
+            }
         });
     }
+    // After FAK results land — if no reverts will be posted, this also closes
+    // the group early.
+    app.mark_group_closed_if_terminal(&correlation_id);
     app.snapshot_inventory();
 
     // Record e2e latency
@@ -508,21 +751,22 @@ async fn execute_event_trade(
     // Re-read config for latest settings
     let config = app.config.read().unwrap().clone();
 
-    // Use cached tick_size from background task (no HTTP in hot path)
-    let tick: Decimal = app.cached_tick_size.read().unwrap()
-        .unwrap_or_else(|| config.tick_size.parse().unwrap_or(dec!(0.01)));
+    // Use cached tick_size from background task (no HTTP in hot path).
+    // D8: helper warns if both the cache and config are unparseable.
+    let tick: Decimal = app.resolve_tick_size(&config.tick_size);
 
     let edge_ticks = edge_ticks_for_label(label, &config);
-    let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
+    let edge_amount = crate::fees::dec_from_f64(edge_ticks) * tick;
 
     tracing::info!(delay_ms = config.revert_delay_ms, edge_ticks, tick = %tick, edge_amount = %edge_amount, "{label} REVERT");
     app.push_event("revert", &format!("{label}: revert after {}ms (edge {edge_ticks} ticks = {edge_amount})", config.revert_delay_ms));
 
-    // Determine tick precision for rounding (e.g., 0.01 → 2dp, 0.001 → 3dp)
-    let tick_dp = tick.to_string()
-        .split('.')
-        .nth(1)
-        .map_or(0, |frac| frac.trim_end_matches('0').len()) as u32;
+    // Determine tick precision for rounding (e.g., 0.01 → 2dp, 0.001 → 3dp).
+    // Capped at 6 because if `tick` is corrupted by an f64 round-trip it
+    // could be `0.0100000000000000002...` (28 decimals), which would
+    // propagate noise into every limit price (`0.21000000…00043…`). 6 dp
+    // is finer than any real tick we'll see.
+    let tick_dp = tick_decimal_places(tick);
 
     // Revert buy → sell back at avg_price + edge_ticks
     if let Some(f) = buy_fill {
@@ -540,7 +784,10 @@ async fn execute_event_trade(
             price: limit_price,
             size,
         };
-        if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_SELL", app).await {
+        if let Some(oid) = execute_limit(
+            &config, auth, &revert_order, position, "REVERT_SELL", app,
+            &correlation_id, "REVERT_GTC", None,
+        ).await {
             let revert_label = format!("e{event_seq}_{label}_REVERT_SELL");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
@@ -553,11 +800,26 @@ async fn execute_event_trade(
                 label: revert_label.clone(),
                 event_seq,
                 signal_tag: signal_tag.clone(),
+                correlation_id: correlation_id.clone(),
+                entry_fee: buy_entry_fee,
+            });
+            // Promote RevertSell leg from NotPlanned → Posted.
+            let oid_for_state = oid.clone();
+            app.update_leg(&correlation_id, crate::state::LegRole::RevertSell, |leg| {
+                leg.state = crate::state::LegState::Posted {
+                    order_id: oid_for_state, price: limit_price, size,
+                };
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),
                 oid, f.order.team, Side::Sell, size, limit_price, revert_label,
+                correlation_id.clone(), crate::state::LegRole::RevertSell,
             );
+        } else {
+            app.update_leg(&correlation_id, crate::state::LegRole::RevertSell, |leg| {
+                leg.state = crate::state::LegState::Rejected { reason: "GTC post failed".into() };
+            });
+            app.mark_group_closed_if_terminal(&correlation_id);
         }
     }
     // Revert sell → buy back at avg_price - edge_ticks
@@ -576,7 +838,10 @@ async fn execute_event_trade(
             price: limit_price,
             size,
         };
-        if let Some(oid) = execute_limit(&config, auth, &revert_order, position, "REVERT_BUY", app).await {
+        if let Some(oid) = execute_limit(
+            &config, auth, &revert_order, position, "REVERT_BUY", app,
+            &correlation_id, "REVERT_GTC", None,
+        ).await {
             let revert_label = format!("e{event_seq}_{label}_REVERT_BUY");
             app.push_revert(PendingRevert {
                 order_id: oid.clone(),
@@ -589,11 +854,25 @@ async fn execute_event_trade(
                 label: revert_label.clone(),
                 event_seq,
                 signal_tag: signal_tag.clone(),
+                correlation_id: correlation_id.clone(),
+                entry_fee: sell_entry_fee,
+            });
+            let oid_for_state = oid.clone();
+            app.update_leg(&correlation_id, crate::state::LegRole::RevertBuy, |leg| {
+                leg.state = crate::state::LegState::Posted {
+                    order_id: oid_for_state, price: limit_price, size,
+                };
             });
             spawn_revert_fill_monitor(
                 config.clone(), auth.clone(), app.clone(), position.clone(),
                 oid, f.order.team, Side::Buy, size, limit_price, revert_label,
+                correlation_id.clone(), crate::state::LegRole::RevertBuy,
             );
+        } else {
+            app.update_leg(&correlation_id, crate::state::LegRole::RevertBuy, |leg| {
+                leg.state = crate::state::LegState::Rejected { reason: "GTC post failed".into() };
+            });
+            app.mark_group_closed_if_terminal(&correlation_id);
         }
     }
 }
@@ -624,11 +903,21 @@ fn spawn_revert_fill_monitor(
     _size: Decimal,
     limit_price: Decimal,
     label: String,
+    correlation_id: String,
+    leg_role: crate::state::LegRole,
 ) {
     tokio::spawn(async move {
-        let poll_interval = Duration::from_secs(5);
-        // Heartbeat every 60 polls = every 5 minutes. Logs age so long-lived
-        // reverts are visible and don't look like leaked tasks.
+        // Tighter poll cadence when the timeout is armed so we hit the
+        // configured deadline within ~1s rather than ~5s. With timeout=0
+        // we keep the original 5s for cheaper long-term tracking.
+        let revert_timeout_ms = config.revert_timeout_ms;
+        let poll_interval = if revert_timeout_ms > 0 {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(5)
+        };
+        // Heartbeat every 60 polls. Logs age so long-lived reverts are
+        // visible and don't look like leaked tasks.
         const HEARTBEAT_EVERY: u64 = 60;
         let mut iter: u64 = 0;
         let started_at = Instant::now();
@@ -638,11 +927,26 @@ fn spawn_revert_fill_monitor(
             tokio::time::sleep(poll_interval).await;
 
             // Check if revert was removed (cancelled by opposite event, augment,
-            // match reset, etc.) — exit silently if so.
+            // match reset, etc.) — exit silently if so. Done BEFORE the
+            // timeout branch so an orphaned monitor (after `reset_for_new_match`)
+            // never fires a stale cancel against the previous match's order_id.
             let still_pending = app.pending_reverts.lock().unwrap()
                 .iter().any(|r| r.order_id == order_id);
             if !still_pending {
                 tracing::debug!(order_id = %order_id, label = %label, "revert monitor: removed externally");
+                return;
+            }
+
+            // Time-based escalation: if the configured wall-clock window
+            // expires without the maker revert filling, cancel it and
+            // flatten via a taker FAK. `revert_timeout_ms == 0` disables —
+            // and is the production default, since flattening at a worse
+            // touch typically locks in adverse-selection loss.
+            if should_escalate_revert_timeout(revert_timeout_ms, started_at.elapsed()) {
+                handle_revert_timeout(
+                    &config, &auth, &app, &position,
+                    &order_id, team, side, &label, &correlation_id, leg_role,
+                ).await;
                 return;
             }
 
@@ -662,15 +966,18 @@ fn spawn_revert_fill_monitor(
                 let filled = fill.filled_size;
                 let price = if fill.avg_price.is_zero() { limit_price } else { fill.avg_price };
                 let cost = filled * price;
+                // GTC reverts are makers when posted normally. With
+                // `takers_only_fees=true` (enforced at startup) maker fee = 0.
+                let exit_fee = revert_exit_fee(&config, filled, price);
                 {
                     let mut pos = position.lock().unwrap();
                     pos.on_fill(&FakOrder { team, side, price, size: filled });
                 }
-                let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${}",
-                    side, config.team_name(team), price, cost.round_dp(2));
+                let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${} (fee ${})",
+                    side, config.team_name(team), price, cost.round_dp(2), exit_fee.round_dp(4));
                 tracing::info!("{msg}");
                 app.push_event("filled", &msg);
-                app.log_trade(TradeRecord {
+                let record = TradeRecord {
                     ts: crate::state::ist_now(),
                     side: format!("{side}"),
                     team: config.team_name(team).to_string(),
@@ -680,11 +987,26 @@ fn spawn_revert_fill_monitor(
                     order_type: "GTC".into(),
                     label: label.clone(),
                     order_id: order_id.clone(),
-                });
-                // Log round-trip PnL
+                    fee: exit_fee,
+                };
+                // D7: pair the exit trade with the round-trip write atomically.
                 if let Some(revert) = app.remove_revert(&order_id) {
-                    log_round_trip(&app, &config, &revert, price, filled, &order_id);
+                    log_revert_fill_with_round_trip(&app, &config, &revert, price, filled, &order_id, record);
+                } else {
+                    app.log_trade(record);
                 }
+                if let Some(ref db) = *app.db.read().unwrap() {
+                    db.mark_clob_order_terminal(&order_id, "matched", &filled.to_string());
+                }
+                // Update signal-group: revert leg → Filled. Group closes when
+                // every leg is terminal.
+                let oid_for_state = order_id.clone();
+                app.update_leg(&correlation_id, leg_role, |leg| {
+                    leg.state = crate::state::LegState::Filled {
+                        order_id: oid_for_state, size: filled, avg_price: price, fee: exit_fee,
+                    };
+                });
+                app.mark_group_closed_if_terminal(&correlation_id);
                 app.snapshot_inventory();
                 return;
             }
@@ -699,15 +1021,16 @@ fn spawn_revert_fill_monitor(
                     if !filled.is_zero() || status == "matched" {
                         let price = if fill_price.is_zero() { limit_price } else { fill_price };
                         let cost = filled * price;
+                        let exit_fee = revert_exit_fee(&config, filled, price);
                         {
                             let mut pos = position.lock().unwrap();
                             pos.on_fill(&FakOrder { team, side, price, size: filled });
                         }
-                        let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${}",
-                            side, config.team_name(team), price, cost.round_dp(2));
+                        let msg = format!("{label}: REVERT FILLED {} {} @ {} = ${} (fee ${})",
+                            side, config.team_name(team), price, cost.round_dp(2), exit_fee.round_dp(4));
                         tracing::info!("{msg}");
                         app.push_event("filled", &msg);
-                        app.log_trade(TradeRecord {
+                        let record = TradeRecord {
                             ts: crate::state::ist_now(),
                             side: format!("{side}"),
                             team: config.team_name(team).to_string(),
@@ -717,11 +1040,24 @@ fn spawn_revert_fill_monitor(
                             order_type: "GTC".into(),
                             label: label.clone(),
                             order_id: order_id.clone(),
-                        });
-                        // Log round-trip PnL
+                            fee: exit_fee,
+                        };
+                        // D7: same atomic pairing as the WS path.
                         if let Some(revert) = app.remove_revert(&order_id) {
-                            log_round_trip(&app, &config, &revert, price, filled, &order_id);
+                            log_revert_fill_with_round_trip(&app, &config, &revert, price, filled, &order_id, record);
+                        } else {
+                            app.log_trade(record);
                         }
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.mark_clob_order_terminal(&order_id, "matched", &filled.to_string());
+                        }
+                        let oid_for_state = order_id.clone();
+                        app.update_leg(&correlation_id, leg_role, |leg| {
+                            leg.state = crate::state::LegState::Filled {
+                                order_id: oid_for_state, size: filled, avg_price: price, fee: exit_fee,
+                            };
+                        });
+                        app.mark_group_closed_if_terminal(&correlation_id);
                         app.snapshot_inventory();
                         return;
                     }
@@ -730,6 +1066,17 @@ fn spawn_revert_fill_monitor(
                         tracing::info!(order_id = %order_id, status, "revert order terminal with no fill");
                         app.push_event("warn", &format!("{label}: revert {status} (no fill)"));
                         app.remove_revert(&order_id);
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.mark_clob_order_terminal(&order_id, &status, "0");
+                        }
+                        let oid_for_state = order_id.clone();
+                        let reason_for_state = status.clone();
+                        app.update_leg(&correlation_id, leg_role, |leg| {
+                            leg.state = crate::state::LegState::Cancelled {
+                                order_id: oid_for_state, reason: reason_for_state,
+                            };
+                        });
+                        app.mark_group_closed_if_terminal(&correlation_id);
                         return;
                     }
                 }
@@ -775,6 +1122,13 @@ async fn perform_augment(
                     count = order_ids.len(),
                     "[AUGMENT] batch cancel ok"
                 );
+                // Flip each cancelled revert to terminal in our DB so the
+                // open-orders view stops showing them as live.
+                if let Some(ref db) = *app.db.read().unwrap() {
+                    for oid in &order_ids {
+                        db.mark_clob_order_terminal(oid, "cancelled", "0");
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -797,16 +1151,9 @@ async fn perform_augment(
     // Fetch current book prices for placing the replacement reverts.
     let books = book_rx.borrow().clone();
     let (batting_book, bowling_book) = team_books(&books, batting);
-    let tick: Decimal = app
-        .cached_tick_size
-        .read()
-        .unwrap()
-        .unwrap_or_else(|| config.tick_size.parse().unwrap_or(dec!(0.01)));
-    let tick_dp = tick
-        .to_string()
-        .split('.')
-        .nth(1)
-        .map_or(0, |frac| frac.trim_end_matches('0').len()) as u32;
+    // D8: same fallback warning as the FAK-revert path.
+    let tick: Decimal = app.resolve_tick_size(&config.tick_size);
+    let tick_dp = tick_decimal_places(tick);
 
     let mut reposted = 0usize;
     let mut skipped_filled = 0usize;
@@ -861,7 +1208,8 @@ async fn perform_augment(
             );
             tracing::info!("{msg}");
             app.push_event("filled", &msg);
-            app.log_trade(TradeRecord {
+            let exit_fee = revert_exit_fee(config, filled_size, avg_price);
+            let record = TradeRecord {
                 ts: crate::state::ist_now(),
                 side: format!("{}", stale_rev.side),
                 team: config.team_name(stale_rev.team).to_string(),
@@ -871,8 +1219,15 @@ async fn perform_augment(
                 order_type: "GTC".into(),
                 label: stale_rev.label.clone(),
                 order_id: stale_rev.order_id.clone(),
-            });
-            log_round_trip(app, config, &stale_rev, avg_price, filled_size, &stale_rev.order_id);
+                fee: exit_fee,
+            };
+            // D7: atomic exit-trade + round-trip on AUGMENT capture path.
+            // The PendingRevert was already popped from `app.pending_reverts`
+            // earlier in `take_reverts_for_team`, so we don't `remove_revert`
+            // again here — pass it directly.
+            log_revert_fill_with_round_trip(
+                app, config, &stale_rev, avg_price, filled_size, &stale_rev.order_id, record,
+            );
         }
 
         let remaining = (stale_rev.size - filled_size).max(Decimal::ZERO);
@@ -888,7 +1243,7 @@ async fn perform_augment(
             &bowling_book
         };
         let edge_ticks = edge_ticks_for_label(&stale_rev.label, config);
-        let edge_amount = Decimal::from_f64_retain(edge_ticks).unwrap_or(Decimal::ZERO) * tick;
+        let edge_amount = crate::fees::dec_from_f64(edge_ticks) * tick;
 
         let new_price = match stale_rev.side {
             // SELL revert: place above best ask so we remain a maker.
@@ -930,9 +1285,23 @@ async fn perform_augment(
             "[AUGMENT] reposting revert"
         );
 
-        if let Some(new_oid) =
-            execute_limit(config, auth, &repost_order, position, &augment_label, app).await
-        {
+        // B5: AUGMENT'd revert inherits the original revert's correlation_id
+        // so all rows for the original ball stay joinable. The new event_seq
+        // is recorded separately on the row's `replaces_order_id` chain — i.e.
+        // "this augment was triggered by a later signal but is still part of
+        // the original signal's order group".
+        let inherited_correlation_id = stale_rev.correlation_id.clone();
+        let prior_oid = stale_rev.order_id.clone();
+        // Map revert side → SignalGroup leg role. SELL revert closes a BUY
+        // FAK (RevertSell); BUY revert closes a SELL FAK (RevertBuy).
+        let leg_role = match stale_rev.side {
+            Side::Sell => crate::state::LegRole::RevertSell,
+            Side::Buy => crate::state::LegRole::RevertBuy,
+        };
+        if let Some(new_oid) = execute_limit(
+            config, auth, &repost_order, position, &augment_label, app,
+            &inherited_correlation_id, "REVERT_GTC", Some(&prior_oid),
+        ).await {
             app.push_revert(PendingRevert {
                 order_id: new_oid.clone(),
                 team: stale_rev.team,
@@ -944,6 +1313,22 @@ async fn perform_augment(
                 label: augment_label.clone(),
                 event_seq: new_event_seq,
                 signal_tag: new_signal_tag.to_string(),
+                correlation_id: inherited_correlation_id.clone(),
+                // Inherit entry-leg fee from the cancelled prior revert so
+                // round-trip net_pnl stays correct even after one or more
+                // AUGMENT reposts.
+                entry_fee: stale_rev.entry_fee,
+            });
+            // Update the original group's leg state: cancelled prior
+            // → reposted as new. The leg is back in `Posted`; the AUGMENT
+            // history is in `clob_orders.replaces_order_id`.
+            let oid_for_state = new_oid.clone();
+            app.update_leg(&inherited_correlation_id, leg_role, |leg| {
+                leg.state = crate::state::LegState::Posted {
+                    order_id: oid_for_state,
+                    price: new_price,
+                    size: remaining,
+                };
             });
             spawn_revert_fill_monitor(
                 config.clone(),
@@ -956,6 +1341,8 @@ async fn perform_augment(
                 remaining,
                 new_price,
                 augment_label,
+                inherited_correlation_id.clone(),
+                leg_role,
             );
             reposted += 1;
         }
@@ -996,19 +1383,30 @@ pub async fn tick_size_refresher(
                     Ok(resp) => {
                         if let Ok(markets) = resp.json::<Vec<serde_json::Value>>().await {
                             if let Some(market) = markets.first() {
-                                if let Some(tick_f64) = market["orderPriceMinTickSize"].as_f64() {
-                                    if let Some(tick) = Decimal::from_f64_retain(tick_f64) {
-                                        *app.cached_tick_size.write().unwrap() = Some(tick);
+                                // Prefer the JSON string form when present —
+                                // exact decimal preserved. Fall back to the
+                                // safe shortest-roundtrip f64 conversion so a
+                                // numeric `0.01` doesn't smuggle its binary
+                                // representation (0.0100000000000000002...)
+                                // into the cached tick.
+                                let tick_opt: Option<Decimal> = match &market["orderPriceMinTickSize"] {
+                                    serde_json::Value::String(s) => s.parse().ok(),
+                                    serde_json::Value::Number(_) => market["orderPriceMinTickSize"]
+                                        .as_f64()
+                                        .map(crate::fees::dec_from_f64),
+                                    _ => None,
+                                };
+                                if let Some(tick) = tick_opt {
+                                    *app.cached_tick_size.write().unwrap() = Some(tick);
 
-                                        // Update config if changed
-                                        let old_tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
-                                        if tick != old_tick {
-                                            tracing::warn!(old = %old_tick, new = %tick, "tick size changed!");
-                                            app.push_event("warn", &format!("tick size changed: {old_tick} -> {tick}"));
-                                            let mut cfg = app.config.write().unwrap();
-                                            cfg.tick_size = tick.to_string();
-                                            cfg.persist();
-                                        }
+                                    // Update config if changed
+                                    let old_tick: Decimal = config.tick_size.parse().unwrap_or(dec!(0.01));
+                                    if tick != old_tick {
+                                        tracing::warn!(old = %old_tick, new = %tick, "tick size changed!");
+                                        app.push_event("warn", &format!("tick size changed: {old_tick} -> {tick}"));
+                                        let mut cfg = app.config.write().unwrap();
+                                        cfg.tick_size = tick.to_string();
+                                        cfg.persist();
                                     }
                                 }
                             }
@@ -1023,8 +1421,128 @@ pub async fn tick_size_refresher(
     }
 }
 
+/// D7 (TODO.md): atomic exit-trade + round-trip write.
+///
+/// Replaces the previous `app.log_trade(...)` followed by `log_round_trip(...)`
+/// pairing — the two DB inserts now happen inside one SQLite transaction so
+/// a crash between them no longer leaves the ledger half-finished. The
+/// in-memory `trade_log` push and the `"pnl"` event still fire as before.
+///
+/// Dry-run trades skip the DB write entirely (matching the previous behavior
+/// of `AppState::log_trade`).
+fn log_revert_fill_with_round_trip(
+    app: &Arc<AppState>,
+    config: &Config,
+    revert: &PendingRevert,
+    exit_price: Decimal,
+    exit_size: Decimal,
+    exit_order_id: &str,
+    trade_record: TradeRecord,
+) {
+    // Round-trip PnL — gross, no fees deducted yet.
+    let pnl = match revert.side {
+        Side::Sell => (exit_price - revert.entry_price) * exit_size, // entry was BUY, exit is SELL
+        Side::Buy => (revert.entry_price - exit_price) * exit_size,  // entry was SELL, exit is BUY
+    };
+    let entry_side = match revert.side {
+        Side::Sell => "BUY",
+        Side::Buy => "SELL",
+    };
+
+    // Net PnL = gross PnL − entry-leg fee − exit-leg fee. `entry_fee` was
+    // computed and stashed at FAK-fill time. `exit_fee` for a maker revert is
+    // zero under `fd.to=true`, but we read it from the trade_record so the
+    // edge case (post-only failure causes a crossing GTC) eventually shows up.
+    let fee_in = revert.entry_fee;
+    let fee_out = trade_record.fee;
+    let net_pnl = pnl - fee_in - fee_out;
+
+    tracing::info!(
+        team = %config.team_name(revert.team),
+        entry_side, entry_price = %revert.entry_price,
+        exit_price = %exit_price, size = %exit_size,
+        pnl = %pnl.round_dp(4),
+        fee_in = %fee_in.round_dp(4),
+        fee_out = %fee_out.round_dp(4),
+        net_pnl = %net_pnl.round_dp(4),
+        label = %revert.label,
+        "ROUND-TRIP complete"
+    );
+    app.push_event("pnl", &format!("{}: {} {} entry={} exit={} sz={} PnL=${} fees=${} net=${}",
+        revert.label, entry_side, config.team_name(revert.team),
+        revert.entry_price, exit_price, exit_size,
+        pnl.round_dp(4), (fee_in + fee_out).round_dp(4), net_pnl.round_dp(4)));
+
+    let is_dry = trade_record.order_id.starts_with("dry_run");
+    if !is_dry {
+        if let Some(ref db) = *app.db.read().unwrap() {
+            let slug = config.market_slug.clone();
+            let pnl_str = pnl.round_dp(6).to_string();
+            let fee_in_str = fee_in.round_dp(6).to_string();
+            let fee_out_str = fee_out.round_dp(6).to_string();
+            let net_pnl_str = net_pnl.round_dp(6).to_string();
+            let entry_ts = revert.placed_at.elapsed().as_secs().to_string();
+            let exit_ts = crate::state::ist_now();
+            let entry_price_str = revert.entry_price.to_string();
+            let exit_price_str = exit_price.to_string();
+            let exit_size_str = exit_size.to_string();
+            let team_str = config.team_name(revert.team).to_string();
+            let fee_str = trade_record.fee.to_string();
+
+            db.insert_revert_fill_atomic(
+                &crate::db::TradeArgs {
+                    ts: &trade_record.ts,
+                    side: &trade_record.side,
+                    team: &trade_record.team,
+                    size: &trade_record.size.to_string(),
+                    price: &trade_record.price.to_string(),
+                    cost: &trade_record.cost.to_string(),
+                    order_type: &trade_record.order_type,
+                    label: &trade_record.label,
+                    order_id: &trade_record.order_id,
+                    slug: &slug,
+                    fee: &fee_str,
+                },
+                &crate::db::RoundTripArgs {
+                    entry_ts: &entry_ts,
+                    exit_ts: &exit_ts,
+                    team: &team_str,
+                    entry_side,
+                    entry_price: &entry_price_str,
+                    exit_price: &exit_price_str,
+                    size: &exit_size_str,
+                    pnl: &pnl_str,
+                    label: &revert.label,
+                    entry_order_id: "", // not stored on PendingRevert today
+                    exit_order_id,
+                    slug: &slug,
+                    fee_in: &fee_in_str,
+                    fee_out: &fee_out_str,
+                    net_pnl: &net_pnl_str,
+                },
+            );
+        }
+    }
+
+    // In-memory trade log is updated AFTER the DB write so /api/status reflects
+    // committed state on success; on a DB failure we still keep the in-memory
+    // record because the outer task already saw the fill.
+    app.trade_log.lock().unwrap().push(trade_record);
+
+    // Stamp net_pnl on the originating signal-group. Group closes once both
+    // legs are terminal — the leg-state update sites already call
+    // `mark_group_closed_if_terminal` after each transition.
+    app.set_group_net_pnl(&revert.correlation_id, net_pnl);
+}
+
 /// Log a completed round-trip (FAK entry + GTC revert exit) to the DB.
 /// PnL = exit_proceeds - entry_cost for each leg.
+///
+/// Kept for any future caller that does NOT have an exit `TradeRecord` to
+/// pair with. The trade log itself is now written by the atomic
+/// [`log_revert_fill_with_round_trip`] helper at the three known revert-fill
+/// sites.
+#[allow(dead_code)]
 fn log_round_trip(
     app: &Arc<AppState>,
     config: &Config,
@@ -1062,6 +1580,8 @@ fn log_round_trip(
     if let Some(ref db) = *app.db.read().unwrap() {
         let slug = config.market_slug.clone();
         let now = crate::state::ist_now();
+        // Legacy fall-back: net_pnl == pnl when no per-leg fees are wired in.
+        let pnl_str = pnl.round_dp(6).to_string();
         db.insert_round_trip(
             &revert.placed_at.elapsed().as_secs().to_string(), // approximate entry time
             &now,
@@ -1070,11 +1590,14 @@ fn log_round_trip(
             &revert.entry_price.to_string(),
             &exit_price.to_string(),
             &exit_size.to_string(),
-            &pnl.round_dp(6).to_string(),
+            &pnl_str,
             &revert.label,
             "", // entry_order_id not stored in PendingRevert — could add later
             exit_order_id,
             &slug,
+            "0",
+            "0",
+            &pnl_str,
         );
     }
 }
@@ -1177,6 +1700,8 @@ pub async fn clob_order_sync(
                                 status: status.to_string(),
                                 asset_id: o.get("asset_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                                 side,
+                                polymarket_trade_id: None,
+                                raw_json: String::new(),
                             });
                             tracing::debug!(order_id = %oid, status, filled = %size_matched, "[ORDER-SYNC] reconciled revert fill");
                         }
@@ -1202,22 +1727,25 @@ async fn spawn_boundary_trade(
     batting: Team,
     runs: u8,
     kind: &'static str,
+    direction: EntryDirection,
     event_seq: u64,
     signal_tag: String,
     signal_time: Instant,
 ) {
-    let bowling = batting.opponent();
-    let (batting_book, bowling_book) = team_books(&books, batting);
+    // Boundary directional: SELL bowling + BUY batting. Reverse swaps to
+    // SELL batting + BUY bowling.
+    let (sell_team, buy_team) = entry_legs(LegPair::SellBowlingBuyBatting, batting, direction);
+    let (sell_book, _) = team_books(&books, sell_team);
+    let (buy_book, _) = team_books(&books, buy_team);
 
-    // Boundary: bowler got hit -> sell bowling (price drops), buy batting (price rises)
-    let sell_order = if app.is_team_enabled(bowling) {
-        let held = position.lock().unwrap().token_balance(bowling);
-        resolve_sell_order(&config, &app, &auth, bowling, &bowling_book, held, signal_time).await
+    let sell_order = if app.is_team_enabled(sell_team) {
+        let held = position.lock().unwrap().token_balance(sell_team);
+        resolve_sell_order(&config, &app, &auth, sell_team, &sell_book, held, signal_time).await
     } else {
         None
     };
-    let buy_order = if app.is_team_enabled(batting) {
-        resolve_buy_order(&config, &app, &auth, batting, &batting_book, signal_time).await
+    let buy_order = if app.is_team_enabled(buy_team) {
+        resolve_buy_order(&config, &app, &auth, buy_team, &buy_book, signal_time).await
     } else {
         None
     };
@@ -1227,8 +1755,8 @@ async fn spawn_boundary_trade(
         return;
     }
 
-    let msg = format!("{kind}{runs} BOUNDARY — sell {} buy {}",
-        config.team_name(bowling), config.team_name(batting));
+    let msg = format!("{kind}{runs} BOUNDARY [{:?}] — sell {} buy {}",
+        direction, config.team_name(sell_team), config.team_name(buy_team));
     tracing::info!("{msg}");
     app.push_event("boundary", &msg);
 
@@ -1249,6 +1777,7 @@ async fn fire_fak_batch(
     sell_tag: &str,
     buy_order: Option<ResolvedOrder>,
     buy_tag: &str,
+    correlation_id: &str,
     _signal_time: Instant,
 ) -> (Option<FakResult>, Option<FakResult>) {
     // Budget check for buy order
@@ -1264,6 +1793,38 @@ async fn fire_fak_batch(
         }
     } else {
         buy_order
+    };
+
+    // D5 (TODO.md): inventory check for sell order. The order book may have
+    // moved since `resolve_sell_order` sized the leg from `pos.token_balance`
+    // — a concurrent revert fill in the same window can shrink held tokens
+    // below `sell.fak.size`. Re-read at submit time and refuse the leg if
+    // we no longer have enough inventory; otherwise the CLOB rejects with a
+    // confusing "insufficient balance" and the strategy keeps thinking it
+    // owns tokens it doesn't.
+    let sell_order = if let Some(ref sell) = sell_order {
+        let held = position.lock().unwrap().token_balance(sell.fak.team);
+        if held < sell.fak.size {
+            tracing::warn!(
+                tag = sell_tag,
+                team = %config.team_name(sell.fak.team),
+                held = %held,
+                requested = %sell.fak.size,
+                "[D5] held tokens shrunk below sell size — sell skipped",
+            );
+            app.push_event(
+                "warn",
+                &format!(
+                    "{sell_tag}: insufficient tokens (held {held} < {} requested), skipping",
+                    sell.fak.size,
+                ),
+            );
+            None
+        } else {
+            sell_order
+        }
+    } else {
+        sell_order
     };
 
     // Dry run
@@ -1377,6 +1938,36 @@ async fn fire_fak_batch(
         app.push_event("trade", &format!("{tag}: FAK {} {} @ {} sz={} ({}) [{}]",
             fak.side, config.team_name(fak.team), fak.price, fak.size, oid, status));
 
+        // B5: persist placement metadata so the FAK pair is joinable to its
+        // future revert (and any augments) via correlation_id.
+        if let Some(ref db) = *app.db.read().unwrap() {
+            let purpose = match fak.side {
+                Side::Buy => "FAK_BUY",
+                Side::Sell => "FAK_SELL",
+            };
+            let asset_id = config.token_id(fak.team).to_string();
+            let side_str = format!("{}", fak.side);
+            let price_str = fak.price.to_string();
+            let size_str = fak.size.to_string();
+            let team_str = config.team_name(fak.team).to_string();
+            let ts = crate::state::ist_now();
+            db.record_order_placement(&crate::db::OrderPlacement {
+                order_id: oid,
+                slug: &config.market_slug,
+                asset_id: &asset_id,
+                side: &side_str,
+                price: &price_str,
+                original_size: &size_str,
+                status,
+                order_type: "FAK",
+                created_at: &ts,
+                team: &team_str,
+                correlation_id,
+                purpose,
+                replaces_order_id: None,
+            });
+        }
+
         let result = FakResult {
             order_id: Some(oid.to_string()),
             intended_order: fak.clone(),
@@ -1435,6 +2026,9 @@ async fn detect_fill(
             );
             app.push_event("fill", &format!("{}: filled {} @ {} [WS:{}]",
                 result.tag, fill.filled_size, fill.avg_price, fill.status));
+            if let Some(ref db) = *app.db.read().unwrap() {
+                db.mark_clob_order_terminal(order_id, "matched", &fill.filled_size.to_string());
+            }
             return Some(FillInfo {
                 filled_size: fill.filled_size,
                 avg_price: if fill.avg_price.is_zero() { result.intended_order.price } else { fill.avg_price },
@@ -1465,6 +2059,9 @@ async fn detect_fill(
                     app.latency.record(LatencyMetric::FillDetectPoll, signal_time.elapsed());
                     app.push_event("fill", &format!("{}: filled {} @ {} [REST:{}]",
                         result.tag, filled, price, status));
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.mark_clob_order_terminal(order_id, "matched", &filled.to_string());
+                    }
                     return Some(FillInfo {
                         filled_size: filled,
                         avg_price: if price.is_zero() { result.intended_order.price } else { price },
@@ -1480,6 +2077,9 @@ async fn detect_fill(
                     let sz = result.intended_order.size;
                     let px = result.intended_order.price;
                     app.push_event("fill", &format!("{}: filled {} @ {} [REST:matched]", result.tag, sz, px));
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        db.mark_clob_order_terminal(order_id, "matched", &sz.to_string());
+                    }
                     return Some(FillInfo {
                         filled_size: sz,
                         avg_price: px,
@@ -1492,6 +2092,11 @@ async fn detect_fill(
                 if open_order.is_terminal() {
                     tracing::warn!(tag = %result.tag, order_id, status, "FAK order terminal — no fill");
                     app.push_event("warn", &format!("{}: NO FILL — status {} (order killed)", result.tag, status));
+                    if let Some(ref db) = *app.db.read().unwrap() {
+                        // Use the matcher's reported status verbatim so the
+                        // UI shows "killed"/"cancelled"/"expired" accurately.
+                        db.mark_clob_order_terminal(order_id, status, "0");
+                    }
                     return None;
                 }
             }
@@ -1510,6 +2115,184 @@ async fn detect_fill(
     tracing::warn!(tag = %result.tag, order_id, "poll timed out — no fill confirmation");
     app.push_event("warn", &format!("{}: poll timed out, no fill confirmed", result.tag));
     None
+}
+
+/// Read current WS health from `AppState`. Returns `Default` (block trading)
+/// if the channel hasn't been initialised yet — safer than panicking before
+/// `start_book_ws` has run.
+pub(crate) fn current_ws_health(app: &AppState) -> WsHealth {
+    if let Some(rx) = app.ws_health_rx.read().unwrap().as_ref() {
+        *rx.borrow()
+    } else {
+        WsHealth::default()
+    }
+}
+
+/// Block-trading guard. Returns `Some(reason)` when the strategy should skip
+/// the current signal. Replaces the old `book_is_stale` timestamp check —
+/// see `crate::ws_health` for the semantics.
+pub(crate) fn ws_blocks_signal(app: &AppState) -> Option<&'static str> {
+    ws_blocks_trading_reason(&current_ws_health(app))
+}
+
+/// Which two team↔side bindings the directional (current-strategy) entry uses
+/// for a given signal type. Reverse simply swaps the bindings.
+///
+/// - `SellBattingBuyBowling` — wicket: directional sells the team that lost
+///   wicket (its price just dropped) and buys the bowling team (price rose).
+/// - `SellBowlingBuyBatting` — boundary (4/6/wide-4/no-ball-4 etc.):
+///   directional sells the bowling team (price dropped) and buys the batting
+///   team (price rose).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegPair {
+    SellBattingBuyBowling,
+    SellBowlingBuyBatting,
+}
+
+/// Outcome of `decide_entry_direction`.
+///
+/// - `Directional` — execute the legs as defined by `LegPair` (current/momentum).
+/// - `Reverse` — swap sell/buy team bindings (mean-reversion entry). Use when
+///   the market has already moved by ≥ threshold on both sides we'd cross.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryDirection {
+    Directional,
+    Reverse,
+}
+
+/// Decide whether to enter directional (current strategy, momentum) or
+/// reverse (mean-reversion) on a fresh signal.
+///
+/// Compares the current touches we'd cross against touches from `~lookback`
+/// ago. Reverse only when BOTH the sell-side bid has dropped *and* the
+/// buy-side ask has risen by at least `threshold`. Either side moving alone
+/// is treated as book stutter, not a real news move, and stays directional.
+///
+/// Cold-start (no past snapshot) and one-sided book gaps both fall back to
+/// directional — safer to keep current behaviour than to flip on incomplete
+/// data.
+///
+/// `threshold` is supplied by the caller as a `Decimal` price gap so this
+/// stays a pure function — caller computes `multiplier × edge_ticks × tick`.
+pub fn decide_entry_direction(
+    legs: LegPair,
+    batting: Team,
+    current: TouchSnapshot,
+    past: Option<TouchSnapshot>,
+    threshold: Decimal,
+) -> EntryDirection {
+    let past = match past {
+        Some(p) => p,
+        None => return EntryDirection::Directional, // cold start
+    };
+
+    // Identify which team's bid we'd hit (sell side) and which team's ask
+    // we'd lift (buy side) under the *directional* leg construction. The
+    // pre-signal-move check is on these two touches.
+    let (sell_team, buy_team) = match legs {
+        LegPair::SellBattingBuyBowling => (batting, batting.opponent()),
+        LegPair::SellBowlingBuyBatting => (batting.opponent(), batting),
+    };
+
+    // News direction:
+    //   sell-side bid should DROP (sell team's win-prob falling)
+    //   buy-side ask should RISE (buy team's win-prob rising)
+    let drop_in_sell_bid = match (past.bid(sell_team), current.bid(sell_team)) {
+        (Some(p), Some(c)) => p - c,
+        _ => return EntryDirection::Directional, // missing data
+    };
+    let rise_in_buy_ask = match (past.ask(buy_team), current.ask(buy_team)) {
+        (Some(p), Some(c)) => c - p,
+        _ => return EntryDirection::Directional,
+    };
+
+    if drop_in_sell_bid >= threshold && rise_in_buy_ask >= threshold {
+        EntryDirection::Reverse
+    } else {
+        EntryDirection::Directional
+    }
+}
+
+/// Resolve which (sell_team, buy_team) bindings to use for `legs` and
+/// `direction`. `Directional` follows `legs` as defined; `Reverse` swaps
+/// the two sides so the strategy flips from momentum-entry to mean-reversion-
+/// entry (BUY the news-direction loser, SELL the news-direction winner).
+pub fn entry_legs(legs: LegPair, batting: Team, direction: EntryDirection) -> (Team, Team) {
+    let (sell_team, buy_team) = match legs {
+        LegPair::SellBattingBuyBowling => (batting, batting.opponent()),
+        LegPair::SellBowlingBuyBatting => (batting.opponent(), batting),
+    };
+    match direction {
+        EntryDirection::Directional => (sell_team, buy_team),
+        EntryDirection::Reverse => (buy_team, sell_team),
+    }
+}
+
+/// `dispatch_decision` ledger tag for a direction, distinguishing the two
+/// branches in post-match analysis without log archaeology. The bare
+/// `"NORMAL"` write earlier in the dispatch path is overwritten by these.
+pub fn dispatch_decision_tag(direction: EntryDirection) -> &'static str {
+    match direction {
+        EntryDirection::Directional => "NORMAL_DIRECTIONAL",
+        EntryDirection::Reverse => "NORMAL_REVERSE",
+    }
+}
+
+/// Resolve directional vs reverse entry from `AppState` (price history,
+/// tick size) and the current books. Logs the decision with the relevant
+/// touches so post-match review can attribute outcomes.
+pub(crate) fn resolve_entry_direction_for(
+    app: &Arc<AppState>,
+    config: &Config,
+    legs: LegPair,
+    label: &str,
+    batting: Team,
+    books: &(OrderBook, OrderBook),
+) -> EntryDirection {
+    let now = Instant::now();
+    let current = TouchSnapshot::from_books(now, books);
+    let past = app.price_history.touches_lookback_ago(now);
+    let tick_size = app.resolve_tick_size(&config.tick_size);
+    let threshold = move_threshold(label, config, tick_size);
+    let direction = decide_entry_direction(legs, batting, current, past, threshold);
+
+    tracing::info!(
+        signal = label,
+        direction = ?direction,
+        threshold = %threshold,
+        had_past = past.is_some(),
+        "entry direction decided"
+    );
+    direction
+}
+
+/// Compute the price-move threshold for a given signal type.
+///
+/// `total_ticks = round(edge_ticks × multiplier)`; threshold in price units
+/// is `total_ticks × tick_size`. Rounding to whole ticks keeps the threshold
+/// on the same lattice as the book itself (no fractional-tick comparisons).
+pub fn move_threshold(label: &str, config: &Config, tick_size: Decimal) -> Decimal {
+    let edge_ticks = edge_ticks_for_label(label, config);
+    let total = (edge_ticks * config.move_threshold_multiplier).round();
+    let total_i = total.max(0.0) as i64;
+    Decimal::from(total_i) * tick_size
+}
+
+/// Pure predicate for the revert monitor's wall-clock timeout escalation.
+///
+/// Returns `true` when the GTC revert has waited past `timeout_ms` and the
+/// monitor should cancel + flatten via a taker FAK. Convention: `timeout_ms == 0`
+/// disables escalation entirely — the GTC waits indefinitely.
+///
+/// The default in production is `0` (no escalation). Adverse-selection on the
+/// revert leg costs more than holding inventory; better to wait for the
+/// counter-leg fill (or close the position at innings end) than to flatten
+/// at a worse touch when the market has moved against us.
+pub fn should_escalate_revert_timeout(timeout_ms: u64, elapsed: std::time::Duration) -> bool {
+    if timeout_ms == 0 {
+        return false;
+    }
+    elapsed >= std::time::Duration::from_millis(timeout_ms)
 }
 
 pub(crate) fn price_in_safe_range(config: &Config, books: &(OrderBook, OrderBook)) -> bool {
@@ -1560,7 +2343,17 @@ pub(crate) fn build_sell_order(config: &Config, team: Team, book: &OrderBook, he
     Some(FakOrder { team, side: Side::Sell, price, size })
 }
 
-/// Build a BUY FAK at L+1 price, sized from budget.
+/// Build a BUY FAK at L+1 price, sized from budget and grossed-up so that
+/// after the V2 platform fee deduction we receive at least the budgeted
+/// quantity of tokens.
+///
+/// Sizing:
+/// ```text
+///   net   = floor(max_trade_usdc / price)         # tokens we want net of fee
+///   gross = fees::gross_up_buy(net, price, r, e)  # tokens we request
+/// ```
+/// `r=0` short-circuits to `gross = net`, preserving pre-fee behaviour for
+/// all callers that haven't fetched a market yet.
 pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> Option<FakOrder> {
     let levels = &book.asks.levels;
     if levels.is_empty() { return None; }
@@ -1568,14 +2361,621 @@ pub(crate) fn build_buy_order(config: &Config, team: Team, book: &OrderBook) -> 
     // Price at L+1 if available, else L0
     let price = levels.get(1).map_or(levels[0].price, |l| l.price);
 
-    // Size purely from budget
-    let mut size = (config.max_trade_usdc / price).floor();
+    // Net target — what we want after the platform fee comes out of the
+    // received tokens.
+    let net = (config.max_trade_usdc / price).floor();
 
-    if size < config.order_min_size {
-        size = config.order_min_size;
-    }
+    // Gross-up by the V2 fee factor. With r=0 this is a no-op.
+    let e_u32 = crate::fees::fee_exponent_as_u32(config.fee_exponent);
+    let gross = crate::fees::gross_up_buy(net, price, config.fee_rate, e_u32);
+
+    let size = if gross < config.order_min_size {
+        config.order_min_size
+    } else {
+        gross
+    };
 
     Some(FakOrder { team, side: Side::Buy, price, size })
+}
+
+/// Time-based escalation: a maker revert hasn't filled within
+/// `config.revert_timeout_ms`. Cancel it, determine how much filled before
+/// the cancel landed, and flatten the residual via a taker FAK at L+1 of
+/// the opposite side.
+///
+/// Always idempotent: safe to call once per revert, no double-cancel.
+/// Sizing uses `compute_taker_exit_size` for `Decimal` precision; the
+/// max-of-(cancel_response, get_order) handles the race where a partial
+/// fill landed mid-cancel.
+#[allow(clippy::too_many_arguments)]
+async fn handle_revert_timeout(
+    config: &Config,
+    auth: &ClobAuth,
+    app: &Arc<AppState>,
+    position: &Position,
+    order_id: &str,
+    team: Team,
+    side: Side,
+    label: &str,
+    correlation_id: &str,
+    leg_role: crate::state::LegRole,
+) {
+    tracing::info!(
+        order_id, label, timeout_ms = config.revert_timeout_ms,
+        "[REVERT-TIMEOUT] firing taker exit",
+    );
+    app.push_event(
+        "timeout",
+        &format!("{}: revert timeout — cancelling GTC and firing taker exit", label),
+    );
+
+    // 1. Cancel the GTC. Dry-run skips the HTTP and assumes zero fills.
+    if !config.dry_run {
+        // Flip the DB row to "cancelled" up front so the open-orders view
+        // stops showing the GTC as live within ~1s; if the cancel HTTP
+        // fails below we won't recover, but the row was about to be
+        // flipped by the polling sync anyway.
+        if let Some(ref db) = *app.db.read().unwrap() {
+            db.mark_clob_order_terminal(order_id, "cancelled", "0");
+        }
+        if let Err(e) = orders::cancel_orders_batch(auth, &[order_id.to_string()]).await {
+            tracing::warn!(order_id, label, error = %e, "timeout: cancel failed — aborting taker exit");
+            app.push_event("error", &format!("{}: timeout cancel failed: {}", label, e));
+            // Leave the leg in Posted; the user can retry / cancel manually.
+            return;
+        }
+    }
+
+    // 2. Determine pre-cancel filled size — max of any signal we have.
+    //    `cancel_orders_batch` doesn't return per-order matched size today,
+    //    so we read it via `get_order` and also drain any buffered WS fill.
+    //    The MAX wins because `size_matched` is monotonically non-decreasing
+    //    on Polymarket's matcher, so the larger of the two is authoritative.
+    //
+    //    Note: we drain the WS buffer here even if the value is zero, so
+    //    a fill that lands AFTER this check but before the FAK exit posts
+    //    is still readable by the next monitor task — but the same buffer
+    //    is shared and can be re-read; for the *current* timeout branch
+    //    we operate strictly on what's visible right now.
+    let ws_filled_pre_cancel = app.take_fill_event(order_id)
+        .map(|e| e.filled_size)
+        .unwrap_or(Decimal::ZERO);
+    let rest_filled = if !config.dry_run {
+        orders::get_order(auth, order_id).await
+            .map(|o| o.filled_size())
+            .unwrap_or(Decimal::ZERO)
+    } else {
+        Decimal::ZERO
+    };
+    let maker_filled = ws_filled_pre_cancel.max(rest_filled);
+    tracing::info!(
+        order_id, label,
+        ws_filled_pre_cancel = %ws_filled_pre_cancel, rest_filled = %rest_filled,
+        maker_filled = %maker_filled,
+        "timeout: pre-exit fill state",
+    );
+
+    // 3. Pull the PendingRevert (entry size, entry_fee, entry_price).
+    let revert = match app.remove_revert(order_id) {
+        Some(r) => r,
+        None => {
+            tracing::debug!(order_id, label, "timeout: revert already removed (race) — exiting");
+            app.update_leg(correlation_id, leg_role, |leg| {
+                leg.state = crate::state::LegState::Cancelled {
+                    order_id: order_id.to_string(),
+                    reason: "timeout: removed externally".into(),
+                };
+            });
+            app.mark_group_closed_if_terminal(correlation_id);
+            return;
+        }
+    };
+
+    // 3a. Apply the pre-cancel maker partial fill to the *position* (only).
+    //     The trade-row write is deferred to step 7 — we don't know yet
+    //     whether the round-trip exit is "maker-only" (one atomic
+    //     writer call) or "maker + FAK" (two writes), and we must avoid
+    //     double-logging the same maker fill.
+    if maker_filled > Decimal::ZERO {
+        let mut pos = position.lock().unwrap();
+        pos.on_fill(&FakOrder {
+            team, side, // revert side: SELL closes a BUY, BUY closes a SELL
+            price: revert.revert_limit_price,
+            size: maker_filled,
+        });
+        tracing::info!(
+            order_id, label, %maker_filled, price = %revert.revert_limit_price,
+            "timeout: applied pre-cancel maker partial fill to position",
+        );
+    }
+
+    // 4. Compute exit size with full Decimal precision. None means already
+    //    flat or residual smaller than `order_min_size` — write the
+    //    maker-only round-trip and bail.
+    let exit_size = match compute_taker_exit_size(
+        revert.size, ws_filled_pre_cancel, rest_filled, config.order_min_size,
+    ) {
+        Some(s) => s,
+        None => {
+            tracing::info!(
+                order_id, label,
+                entry_size = %revert.size,
+                maker_filled = %maker_filled,
+                "timeout: nothing to exit (already flat or residual below min)",
+            );
+            app.push_event(
+                "revert",
+                &format!("{}: timeout — flat after partial fills, no taker exit needed", label),
+            );
+
+            // Choose the leg's terminal state. Three cases:
+            //   - maker_filled == revert.size (full maker fill): Filled
+            //     — economically the same as a normal maker exit.
+            //   - 0 < maker_filled < revert.size (partial, residual
+            //     below min): Partial — accurate, surfaces the open
+            //     residual to the operator.
+            //   - maker_filled == 0: Cancelled — nothing filled,
+            //     residual was always sub-min (degenerate).
+            let oid_for_state = order_id.to_string();
+            let new_state = if maker_filled.is_zero() {
+                crate::state::LegState::Cancelled {
+                    order_id: oid_for_state,
+                    reason: "timeout: residual below min size".into(),
+                }
+            } else if maker_filled >= revert.size {
+                crate::state::LegState::Filled {
+                    order_id: oid_for_state,
+                    size: maker_filled,
+                    avg_price: revert.revert_limit_price,
+                    fee: Decimal::ZERO,
+                }
+            } else {
+                crate::state::LegState::Partial {
+                    order_id: oid_for_state,
+                    filled: maker_filled,
+                    requested: revert.size,
+                    avg_price: revert.revert_limit_price,
+                    fee: Decimal::ZERO,
+                }
+            };
+            app.update_leg(correlation_id, leg_role, |leg| { leg.state = new_state; });
+
+            // Maker-only round-trip writer: writes the trade row AND the
+            // round_trip row atomically. No duplicate trade row because
+            // step 3a only updated `position`, not the trade log.
+            if maker_filled > Decimal::ZERO {
+                let record = TradeRecord {
+                    ts: crate::state::ist_now(),
+                    side: format!("{}", side),
+                    team: config.team_name(team).to_string(),
+                    size: maker_filled,
+                    price: revert.revert_limit_price,
+                    cost: maker_filled * revert.revert_limit_price,
+                    order_type: "GTC".into(),
+                    label: label.to_string(),
+                    order_id: order_id.to_string(),
+                    fee: Decimal::ZERO,
+                };
+                log_revert_fill_with_round_trip(
+                    app, config, &revert,
+                    revert.revert_limit_price, maker_filled,
+                    order_id, record,
+                );
+            }
+            app.mark_group_closed_if_terminal(correlation_id);
+            app.snapshot_inventory();
+            return;
+        }
+    };
+
+    // 4b. Maker + FAK path: log the maker trade row now (separate from the
+    //     FAK trade row that the round-trip writer will produce). Two
+    //     trade rows + one round_trip row total — economically correct.
+    if maker_filled > Decimal::ZERO {
+        app.log_trade(TradeRecord {
+            ts: crate::state::ist_now(),
+            side: format!("{}", side),
+            team: config.team_name(team).to_string(),
+            size: maker_filled,
+            price: revert.revert_limit_price,
+            cost: maker_filled * revert.revert_limit_price,
+            order_type: "GTC".into(),
+            label: format!("{label}_PRE_TIMEOUT_MAKER"),
+            order_id: order_id.to_string(),
+            fee: Decimal::ZERO,
+        });
+    }
+
+    // 5. Read current book for L+1 pricing.
+    let book = {
+        let br = app.book_rx.read().unwrap();
+        let books = match br.as_ref() {
+            Some(rx) => rx.borrow().clone(),
+            None => {
+                tracing::error!(label, "timeout: no book available — taker exit aborted");
+                app.update_leg(correlation_id, leg_role, |leg| {
+                    leg.state = crate::state::LegState::Cancelled {
+                        order_id: order_id.to_string(),
+                        reason: "timeout: no book".into(),
+                    };
+                });
+                app.mark_group_closed_if_terminal(correlation_id);
+                return;
+            }
+        };
+        match team {
+            Team::TeamA => books.0,
+            Team::TeamB => books.1,
+        }
+    };
+    let exit_order = match build_taker_exit_fak(team, side, &book, exit_size) {
+        Some(o) => o,
+        None => {
+            tracing::warn!(label, "timeout: opposite side empty — taker exit aborted");
+            app.update_leg(correlation_id, leg_role, |leg| {
+                leg.state = crate::state::LegState::Cancelled {
+                    order_id: order_id.to_string(),
+                    reason: "timeout: no liquidity on opposite side".into(),
+                };
+            });
+            app.mark_group_closed_if_terminal(correlation_id);
+            return;
+        }
+    };
+
+    // 6. Submit the FAK. Dry-run path mirrors execute_event_trade's pattern.
+    let exit_tag = format!("{label}_TIMEOUT_TAKER");
+    if config.dry_run {
+        tracing::info!(
+            tag = %exit_tag, side = %exit_order.side, team = %config.team_name(team),
+            price = %exit_order.price, size = %exit_order.size,
+            "[DRY RUN] would fire taker exit FAK",
+        );
+        app.push_event(
+            "trade",
+            &format!("[DRY] {}: FAK exit {} @ {} sz={}", exit_tag, exit_order.side, exit_order.price, exit_order.size),
+        );
+        // Treat as fully filled at the limit price for state-tracking purposes.
+        record_taker_exit_fill(
+            config, app, position, &revert, &exit_order, exit_order.size,
+            exit_order.price,
+            maker_filled, revert.revert_limit_price,
+            "dry_run_timeout", correlation_id, leg_role, label,
+        );
+        return;
+    }
+
+    let resp = match orders::post_fak_order(config, auth, &exit_order, &exit_tag).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(label, error = %e, "timeout: FAK submission failed");
+            app.push_event("error", &format!("{}: timeout FAK failed: {}", label, e));
+            // Persist the maker partial's round-trip row (trade row was
+            // already written in step 4b). Without this the partial would
+            // appear in `trades` but never in `round_trips`, hiding it
+            // from net_pnl aggregates.
+            write_round_trip_only_for_maker_partial(
+                app, config, &revert, maker_filled, revert.revert_limit_price, order_id,
+            );
+            app.update_leg(correlation_id, leg_role, |leg| {
+                leg.state = crate::state::LegState::Cancelled {
+                    order_id: order_id.to_string(),
+                    reason: format!("timeout FAK submit error: {e}"),
+                };
+            });
+            app.mark_group_closed_if_terminal(correlation_id);
+            return;
+        }
+    };
+    let exit_oid = match resp.order_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(o) => o.to_string(),
+        None => {
+            let err = resp.error_msg.unwrap_or_default();
+            tracing::warn!(label, err, "timeout: FAK rejected at submit");
+            app.push_event("error", &format!("{}: timeout FAK rejected — {}", label, err));
+            write_round_trip_only_for_maker_partial(
+                app, config, &revert, maker_filled, revert.revert_limit_price, order_id,
+            );
+            app.update_leg(correlation_id, leg_role, |leg| {
+                leg.state = crate::state::LegState::Cancelled {
+                    order_id: order_id.to_string(),
+                    reason: format!("timeout FAK rejected: {err}"),
+                };
+            });
+            app.mark_group_closed_if_terminal(correlation_id);
+            return;
+        }
+    };
+
+    // 7. Detect the FAK exit fill. Race WS buffer + REST poll, same as entry.
+    let poll_interval = Duration::from_millis(config.fill_poll_interval_ms.max(200));
+    let poll_timeout = Duration::from_millis(config.fill_poll_timeout_ms);
+    let fak_result = FakResult {
+        order_id: Some(exit_oid.clone()),
+        intended_order: exit_order.clone(),
+        tag: exit_tag.clone(),
+    };
+    let signal_time = Instant::now(); // local timer; only affects latency record
+    let fill = detect_fill(auth, app, Some(fak_result), poll_interval, poll_timeout, config, signal_time).await;
+
+    let Some(fill) = fill else {
+        tracing::error!(label, exit_oid, "timeout: FAK exit didn't fill — POSITION MAY BE STUCK");
+        app.push_event("error", &format!("{}: timeout FAK never filled — manual flatten required", label));
+        write_round_trip_only_for_maker_partial(
+            app, config, &revert, maker_filled, revert.revert_limit_price, order_id,
+        );
+        app.update_leg(correlation_id, leg_role, |leg| {
+            leg.state = crate::state::LegState::Cancelled {
+                order_id: order_id.to_string(),
+                reason: "timeout FAK exit didn't fill".into(),
+            };
+        });
+        app.mark_group_closed_if_terminal(correlation_id);
+        return;
+    };
+
+    record_taker_exit_fill(
+        config, app, position, &revert, &exit_order,
+        fill.filled_size, fill.avg_price,
+        maker_filled, revert.revert_limit_price,
+        &exit_oid, correlation_id, leg_role, label,
+    );
+}
+
+/// Write a round_trip row for a maker partial fill when the subsequent FAK
+/// taker exit failed (submit error, rejection, or never filled). The maker
+/// trade row was already written via `app.log_trade` earlier in the flow,
+/// so we must only persist the round_trip row here — `log_revert_fill_with_round_trip`
+/// would re-write the trade row and double-count.
+///
+/// PnL is computed on the maker portion only (size = `maker_filled`) since
+/// the residual (`revert.size − maker_filled`) is still open exposure that
+/// the strategy could not auto-flatten — the operator must intervene
+/// manually. `set_group_net_pnl` writes the partial net_pnl onto the
+/// signal-group so the UI shows what *did* close.
+fn write_round_trip_only_for_maker_partial(
+    app: &Arc<AppState>,
+    config: &Config,
+    revert: &PendingRevert,
+    maker_filled: Decimal,
+    maker_avg_price: Decimal,
+    exit_order_id: &str,
+) {
+    if maker_filled.is_zero() {
+        return;
+    }
+    let pnl = match revert.side {
+        Side::Sell => (maker_avg_price - revert.entry_price) * maker_filled,
+        Side::Buy => (revert.entry_price - maker_avg_price) * maker_filled,
+    };
+    let fee_in = revert.entry_fee;
+    let fee_out = Decimal::ZERO; // maker
+    let net_pnl = pnl - fee_in - fee_out;
+
+    let entry_side = match revert.side {
+        Side::Sell => "BUY",
+        Side::Buy => "SELL",
+    };
+
+    tracing::info!(
+        team = %config.team_name(revert.team), entry_side,
+        entry_price = %revert.entry_price, exit_price = %maker_avg_price,
+        size = %maker_filled, pnl = %pnl.round_dp(4),
+        fee_in = %fee_in.round_dp(4), fee_out = %fee_out.round_dp(4),
+        net_pnl = %net_pnl.round_dp(4), label = %revert.label,
+        "ROUND-TRIP partial (maker-only after FAK exit failure)",
+    );
+
+    let is_dry = exit_order_id.starts_with("dry_run");
+    if !is_dry {
+        if let Some(ref db) = *app.db.read().unwrap() {
+            let slug = config.market_slug.clone();
+            db.insert_round_trip(
+                &revert.placed_at.elapsed().as_secs().to_string(),
+                &crate::state::ist_now(),
+                &config.team_name(revert.team),
+                entry_side,
+                &revert.entry_price.to_string(),
+                &maker_avg_price.to_string(),
+                &maker_filled.to_string(),
+                &pnl.round_dp(6).to_string(),
+                &revert.label,
+                "",
+                exit_order_id,
+                &slug,
+                &fee_in.round_dp(6).to_string(),
+                &fee_out.round_dp(6).to_string(),
+                &net_pnl.round_dp(6).to_string(),
+            );
+        }
+    }
+    app.set_group_net_pnl(&revert.correlation_id, net_pnl);
+}
+
+/// Apply a TakerExit fill and write a round-trip row that combines any
+/// pre-cancel maker partial fill with the taker FAK fill.
+///
+/// PnL is computed against `revert.entry_price` over the **combined** exit
+/// (`maker_filled + filled_size`), with `fee_out = exit_fee` (taker only;
+/// maker fee is zero under `fd.to=true`). The maker partial's cash flow is
+/// already applied to position+ledger in the caller, so this function only
+/// applies the FAK fill.
+#[allow(clippy::too_many_arguments)]
+fn record_taker_exit_fill(
+    config: &Config,
+    app: &Arc<AppState>,
+    position: &Position,
+    revert: &PendingRevert,
+    exit_order: &FakOrder,
+    filled_size: Decimal,
+    avg_price: Decimal,
+    maker_filled: Decimal,
+    maker_avg_price: Decimal,
+    exit_order_id: &str,
+    correlation_id: &str,
+    leg_role: crate::state::LegRole,
+    label: &str,
+) {
+    let cost = filled_size * avg_price;
+    // Taker exit always pays the V2 fee, expressed in USDC.
+    let fee_e = crate::fees::fee_exponent_as_u32(config.fee_exponent);
+    let exit_fee = crate::fees::fee_usdc_sell(filled_size, avg_price, config.fee_rate, fee_e);
+
+    {
+        let mut pos = position.lock().unwrap();
+        pos.on_fill(&FakOrder {
+            team: exit_order.team,
+            side: exit_order.side,
+            price: avg_price,
+            size: filled_size,
+        });
+    }
+
+    let msg = format!(
+        "{label}: TAKER EXIT {} {} @ {} = ${} (fee ${})",
+        exit_order.side, config.team_name(exit_order.team), avg_price,
+        cost.round_dp(2), exit_fee.round_dp(4),
+    );
+    tracing::info!("{msg}");
+    app.push_event("filled", &msg);
+
+    // Round-trip exit metric: weighted average of the (optional) maker
+    // partial and the taker FAK, applied to `revert.size` total.
+    let combined_size = maker_filled + filled_size;
+    let combined_avg_price = if combined_size.is_zero() {
+        avg_price
+    } else {
+        (maker_filled * maker_avg_price + filled_size * avg_price) / combined_size
+    };
+
+    let trade_record = TradeRecord {
+        ts: crate::state::ist_now(),
+        side: format!("{}", exit_order.side),
+        team: config.team_name(exit_order.team).to_string(),
+        size: filled_size,
+        price: avg_price,
+        cost,
+        order_type: "FAK".into(),
+        label: format!("{label}_TIMEOUT_TAKER"),
+        order_id: exit_order_id.to_string(),
+        fee: exit_fee,
+    };
+
+    // Round-trip writer: pnl = (combined_avg − entry) · combined_size,
+    // fee_in = revert.entry_fee, fee_out = exit_fee.
+    log_revert_fill_with_round_trip(
+        app, config, revert,
+        combined_avg_price, combined_size,
+        exit_order_id, trade_record,
+    );
+
+    // Flip leg state to terminal TakerExit and close the group.
+    app.update_leg(correlation_id, leg_role, |leg| {
+        leg.state = crate::state::LegState::TakerExit {
+            order_id: exit_order_id.to_string(),
+            size: filled_size,
+            avg_price,
+            fee: exit_fee,
+        };
+    });
+    app.mark_group_closed_if_terminal(correlation_id);
+    app.snapshot_inventory();
+}
+
+/// Build a sized FAK at **L0** (best touch) of the opposite side for the
+/// taker-exit fallback.
+///
+/// `team` and `side` here are the side of the **exit** order (= the side of
+/// the maker revert that just timed out). For a SELL-revert timeout we fire
+/// a SELL FAK; for a BUY-revert timeout we fire a BUY FAK.
+///
+/// **Why L0 (not L+1 like entry FAKs):** Polymarket V2 BUY orders spend the
+/// full `maker_amount` USDC budget — when matched at a better-than-limit
+/// price the buyer receives MORE tokens, not less USDC paid. An L+1 limit
+/// lets the matcher sweep both L0 and L+1; if L0 fills at a better price,
+/// the spare USDC budget grabs additional tokens at L+1, *overshooting*
+/// the requested `size`. On entry that's mostly OK (it reinforces the
+/// directional bet), but on the timeout exit overshoot creates new
+/// exposure in the OPPOSITE direction of what we're trying to flatten.
+///
+/// Using L0 caps the limit price at the touch — matcher can only fill at
+/// L0 (or better, but better is also bounded by L0). If L0's depth is less
+/// than `size`, FAK kills the remainder; we end with a small residual
+/// position rather than an overshoot, which is the safer trade-off for a
+/// flattening exit.
+///
+/// Size is the precomputed `remaining_size` from
+/// [`compute_taker_exit_size`] — never re-derived from `max_trade_usdc`,
+/// because the goal here is *flatten the position*, not size by budget.
+pub(crate) fn build_taker_exit_fak(
+    team: Team,
+    side: Side,
+    book: &OrderBook,
+    size: Decimal,
+) -> Option<FakOrder> {
+    let levels = match side {
+        Side::Buy => &book.asks.levels,
+        Side::Sell => &book.bids.levels,
+    };
+    if levels.is_empty() || size.is_zero() {
+        return None;
+    }
+    // L0 only — the touch price. No L+1 sweep, no overshoot.
+    let price = levels[0].price;
+    Some(FakOrder { team, side, price, size })
+}
+
+/// Compute the size for the taker-exit FAK fired when a revert GTC times out.
+///
+/// ```text
+///   filled    = max(cancel_size_matched, get_order_size_matched)  # race-safe
+///   exit_size = max(0, entry_fill_size − filled)
+///   None  if exit_size < order_min_size  # residual too small to FAK
+/// ```
+///
+/// All math is `Decimal` — no `f64`. The `max()` of the two `filled`
+/// observations handles the race where a partial fill landed between the
+/// cancel HTTP and the subsequent `get_order` HTTP: the larger value is
+/// authoritative because fills only ever increase the size_matched counter.
+///
+/// Returns `None` if there is nothing meaningful to exit (already flat, or
+/// residual smaller than the venue's minimum order size).
+pub(crate) fn compute_taker_exit_size(
+    entry_fill_size: Decimal,
+    cancel_size_matched: Decimal,
+    get_order_size_matched: Decimal,
+    order_min_size: Decimal,
+) -> Option<Decimal> {
+    let filled = cancel_size_matched.max(get_order_size_matched);
+    let remaining = (entry_fill_size - filled).max(Decimal::ZERO);
+    if remaining < order_min_size || remaining.is_zero() {
+        return None;
+    }
+    Some(remaining)
+}
+
+/// Human-readable label for the per-signal panel.
+fn signal_label_for_panel(signal: &CricketSignal) -> &'static str {
+    match signal {
+        CricketSignal::Wicket(_) => "WICKET",
+        CricketSignal::Runs(_) => "RUN",
+        CricketSignal::Wide(_) => "WD",
+        CricketSignal::NoBall(_) => "NB",
+        CricketSignal::InningsOver => "IO",
+        CricketSignal::MatchOver => "MO",
+    }
+}
+
+/// V2 fee in USDC for a revert (GTC) fill. With `fd.to=true` (the production
+/// case, enforced at startup in `server.rs`) makers pay zero. The function
+/// still computes the fee when `takers_only_fees=false` so a future flip in
+/// market config doesn't silently mis-attribute fees.
+pub(crate) fn revert_exit_fee(config: &Config, filled: Decimal, price: Decimal) -> Decimal {
+    if config.takers_only_fees || config.fee_rate == 0.0 || filled.is_zero() {
+        return Decimal::ZERO;
+    }
+    let e = crate::fees::fee_exponent_as_u32(config.fee_exponent);
+    crate::fees::fee_usdc_sell(filled, price, config.fee_rate, e)
 }
 
 /// Select the revert edge percentage based on the signal label.
@@ -1592,6 +2992,19 @@ pub(crate) fn edge_ticks_for_label(label: &str, config: &Config) -> f64 {
 /// Round a price to the nearest tick boundary.
 /// e.g., round_to_tick(0.513, 0.01, 2) → 0.51
 ///       round_to_tick(0.5137, 0.001, 3) → 0.514
+/// Decimal places implied by `tick`, capped at 6 to defend against an f64
+/// round-trip that smuggled noise digits into the cached tick (e.g.,
+/// `0.01` arriving as `0.0100000000000000002081668171`). Without the cap,
+/// `round_dp(28)` would preserve the noise, producing limit prices like
+/// `0.21000000000000000043715031591` everywhere.
+fn tick_decimal_places(tick: Decimal) -> u32 {
+    let raw = tick.to_string()
+        .split('.')
+        .nth(1)
+        .map_or(0, |frac| frac.trim_end_matches('0').len());
+    raw.min(6) as u32
+}
+
 fn round_to_tick(price: Decimal, tick: Decimal, tick_dp: u32) -> Decimal {
     if tick.is_zero() {
         return price.round_dp(2);
@@ -1609,9 +3022,19 @@ pub(crate) fn compute_size(config: &Config, available: &Decimal, price: Decimal)
 }
 
 /// Place a GTC limit order and return the order_id if successful.
+///
+/// Reverts (`purpose == "REVERT_GTC"`) are posted with `postOnly=true` so the
+/// matcher rejects rather than crosses. On a cross-reject we **immediately
+/// retry without postOnly** (no sleep) so the crossing portion captures
+/// the now-better market price as a taker fill while the residual rests as
+/// a passive maker. The 15s `revert_timeout_ms` window then applies to
+/// whatever rests after that retry.
 async fn execute_limit(
     config: &Config, auth: &ClobAuth, order: &FakOrder,
     _position: &Position, tag: &str, app: &Arc<AppState>,
+    correlation_id: &str,
+    purpose: &str,
+    replaces_order_id: Option<&str>,
 ) -> Option<String> {
     if config.dry_run {
         let notional = order.price * order.size;
@@ -1622,36 +3045,96 @@ async fn execute_limit(
         return Some(format!("dry_run_{tag}"));
     }
 
-    match orders::post_limit_order(config, auth, order, tag).await {
-        Ok(resp) if resp.order_id.is_some() => {
-            let oid = resp.order_id.unwrap();
-            let cost = order.price * order.size;
-            tracing::info!(tag, order_id = oid, "GTC limit order placed");
-            app.track_order(oid.clone());
-            app.push_event("trade", &format!("{tag}: GTC {} {} @ {} sz={} = ${} ({})",
-                order.side, config.team_name(order.team), order.price, order.size, cost.round_dp(2), oid));
-            app.log_trade(TradeRecord {
-                ts: crate::state::ist_now(),
-                side: format!("{}", order.side),
-                team: config.team_name(order.team).to_string(),
-                size: order.size,
-                price: order.price,
-                cost,
-                order_type: "GTC".into(),
-                label: tag.to_string(),
-                order_id: oid.clone(),
-            });
-            Some(oid)
-        }
-        Ok(resp) => {
-            let msg = resp.error_msg.unwrap_or_default();
-            app.push_event("error", &format!("{tag}: GTC rejected — {msg}"));
-            None
-        }
+    // Post-only is enabled by default for revert reposts so we never
+    // accidentally pay taker fee on what was meant to be a maker. Other
+    // purposes (e.g. maker-engine quotes that already manage their own
+    // post-only) keep the previous behaviour.
+    let post_only = purpose == "REVERT_GTC";
+
+    let resp = match orders::post_limit_order_with_post_only(config, auth, order, tag, post_only).await {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!(tag, error = %e, "GTC limit order failed");
             app.push_event("error", &format!("{tag}: {e}"));
-            None
+            return None;
         }
+    };
+
+    // Cross-reject retry path: book moved further in our favour during the
+    // ~3s sports delay, so the maker price is now on the wrong side of the
+    // touch. Retry plain GTC immediately — the crossing portion fills as
+    // taker at the now-better market price, residual rests as maker.
+    let resp = if resp.order_id.is_none() && post_only {
+        let err = resp.error_msg.as_deref().unwrap_or("");
+        if orders::is_post_only_cross_reject(err) {
+            tracing::warn!(tag, err, "post-only would cross — retrying plain GTC immediately");
+            app.push_event("warn", &format!("{tag}: post-only would cross — retrying plain GTC"));
+            match orders::post_limit_order_with_post_only(config, auth, order, tag, false).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(tag, error = %e, "plain GTC retry failed");
+                    app.push_event("error", &format!("{tag}: plain retry: {e}"));
+                    return None;
+                }
+            }
+        } else {
+            resp
+        }
+    } else {
+        resp
+    };
+
+    if let Some(oid) = resp.order_id {
+        let cost = order.price * order.size;
+        tracing::info!(tag, order_id = %oid, "GTC limit order placed");
+        app.track_order(oid.clone());
+        app.push_event("trade", &format!("{tag}: GTC {} {} @ {} sz={} = ${} ({})",
+            order.side, config.team_name(order.team), order.price, order.size, cost.round_dp(2), oid));
+        app.log_trade(TradeRecord {
+            ts: crate::state::ist_now(),
+            side: format!("{}", order.side),
+            team: config.team_name(order.team).to_string(),
+            size: order.size,
+            price: order.price,
+            cost,
+            order_type: "GTC".into(),
+            label: tag.to_string(),
+            order_id: oid.clone(),
+            // Placement-time stub — no fill yet; fee is set when the
+            // matcher reports a fill against this order.
+            fee: Decimal::ZERO,
+        });
+
+        // B5: persist placement metadata. AUGMENTs pass `replaces_order_id`
+        // so the chain back to the original revert is queryable.
+        if let Some(ref db) = *app.db.read().unwrap() {
+            let asset_id = config.token_id(order.team).to_string();
+            let side_str = format!("{}", order.side);
+            let price_str = order.price.to_string();
+            let size_str = order.size.to_string();
+            let team_str = config.team_name(order.team).to_string();
+            let ts = crate::state::ist_now();
+            db.record_order_placement(&crate::db::OrderPlacement {
+                order_id: &oid,
+                slug: &config.market_slug,
+                asset_id: &asset_id,
+                side: &side_str,
+                price: &price_str,
+                original_size: &size_str,
+                status: "live",
+                order_type: "GTC",
+                created_at: &ts,
+                team: &team_str,
+                correlation_id,
+                purpose,
+                replaces_order_id,
+            });
+        }
+
+        Some(oid)
+    } else {
+        let msg = resp.error_msg.unwrap_or_default();
+        app.push_event("error", &format!("{tag}: GTC rejected — {msg}"));
+        None
     }
 }

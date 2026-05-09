@@ -62,6 +62,12 @@ pub struct SavedSettings {
     pub revert_delay_ms: Option<u64>,
     pub fill_poll_interval_ms: Option<u64>,
     pub fill_poll_timeout_ms: Option<u64>,
+    /// Minimum seconds between consecutive trade-dispatched signals (A1).
+    /// 0 disables the gate. Default 7.
+    pub signal_gap_secs: Option<u64>,
+    /// Max age of the order-book snapshot the strategy is willing to trade
+    /// against (D2). Default 2000ms. 0 disables the check.
+    pub max_book_age_ms: Option<u64>,
     pub dry_run: Option<bool>,
     /// Pre-configured CLOB API credentials (from Polymarket.com → Settings → API).
     /// When set, ClobAuth::derive() skips the EIP-712 L1 derivation call entirely.
@@ -75,16 +81,34 @@ pub struct SavedSettings {
     pub edge_wicket: Option<f64>,
     pub edge_boundary_4: Option<f64>,
     pub edge_boundary_6: Option<f64>,
-    pub fee_rate_bps: Option<u32>,
+    /// V2 fee rate (`fd.r`) — drives `fee = C × rate × p × (1 − p)`.
+    pub fee_rate: Option<f64>,
+    /// V2 fee exponent (`fd.e`) — controls the C constant in the fee formula.
+    pub fee_exponent: Option<f64>,
+    /// V2 `fd.to` (takers-only) flag. When true, makers pay zero. We refuse
+    /// to start trading if this is false — the strategy assumes maker reverts
+    /// are fee-free.
+    pub takers_only_fees: Option<bool>,
+    /// Wall-clock window (ms) before a maker revert GTC times out and
+    /// flattens via a taker FAK at L+1 of the opposite side. `0` disables.
+    /// Default 15000.
+    pub revert_timeout_ms: Option<u64>,
+    /// How far back the price-history ring buffer looks when checking for a
+    /// pre-signal move. Default 3000ms. See `decide_entry_direction`.
+    pub move_lookback_ms: Option<u64>,
+    /// Multiplier applied to `edge_<signal>` to derive the move-detection
+    /// threshold. Default 2.0 — only flip to reverse when both touches have
+    /// moved by ≥ 2× the revert edge, i.e. the move is already past where
+    /// the directional thesis would have profited.
+    pub move_threshold_multiplier: Option<f64>,
     pub order_min_size: Option<String>,
     pub fill_ws_timeout_ms: Option<u64>,
     pub breakeven_timeout_ms: Option<u64>,
     pub maker: Option<MakerConfig>,
-    /// Builder API credentials (from polymarket.com/settings?tab=builder).
-    /// Only used by the sweep engine for order attribution.
-    pub builder_api_key: Option<String>,
-    pub builder_api_secret: Option<String>,
-    pub builder_api_passphrase: Option<String>,
+    /// V2 builderCode — 32-byte hex (0x-prefixed) from polymarket.com/settings.
+    /// Embedded on every order's `builder` field for on-chain attribution.
+    /// Replaces the V1 HMAC headers (POLY_BUILDER_*).
+    pub builder_code: Option<String>,
 }
 
 impl SavedSettings {
@@ -137,6 +161,8 @@ impl SavedSettings {
             revert_delay_ms: Some(config.revert_delay_ms),
             fill_poll_interval_ms: Some(config.fill_poll_interval_ms),
             fill_poll_timeout_ms: Some(config.fill_poll_timeout_ms),
+            signal_gap_secs: Some(config.signal_gap_secs),
+            max_book_age_ms: Some(config.max_book_age_ms),
             dry_run: Some(config.dry_run),
             api_key: Some(config.api_key.clone()).filter(|s| !s.is_empty()),
             api_secret: Some(config.api_secret.clone()).filter(|s| !s.is_empty()),
@@ -145,14 +171,17 @@ impl SavedSettings {
             edge_wicket: Some(config.edge_wicket),
             edge_boundary_4: Some(config.edge_boundary_4),
             edge_boundary_6: Some(config.edge_boundary_6),
-            fee_rate_bps: Some(config.fee_rate_bps),
+            fee_rate: Some(config.fee_rate),
+            fee_exponent: Some(config.fee_exponent),
+            takers_only_fees: Some(config.takers_only_fees),
+            revert_timeout_ms: Some(config.revert_timeout_ms),
             order_min_size: Some(config.order_min_size.to_string()),
             fill_ws_timeout_ms: Some(config.fill_ws_timeout_ms),
             breakeven_timeout_ms: Some(config.breakeven_timeout_ms),
+            move_lookback_ms: Some(config.move_lookback_ms),
+            move_threshold_multiplier: Some(config.move_threshold_multiplier),
             maker: Some(config.maker_config.clone()),
-            builder_api_key: Some(config.builder_api_key.clone()).filter(|s| !s.is_empty()),
-            builder_api_secret: Some(config.builder_api_secret.clone()).filter(|s| !s.is_empty()),
-            builder_api_passphrase: Some(config.builder_api_passphrase.clone()).filter(|s| !s.is_empty()),
+            builder_code: Some(config.builder_code.clone()).filter(|s| !s.is_empty()),
         }
     }
 }
@@ -183,12 +212,39 @@ pub struct Config {
     pub revert_delay_ms: u64,
     pub fill_poll_interval_ms: u64,
     pub fill_poll_timeout_ms: u64,
+    /// Minimum gap between consecutive trade-dispatched signals (A1).
+    /// Captured signals inside the window are recorded with
+    /// `dispatch_decision = "GAP_REJECTED"` and not forwarded to the strategy.
+    /// 0 disables the gate. Default 7.
+    pub signal_gap_secs: u64,
+    /// D2: refuse to trade against a book older than this many milliseconds.
+    /// Stale books appear after a market-WS reconnect storm; trading on them
+    /// risks placing FAKs at prices the venue has already moved past. The
+    /// signal still updates the ledger as `BOOK_STALE` so the rejection is
+    /// auditable. 0 disables the check. Default 2000ms.
+    pub max_book_age_ms: u64,
     pub tick_size: String,
     /// Min order size from Gamma (orderMinSize); enforced when placing orders.
     pub order_min_size: Decimal,
-    /// Taker fee rate in basis points. Fetched from Gamma API (takerBaseFee).
-    /// Sports markets typically use 1000 (10%). Default 0 for non-sports.
-    pub fee_rate_bps: u32,
+    /// V2 fee rate (`fd.r` from /clob-markets/{condition_id}). Drives the fee
+    /// formula `fee = C × fee_rate × p × (1 − p)` where C derives from
+    /// `fee_exponent`. Default 0 — fees only collected from takers.
+    pub fee_rate: f64,
+    /// V2 fee exponent (`fd.e` from /clob-markets/{condition_id}).
+    pub fee_exponent: f64,
+    /// V2 `fd.to` (takers-only). When true, only takers pay the platform fee.
+    /// Strategy code treats GTC reverts as fee-free under this flag. Default
+    /// `true` until a market fetch overrides it.
+    pub takers_only_fees: bool,
+
+    /// Wall-clock timeout (ms) on a pending maker revert GTC before we cancel
+    /// it and flatten via a taker FAK at L+1 of the current opposite-side
+    /// book. Drives the time-based escalation: maker first (free), taker
+    /// after this window (eat the fee, but always flatten).
+    /// `0` disables the timer entirely (revert sits as GTC indefinitely —
+    /// pre-2026 behaviour, kept for safety / dry-run experimentation).
+    /// Default `15000` (15s).
+    pub revert_timeout_ms: u64,
 
     pub ws_ping_interval_secs: u64,
     pub dry_run: bool,
@@ -222,15 +278,18 @@ pub struct Config {
     /// 0 = disabled (revert sits forever as GTC). Default: 3000ms.
     pub breakeven_timeout_ms: u64,
 
+    /// How far back the price-history ring buffer looks when checking for a
+    /// pre-signal move. Default 3000ms.
+    pub move_lookback_ms: u64,
+    /// Multiplier applied to `edge_<signal>` to derive the move-detection
+    /// threshold (in price units). Default 2.0.
+    pub move_threshold_multiplier: f64,
+
     pub maker_config: MakerConfig,
 
-    /// Builder API credentials (sweep only). Separate from regular CLOB creds.
-    #[serde(skip)]
-    pub builder_api_key: String,
-    #[serde(skip)]
-    pub builder_api_secret: String,
-    #[serde(skip)]
-    pub builder_api_passphrase: String,
+    /// V2 builderCode — 32-byte hex (0x-prefixed). Empty string means no
+    /// attribution (zero bytes32 in the signed order).
+    pub builder_code: String,
 }
 
 impl Config {
@@ -291,11 +350,22 @@ impl Config {
                 .unwrap_or_else(|| env_or("FILL_POLL_INTERVAL_MS", "500").parse().unwrap_or(500)),
             fill_poll_timeout_ms: saved.fill_poll_timeout_ms
                 .unwrap_or_else(|| env_or("FILL_POLL_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
+            signal_gap_secs: saved.signal_gap_secs
+                .unwrap_or_else(|| env_or("SIGNAL_GAP_SECS", "7").parse().unwrap_or(7)),
+            max_book_age_ms: saved.max_book_age_ms
+                .unwrap_or_else(|| env_or("MAX_BOOK_AGE_MS", "2000").parse().unwrap_or(2000)),
             tick_size: env_or("TICK_SIZE", "0.01"),
             order_min_size: saved.order_min_size.as_deref()
                 .and_then(|s| Decimal::from_str(s).ok())
                 .unwrap_or(Decimal::ONE),
-            fee_rate_bps: saved.fee_rate_bps.unwrap_or(0),
+            fee_rate: saved.fee_rate.unwrap_or(0.0),
+            fee_exponent: saved.fee_exponent.unwrap_or(0.0),
+            takers_only_fees: saved.takers_only_fees.unwrap_or(true),
+            // Default 0 = disabled. GTC reverts wait indefinitely for fill
+            // rather than escalating to a taker-FAK flatten on timeout, which
+            // tends to lock in adverse selection when the market has moved
+            // against us. See `should_escalate_revert_timeout`.
+            revert_timeout_ms: saved.revert_timeout_ms.unwrap_or(0),
 
             ws_ping_interval_secs: env_or("WS_PING_INTERVAL_SECS", "10").parse()?,
             dry_run: saved.dry_run
@@ -317,11 +387,12 @@ impl Config {
                 .unwrap_or_else(|| env_or("FILL_WS_TIMEOUT_MS", "5000").parse().unwrap_or(5000)),
             breakeven_timeout_ms: saved.breakeven_timeout_ms
                 .unwrap_or_else(|| env_or("BREAKEVEN_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
+            move_lookback_ms: saved.move_lookback_ms.unwrap_or(3_000),
+            move_threshold_multiplier: saved.move_threshold_multiplier.unwrap_or(2.0),
             maker_config: saved.maker.unwrap_or_default(),
 
-            builder_api_key: saved.builder_api_key.unwrap_or_default(),
-            builder_api_secret: saved.builder_api_secret.unwrap_or_default(),
-            builder_api_passphrase: saved.builder_api_passphrase.unwrap_or_default(),
+            builder_code: saved.builder_code
+                .unwrap_or_else(|| env_or("POLYMARKET_BUILDER_CODE", "")),
         })
     }
 
@@ -344,17 +415,9 @@ impl Config {
     }
 
     pub fn exchange_address(&self) -> &str {
-        if self.neg_risk {
-            match self.chain_id {
-                137 => "0xC5d563A36AE78145C45a50134d48A1215220f80a",
-                _ => "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
-            }
-        } else {
-            match self.chain_id {
-                137 => "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-                _ => "0xdFE02Eb6733538f8Ea35D585af8DE5958AD99E40",
-            }
-        }
+        // V2 exchanges (post-2026-04-28 cutover). Same address on Polygon
+        // mainnet and Amoy testnet — see py-clob-client-v2/config.py.
+        crate::orders_v2::exchange_v2_address(self.neg_risk)
     }
 
     pub fn safe_price_range(&self) -> (Decimal, Decimal) {

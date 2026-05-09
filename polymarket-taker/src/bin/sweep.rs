@@ -2,7 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
-use polymarket_taker::{clob_auth, sweep_config, sweep_server, sweep_state};
+use polymarket_taker::{clob_auth, state, sweep_config, sweep_server, sweep_state};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -14,6 +14,7 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| config.log_level.parse().unwrap_or_default()),
         )
         .with_target(false)
+        .with_timer(state::IstTimer)
         .init();
 
     let port = config.http_port;

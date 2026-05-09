@@ -15,7 +15,7 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
 use crate::orders;
-use crate::state::AppState;
+use crate::state::{AppState, DispatchedSignal};
 use crate::types::{CricketSignal, FakOrder, FillEvent, OrderBook, Side, Team};
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -246,7 +246,7 @@ pub fn inventory_tier(
 
 pub async fn run(
     state: Arc<AppState>,
-    mut signal_rx: broadcast::Receiver<CricketSignal>,
+    mut signal_rx: broadcast::Receiver<DispatchedSignal>,
     mut fill_rx: mpsc::Receiver<FillEvent>,
     cancel: CancellationToken,
 ) {
@@ -276,8 +276,8 @@ pub async fn run(
 
     loop {
         tokio::select! {
-            Ok(signal) = signal_rx.recv() => {
-                handle_signal(&state, &signal, &mut maker_state).await;
+            Ok(dispatched) = signal_rx.recv() => {
+                handle_signal(&state, &dispatched.signal, &mut maker_state).await;
             }
             Some(fill) = fill_rx.recv() => {
                 handle_fill(&state, &fill, &mut maker_state).await;
@@ -514,6 +514,34 @@ async fn refresh_quotes(
         match result {
             Ok(resp) => {
                 if let Some(oid) = resp.order_id {
+                    // B5: maker quotes are not tied to a cricket signal, so
+                    // correlation_id is empty. They are still tagged with
+                    // purpose=MAKER_QUOTE so signal-driven orders can be
+                    // filtered in queries.
+                    if let Some(ref db) = *state.db.read().unwrap() {
+                        let asset_id = config.token_id(*team).to_string();
+                        let side_str = format!("{}", side);
+                        let price_str = clamped.to_string();
+                        let size_str = size.to_string();
+                        let team_str = config.team_name(*team).to_string();
+                        let order_type = if maker_cfg.use_gtd { "GTD" } else { "GTC" };
+                        let ts = crate::state::ist_now();
+                        db.record_order_placement(&crate::db::OrderPlacement {
+                            order_id: &oid,
+                            slug: &config.market_slug,
+                            asset_id: &asset_id,
+                            side: &side_str,
+                            price: &price_str,
+                            original_size: &size_str,
+                            status: "live",
+                            order_type,
+                            created_at: &ts,
+                            team: &team_str,
+                            correlation_id: "",
+                            purpose: "MAKER_QUOTE",
+                            replaces_order_id: None,
+                        });
+                    }
                     maker_state.live_orders.insert(*leg, oid);
                 }
             }

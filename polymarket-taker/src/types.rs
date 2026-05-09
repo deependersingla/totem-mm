@@ -220,6 +220,11 @@ impl OrderBook {
 }
 
 /// A fill/trade event received from the user WebSocket or REST polling.
+///
+/// `raw_json` carries the per-event payload as it arrived from the WS so the
+/// `user_fills` ledger (B6) can persist the original record without any
+/// lossy reformatting. REST-polled fallback fills set `raw_json` to "" and
+/// `polymarket_trade_id` to `None`.
 #[derive(Debug, Clone)]
 pub struct FillEvent {
     pub order_id: String,
@@ -228,4 +233,6 @@ pub struct FillEvent {
     pub status: String,
     pub asset_id: String,
     pub side: Side,
+    pub polymarket_trade_id: Option<String>,
+    pub raw_json: String,
 }

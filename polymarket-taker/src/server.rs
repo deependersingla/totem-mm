@@ -25,7 +25,7 @@ use crate::heartbeat;
 use crate::maker;
 use crate::order_cache;
 use crate::orders;
-use crate::state::{AppState, MatchPhase};
+use crate::state::{AppState, DispatchedSignal, MatchPhase};
 use crate::strategy;
 use crate::types::{CricketSignal, FillEvent, OrderBook, Team};
 use crate::user_ws;
@@ -52,14 +52,21 @@ pub fn start_book_ws(state: &Arc<AppState>) {
     *state.book_rx.write().unwrap() = Some(book_rx);
     *state.book_tx.write().unwrap() = Some(book_tx.clone());
 
+    // WS health channel — strategy reads from `ws_health_rx` to gate trades
+    // on connection state + snapshot freshness instead of book timestamps.
+    let (health_tx, health_rx) = watch::channel(crate::ws_health::WsHealth::default());
+    *state.ws_health_rx.write().unwrap() = Some(health_rx);
+    *state.ws_health_tx.write().unwrap() = Some(health_tx.clone());
+
     let cancel = tokio_util::sync::CancellationToken::new();
     *state.ws_cancel.write().unwrap() = Some(cancel.clone());
 
     let team_a = config.team_a_name.clone();
     let team_b = config.team_b_name.clone();
+    let price_history = state.price_history.clone();
     tokio::spawn(async move {
         tokio::select! {
-            res = market_ws::run(&config, book_tx) => {
+            res = market_ws::run(&config, book_tx, health_tx, Some(price_history)) => {
                 if let Err(e) = res {
                     tracing::error!(error = %e, "book ws failed");
                 }
@@ -107,6 +114,8 @@ pub fn build_router(state: S) -> Router {
         .route("/api/maker/status", get(get_maker_status))
         .route("/api/maker/config", post(post_maker_config))
         .route("/api/latency", get(get_latency))
+        .route("/api/positions", get(get_positions))
+        .route("/api/balance", get(get_v2_balance))
         // ── Sweep (endgame) ───────────────────────────────────────────────
         .route("/sweep", get(serve_sweep_ui))
         .route("/api/sweep/status", get(get_sweep_status))
@@ -313,8 +322,10 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "max_trade_usdc": config.max_trade_usdc.to_string(),
         "safe_percentage": config.safe_percentage,
         "revert_delay_ms": config.revert_delay_ms,
+        "revert_timeout_ms": config.revert_timeout_ms,
         "fill_poll_interval_ms": config.fill_poll_interval_ms,
         "fill_poll_timeout_ms": config.fill_poll_timeout_ms,
+        "signal_gap_secs": config.signal_gap_secs,
         "dry_run": config.dry_run,
         "signature_type": config.signature_type,
         "neg_risk": config.neg_risk,
@@ -331,44 +342,21 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
     }))
 }
 
-// ── Wallets + USDC balances ──────────────────────────────────────────────────
+// ── Wallets ──────────────────────────────────────────────────────────────────
+//
+// Returns just the addresses. Balances come from /api/balance (CLOB pUSD
+// /balance-allowance) and positions from /api/positions (data-api). The V1
+// USDC.e on-chain balance read used to live here — removed because pUSD is
+// the V2 collateral and CLOB resolves it server-side.
 
 async fn get_wallets(State(state): State<S>) -> Json<serde_json::Value> {
     let config = state.config.read().unwrap().clone();
     let eoa_address = state.auth.read().unwrap().as_ref().map(|a| a.address().to_string());
     let proxy_address = if config.polymarket_address.is_empty() { None } else { Some(config.polymarket_address.clone()) };
 
-    // Fetch USDC balances from chain in parallel (best-effort, silently ignore errors).
-    let (eoa_usdc, proxy_usdc) = tokio::join!(
-        async {
-            if let Some(addr) = &eoa_address {
-                ctf::usdc_balance(&config.polygon_rpc, addr).await.ok().map(|v| v.to_string())
-            } else { None }
-        },
-        async {
-            if let Some(addr) = &proxy_address {
-                ctf::usdc_balance(&config.polygon_rpc, addr).await.ok().map(|v| v.to_string())
-            } else { None }
-        }
-    );
-
-    // Fetch open positions for the proxy wallet from Gamma API (best-effort).
-    let positions = if let Some(addr) = &proxy_address {
-        let url = format!("https://data-api.polymarket.com/positions?user={addr}&limit=50&sizeThreshold=0.01");
-        match reqwest::get(&url).await {
-            Ok(resp) => resp.json::<serde_json::Value>().await.unwrap_or(serde_json::json!([])),
-            Err(_) => serde_json::json!([]),
-        }
-    } else {
-        serde_json::json!([])
-    };
-
     Json(serde_json::json!({
         "eoa_address": eoa_address,
         "proxy_address": proxy_address,
-        "eoa_usdc": eoa_usdc,
-        "proxy_usdc": proxy_usdc,
-        "positions": positions,
         "sig_type": config.signature_type,
     }))
 }
@@ -725,11 +713,13 @@ struct LimitsRequest {
     revert_delay_ms: Option<u64>,
     fill_poll_interval_ms: Option<u64>,
     fill_poll_timeout_ms: Option<u64>,
+    signal_gap_secs: Option<u64>,
     dry_run: Option<bool>,
     edge_wicket: Option<f64>,
     edge_boundary_4: Option<f64>,
     edge_boundary_6: Option<f64>,
     breakeven_timeout_ms: Option<u64>,
+    revert_timeout_ms: Option<u64>,
 }
 
 async fn post_limits(
@@ -756,11 +746,13 @@ async fn post_limits(
     if let Some(v) = body.revert_delay_ms { config.revert_delay_ms = v; }
     if let Some(v) = body.fill_poll_interval_ms { config.fill_poll_interval_ms = v; }
     if let Some(v) = body.fill_poll_timeout_ms { config.fill_poll_timeout_ms = v; }
+    if let Some(v) = body.signal_gap_secs { config.signal_gap_secs = v; }
     if let Some(v) = body.dry_run { config.dry_run = v; }
     if let Some(v) = body.edge_wicket { config.edge_wicket = v; }
     if let Some(v) = body.edge_boundary_4 { config.edge_boundary_4 = v; }
     if let Some(v) = body.edge_boundary_6 { config.edge_boundary_6 = v; }
     if let Some(v) = body.breakeven_timeout_ms { config.breakeven_timeout_ms = v; }
+    if let Some(v) = body.revert_timeout_ms { config.revert_timeout_ms = v; }
     config.persist();
     drop(config); // release write lock before acquiring position mutex
 
@@ -808,7 +800,7 @@ async fn post_start_innings(
         None => return Err((StatusCode::INTERNAL_SERVER_ERROR, "auth not initialized".into())),
     };
 
-    let (signal_tx, signal_rx) = tokio::sync::broadcast::channel::<CricketSignal>(64);
+    let (signal_tx, signal_rx) = tokio::sync::broadcast::channel::<DispatchedSignal>(64);
 
     *state.signal_tx.write().unwrap() = Some(signal_tx);
     *state.phase.write().unwrap() = MatchPhase::InningsRunning;
@@ -907,9 +899,46 @@ async fn post_start_innings(
 
         // Bridge task: forward WS fills to both the mpsc channel (for strategy)
         // and the AppState buffer (for revert monitors and other consumers).
+        // Also persists every fill into the `user_fills` ledger (B6) — this
+        // is the only place per-MATCHED-event granularity is captured; the
+        // strategy's downstream `clob_orders.size_matched` only carries the
+        // running aggregate.
         let bridge_app = state.clone();
         tokio::spawn(async move {
             while let Some(event) = bridge_rx.recv().await {
+                // B6: persist before fanning out so a panic downstream does
+                // not lose the fill record.
+                if let Some(ref db) = *bridge_app.db.read().unwrap() {
+                    let cfg = bridge_app.config.read().unwrap();
+                    let team = if event.asset_id == cfg.team_a_token_id {
+                        cfg.team_a_name.as_str()
+                    } else if event.asset_id == cfg.team_b_token_id {
+                        cfg.team_b_name.as_str()
+                    } else {
+                        ""
+                    };
+                    let correlation_id = db
+                        .lookup_correlation_id(&event.order_id)
+                        .unwrap_or_default();
+                    let side_str = format!("{}", event.side);
+                    let size_str = event.filled_size.to_string();
+                    let price_str = event.avg_price.to_string();
+                    let ts = crate::state::ist_now();
+                    db.insert_user_fill(&crate::db::UserFill {
+                        ts_ist: &ts,
+                        polymarket_trade_id: event.polymarket_trade_id.as_deref(),
+                        order_id: &event.order_id,
+                        correlation_id: &correlation_id,
+                        asset_id: &event.asset_id,
+                        team,
+                        side: &side_str,
+                        size: &size_str,
+                        price: &price_str,
+                        status: &event.status,
+                        slug: &cfg.market_slug,
+                        raw_json: &event.raw_json,
+                    });
+                }
                 bridge_app.buffer_fill_event(event.clone());
                 let _ = fill_tx_for_ws.send(event).await;
             }
@@ -1051,7 +1080,8 @@ async fn post_stop_innings(
     // innings counter and batting team will be toggled twice (double-switch bug).
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
-        let _ = tx.send(CricketSignal::InningsOver);
+        let dispatched = state.make_dispatch(CricketSignal::InningsOver);
+        let _ = tx.send(dispatched);
     }
     *state.signal_tx.write().unwrap() = None;
 
@@ -1092,8 +1122,17 @@ async fn post_signal(
         return Err((StatusCode::CONFLICT, "no innings running — start innings first".into()));
     }
 
-    let parsed = CricketSignal::parse(&body.signal)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown signal: {}", body.signal)))?;
+    // Parse first; on failure, capture as PARSE_ERROR so the ledger has a
+    // record of every receive. The `event_seq` allocated here only feeds the
+    // ledger row — no downstream broadcast happens.
+    let parsed = match CricketSignal::parse(&body.signal) {
+        Some(p) => p,
+        None => {
+            let event_seq = state.next_event_seq();
+            state.capture_signal(&body.signal, "ui", event_seq, "PARSE_ERROR");
+            return Err((StatusCode::BAD_REQUEST, format!("unknown signal: {}", body.signal)));
+        }
+    };
 
     if parsed == CricketSignal::MatchOver {
         return Err((StatusCode::BAD_REQUEST, "use /api/match-over endpoint for MO".into()));
@@ -1103,16 +1142,53 @@ async fn post_signal(
     }
 
     let tx = state.signal_tx.read().unwrap().clone();
-    if let Some(tx) = tx {
-        tx.send(parsed.clone())
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
-    } else {
+    let Some(tx) = tx else {
         return Err((StatusCode::CONFLICT, "signal channel not ready".into()));
+    };
+
+    // Allocate event_seq once; share it between the ledger row and the
+    // broadcast envelope so downstream order rows can be joined back.
+    let dispatched = state.make_dispatch(parsed.clone());
+    let event_seq = dispatched.event_seq;
+    let correlation_id = dispatched.correlation_id.clone();
+
+    // A1: enforce the dispatch gap. Inside the window we still record the
+    // signal (handler is the single source of truth for the ledger) but do
+    // not broadcast — strategy only sees `FORWARDED` rows.
+    if let Some(gap_secs) = state.check_and_update_dispatch_gap() {
+        state.capture_signal(&body.signal, "ui", event_seq, "GAP_REJECTED");
+        tracing::info!(
+            source = "ui",
+            signal = %parsed,
+            event_seq,
+            correlation_id = %correlation_id,
+            gap_secs,
+            "signal dropped — within dispatch gap",
+        );
+        state.push_event("signal", &format!("{parsed} (event{event_seq}, dropped: gap)"));
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "dropped": "gap",
+            "signal": body.signal,
+            "event_seq": event_seq,
+            "gap_secs": gap_secs,
+        })));
     }
 
-    state.capture_signal(&body.signal, "ui");
-    state.push_event("signal", &format!("{parsed}"));
-    Ok(Json(serde_json::json!({"ok": true, "signal": body.signal})))
+    state.capture_signal(&body.signal, "ui", event_seq, "FORWARDED");
+
+    tx.send(dispatched)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
+
+    tracing::info!(
+        source = "ui",
+        signal = %parsed,
+        event_seq,
+        correlation_id = %correlation_id,
+        "signal forwarded",
+    );
+    state.push_event("signal", &format!("{parsed} (event{event_seq})"));
+    Ok(Json(serde_json::json!({"ok": true, "signal": body.signal, "event_seq": event_seq})))
 }
 
 // ── Telegram signal webhook ──────────────────────────────────────────────────
@@ -1144,8 +1220,15 @@ async fn post_tg_signal(
     let raw_text = extract_signal_text(&body)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "could not extract signal from body".into()))?;
 
-    let parsed = CricketSignal::parse(&raw_text)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("unknown signal: {raw_text}")))?;
+    // Parse first; on failure, capture as PARSE_ERROR for ledger completeness.
+    let parsed = match CricketSignal::parse(&raw_text) {
+        Some(p) => p,
+        None => {
+            let event_seq = state.next_event_seq();
+            state.capture_signal(&raw_text, "telegram", event_seq, "PARSE_ERROR");
+            return Err((StatusCode::BAD_REQUEST, format!("unknown signal: {raw_text}")));
+        }
+    };
 
     // IO and MO should go through the same logic as dedicated endpoints
     // to ensure proper state transitions (phase changes, etc.)
@@ -1157,17 +1240,65 @@ async fn post_tg_signal(
     }
 
     let tx = state.signal_tx.read().unwrap().clone();
-    if let Some(tx) = tx {
-        tx.send(parsed.clone())
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
-    } else {
+    let Some(tx) = tx else {
         return Err((StatusCode::CONFLICT, "signal channel not ready".into()));
+    };
+
+    let dispatched = state.make_dispatch(parsed.clone());
+    let event_seq = dispatched.event_seq;
+    let correlation_id = dispatched.correlation_id.clone();
+
+    // A1: dispatch gap — capture even when dropped so the ledger sees every receive.
+    if let Some(gap_secs) = state.check_and_update_dispatch_gap() {
+        state.capture_signal(&raw_text, "telegram", event_seq, "GAP_REJECTED");
+        let latency_us = recv_time.elapsed().as_micros();
+        tracing::info!(
+            source = "telegram",
+            signal = %parsed,
+            event_seq,
+            correlation_id = %correlation_id,
+            gap_secs,
+            latency_us,
+            "tg-signal dropped — within dispatch gap",
+        );
+        state.push_event(
+            "tg-signal",
+            &format!("{parsed} (event{event_seq}, dropped: gap, {latency_us}us)"),
+        );
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "dropped": "gap",
+            "signal": format!("{parsed}"),
+            "event_seq": event_seq,
+            "gap_secs": gap_secs,
+            "latency_us": latency_us,
+        })));
     }
 
-    state.capture_signal(&raw_text, "telegram");
+    state.capture_signal(&raw_text, "telegram", event_seq, "FORWARDED");
+
+    tx.send(dispatched)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "signal channel closed".into()))?;
+
     let latency_us = recv_time.elapsed().as_micros();
-    state.push_event("tg-signal", &format!("{parsed} ({latency_us}us)"));
-    Ok(Json(serde_json::json!({"ok": true, "signal": format!("{parsed}"), "latency_us": latency_us})))
+    // B2 (TODO.md): the telegram receipt/decode/forward line lives here in
+    // the handler, not in the strategy — strategy logs cover dispatch
+    // (NORMAL/WAIT/AUGMENT) and order lifecycle.
+    tracing::info!(
+        source = "telegram",
+        signal = %parsed,
+        event_seq,
+        correlation_id = %correlation_id,
+        latency_us,
+        "tg-signal forwarded",
+    );
+    state.push_event("tg-signal", &format!("{parsed} (event{event_seq}, {latency_us}us)"));
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "signal": format!("{parsed}"),
+        "event_seq": event_seq,
+        "latency_us": latency_us,
+    })))
 }
 
 fn extract_signal_text(body: &[u8]) -> Option<String> {
@@ -1232,7 +1363,8 @@ async fn post_match_over(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let tx = state.signal_tx.read().unwrap().clone();
     if let Some(tx) = tx {
-        let _ = tx.send(CricketSignal::MatchOver);
+        let dispatched = state.make_dispatch(CricketSignal::MatchOver);
+        let _ = tx.send(dispatched);
     }
 
     if let Some(cancel) = state.ws_cancel.read().unwrap().clone() {
@@ -1326,7 +1458,6 @@ async fn post_fetch_market(
         .unwrap_or_else(|| "0.01".to_string());
     let order_min_size = market["orderMinSize"].as_f64().unwrap_or(1.0);
     let order_min_size_dec = Decimal::from_str(&order_min_size.to_string()).unwrap_or(Decimal::ONE);
-    let taker_fee = market["takerBaseFee"].as_u64().unwrap_or(0) as u32;
     let seconds_delay = market["secondsDelay"].as_u64().unwrap_or(3);
 
     if restricted {
@@ -1346,6 +1477,51 @@ async fn post_fetch_market(
     let team_a_token = token_ids.first().cloned().unwrap_or_default();
     let team_b_token = token_ids.get(1).cloned().unwrap_or_default();
 
+    // V2 per-market parameters from /clob-markets/{condition_id}: fee rate +
+    // exponent (V2 fee formula), taker-order-delay flag, min-order-age.
+    let clob_http = state.config.read().unwrap().clob_http.clone();
+    let v2_info = match crate::clob_market::fetch(
+        &reqwest::Client::new(),
+        &clob_http,
+        &condition_id,
+    ).await {
+        Ok(info) => Some(info),
+        Err(e) => {
+            tracing::warn!(error = %e, "clob-markets V2 fetch failed — fee rate will be 0");
+            state.push_event("warn", &format!("V2 market info fetch failed: {e}"));
+            None
+        }
+    };
+    let (fee_rate, fee_exponent, takers_only_fees) = v2_info
+        .as_ref()
+        .map(|i| (i.fee_rate(), i.fee_exponent(), i.takers_only()))
+        .unwrap_or((0.0, 0.0, true));
+    if let Some(info) = &v2_info {
+        if info.taker_order_delay_enabled {
+            tracing::error!("market has taker-order-delay (itode=true) — strategy edge is gone");
+            state.push_event("warn", "Market has taker-order-delay enabled — DO NOT trade with low-latency strategy");
+        }
+        if !info.takers_only() && info.fee_rate() > 0.0 {
+            tracing::error!(
+                "market has non-zero maker fee (fd.to=false) — strategy assumes maker reverts are fee-free; refusing to trade",
+            );
+            state.push_event(
+                "error",
+                "Market charges maker fee (fd.to=false) — refusing to start; revert PnL math would be wrong",
+            );
+        }
+        if info.min_order_age_secs > 0 {
+            tracing::warn!(min_order_age_secs = info.min_order_age_secs, "market enforces min order age");
+            state.push_event("warn", &format!("Market enforces min_order_age={}s — fresh orders may be rejected", info.min_order_age_secs));
+        }
+        if info.rfq_enabled {
+            tracing::info!("market is RFQ-enabled");
+        }
+        if let Some(gst) = &info.game_start {
+            tracing::info!(game_start = %gst, "V2 market game start time");
+        }
+    }
+
     {
         let mut config = state.config.write().unwrap();
         config.team_a_name = team_a_name.clone();
@@ -1356,12 +1532,14 @@ async fn post_fetch_market(
         config.neg_risk = neg_risk;
         config.tick_size = tick_size.clone();
         config.order_min_size = order_min_size_dec;
-        config.fee_rate_bps = taker_fee;
+        config.fee_rate = fee_rate;
+        config.fee_exponent = fee_exponent;
+        config.takers_only_fees = takers_only_fees;
         config.market_slug = body.slug.clone();
         config.persist();
     }
 
-    state.push_event("setup", &format!("fetched market: {} vs {} (tick={}, min_size={}, fee={}bps, delay={}s)", team_a_name, team_b_name, tick_size, order_min_size, taker_fee, seconds_delay));
+    state.push_event("setup", &format!("fetched market: {} vs {} (tick={}, min_size={}, fee_rate={:.4}, exp={:.2}, takers_only={}, delay={}s)", team_a_name, team_b_name, tick_size, order_min_size, fee_rate, fee_exponent, takers_only_fees, seconds_delay));
 
     // Start/restart orderbook WS so book data shows before innings
     start_book_ws(&state);
@@ -1376,7 +1554,9 @@ async fn post_fetch_market(
         "neg_risk": neg_risk,
         "tick_size": tick_size,
         "order_min_size": order_min_size,
-        "fee_rate_bps": taker_fee,
+        "fee_rate": fee_rate,
+        "fee_exponent": fee_exponent,
+        "takers_only_fees": takers_only_fees,
         "seconds_delay": seconds_delay,
         "restricted": restricted,
     })))
@@ -1700,6 +1880,72 @@ async fn get_latency(State(state): State<S>) -> Json<crate::latency::LatencySnap
     Json(state.latency.snapshot())
 }
 
+// ── V2 Positions (data-api passthrough) & Balance (CLOB /balance-allowance) ──
+
+/// GET /api/positions — proxy to data-api.polymarket.com/positions for the
+/// configured proxy wallet. Public endpoint, no auth needed. Returns the raw
+/// data-api shape so the frontend renders the enriched columns directly.
+async fn get_positions(State(state): State<S>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let proxy = {
+        let cfg = state.config.read().unwrap();
+        cfg.polymarket_address.clone()
+    };
+    if proxy.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "polymarket_address not configured".into()));
+    }
+    let url = format!(
+        "https://data-api.polymarket.com/positions?user={proxy}&sortBy=CURRENT&sortDirection=DESC&sizeThreshold=1&limit=200"
+    );
+    let resp = reqwest::get(&url).await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("data-api fetch failed: {e}")))?;
+    let status = resp.status();
+    let body = resp.text().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("data-api read body: {e}")))?;
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("data-api {status}: {body}")));
+    }
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("data-api JSON parse: {e}")))?;
+    Ok(Json(json))
+}
+
+/// GET /api/balance — calls CLOB `/balance-allowance` with L2 HMAC. Returns
+/// pUSD balance + V2 exchange allowance for the active market's collateral.
+/// No on-chain pUSD address required — CLOB resolves it server-side.
+async fn get_v2_balance(State(state): State<S>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Clone the auth out of the lock so the guard isn't held across await.
+    let auth = {
+        let g = state.auth.read().unwrap();
+        g.as_ref()
+            .cloned()
+            .ok_or_else(|| (StatusCode::PRECONDITION_FAILED, "ClobAuth not derived yet (set wallet first)".into()))?
+    };
+    let sig_type = state.config.read().unwrap().signature_type;
+    // CRITICAL: Polymarket's L2 HMAC is signed over the bare path WITHOUT
+    // query string (matches py-clob-client-v2 client.py::get_balance_allowance,
+    // which calls _l2_headers("GET", "/balance-allowance") and then attaches
+    // params via the HTTP client's params= kwarg). Including query params in
+    // the signed path produces a 401 "Invalid api key".
+    let path = "/balance-allowance";
+    let headers = auth.l2_headers("GET", path, None)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("l2_headers: {e}")))?;
+    let url = format!("{}{}", auth.clob_http_url(), path);
+    let resp = auth.http_client()
+        .get(&url)
+        .headers(headers)
+        .query(&[("asset_type", "COLLATERAL"), ("signature_type", &sig_type.to_string())])
+        .send().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("clob fetch failed: {e}")))?;
+    let status = resp.status();
+    let body = resp.text().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("clob read body: {e}")))?;
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("/balance-allowance {status}: {body}")));
+    }
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::json!({"raw": body}));
+    Ok(Json(json))
+}
+
 // ── Taker UI & status ─────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1710,9 +1956,12 @@ struct TakerTradeEntry {
     size: Decimal,
     price: Decimal,
     cost: Decimal,
+    /// V2 platform fee for this fill, USDC. `0` for makers (`fd.to=true`).
+    fee: Decimal,
     order_type: String,
     label: String,
     order_id: String,
+    /// Running gross PnL (sum of net cash flow up to and including this trade).
     pnl: Decimal,
 }
 
@@ -1751,6 +2000,10 @@ struct TakerStatusResponse {
     // PnL
     unrealized_pnl: Decimal,
     round_trip_pnl: Decimal,
+    /// L6: cumulative platform fee paid this match, USDC.
+    total_fee_paid: Decimal,
+    /// `round_trip_pnl − total_fee_paid` (net of fees).
+    net_pnl: Decimal,
     // Trades and reverts
     trades: Vec<TakerTradeEntry>,
     pending_reverts: Vec<PendingRevertEntry>,
@@ -1759,6 +2012,8 @@ struct TakerStatusResponse {
     closed_orders: Vec<crate::db::ClobOrderRow>,
     // Round-trips
     round_trips: Vec<crate::db::RoundTrip>,
+    /// S: per-signal 4-leg lifecycle. Newest-first.
+    signal_groups: Vec<crate::state::SignalGroup>,
     // Latency
     latency: crate::latency::LatencySnapshot,
     // Settings summary
@@ -1768,7 +2023,11 @@ struct TakerStatusResponse {
     edge_boundary_4: f64,
     edge_boundary_6: f64,
     revert_delay_ms: u64,
+    /// Wall-clock window before a maker revert is forced into a taker FAK
+    /// exit. `0` disables. Default `15000`.
+    revert_timeout_ms: u64,
     fill_poll_timeout_ms: u64,
+    signal_gap_secs: u64,
     // Recent events
     events: Vec<crate::state::EventEntry>,
 }
@@ -1810,9 +2069,10 @@ async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
     let token_value = pos.team_a_tokens * team_a_mid + pos.team_b_tokens * team_b_mid;
     let unrealized_pnl = token_value - pos.total_spent;
 
-    // Round-trip PnL from DB (the real PnL — completed entry+exit pairs)
+    // Round-trip PnL from DB (the real PnL — completed entry+exit pairs).
+    // L6: also sum per-trade fees and compute net PnL.
     let slug = config.market_slug.clone();
-    let (round_trip_pnl, round_trips, open_orders, closed_orders) = {
+    let (round_trip_pnl, round_trips, open_orders, closed_orders, total_fee_paid) = {
         let db = state.db.read().unwrap();
         if let Some(ref db) = *db {
             (
@@ -1820,11 +2080,15 @@ async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
                 db.get_round_trips(&slug, 100),
                 db.get_open_orders(&slug),
                 db.get_closed_orders(&slug, 100),
+                db.total_fee_paid(&slug),
             )
         } else {
-            (Decimal::ZERO, Vec::new(), Vec::new(), Vec::new())
+            (Decimal::ZERO, Vec::new(), Vec::new(), Vec::new(), Decimal::ZERO)
         }
     };
+    let net_pnl = round_trip_pnl - total_fee_paid;
+    // S: snapshot of the signal-group ledger.
+    let signal_groups = state.signal_groups_snapshot(50);
 
     // Build trade entries with running PnL
     let trades = state.trade_log.lock().unwrap().clone();
@@ -1842,6 +2106,7 @@ async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
             size: t.size,
             price: t.price,
             cost: t.cost,
+            fee: t.fee,
             order_type: t.order_type.clone(),
             label: t.label.clone(),
             order_id: t.order_id.clone(),
@@ -1888,11 +2153,14 @@ async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
         book_b_ask: bb_ask,
         unrealized_pnl,
         round_trip_pnl,
+        total_fee_paid,
+        net_pnl,
         trades: trade_entries,
         pending_reverts,
         open_orders,
         closed_orders,
         round_trips,
+        signal_groups,
         latency: state.latency.snapshot(),
         market_slug: slug,
         max_trade_usdc: config.max_trade_usdc,
@@ -1900,7 +2168,9 @@ async fn get_taker_status(State(state): State<S>) -> Json<TakerStatusResponse> {
         edge_boundary_4: config.edge_boundary_4,
         edge_boundary_6: config.edge_boundary_6,
         revert_delay_ms: config.revert_delay_ms,
+        revert_timeout_ms: config.revert_timeout_ms,
         fill_poll_timeout_ms: config.fill_poll_timeout_ms,
+        signal_gap_secs: config.signal_gap_secs,
         events,
     })
 }
@@ -1950,7 +2220,7 @@ async fn get_sweep_status(State(state): State<S>) -> Json<serde_json::Value> {
         "config": sweep_cfg,
         "resting_orders": orders.len(),
         "orders": orders,
-        "builder_key_set": !config.builder_api_key.is_empty(),
+        "builder_code_set": !config.builder_code.is_empty(),
     }))
 }
 
@@ -2120,21 +2390,17 @@ async fn get_sweep_balances(State(state): State<S>) -> Json<serde_json::Value> {
 }
 
 #[derive(Deserialize)]
-struct BuilderKeysRequest {
-    builder_api_key: Option<String>,
-    builder_api_secret: Option<String>,
-    builder_api_passphrase: Option<String>,
+struct BuilderCodeRequest {
+    builder_code: Option<String>,
 }
 
 async fn post_sweep_builder(
     State(state): State<S>,
-    Json(body): Json<BuilderKeysRequest>,
+    Json(body): Json<BuilderCodeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut config = state.config.write().unwrap();
-    if let Some(v) = body.builder_api_key { config.builder_api_key = v; }
-    if let Some(v) = body.builder_api_secret { config.builder_api_secret = v; }
-    if let Some(v) = body.builder_api_passphrase { config.builder_api_passphrase = v; }
+    if let Some(v) = body.builder_code { config.builder_code = v; }
     config.persist();
-    state.push_event("sweep", "builder API keys updated");
+    state.push_event("sweep", "builder code updated");
     Ok(Json(serde_json::json!({"ok": true})))
 }

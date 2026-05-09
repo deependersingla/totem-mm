@@ -11,13 +11,23 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Db;
 
 /// An oracle event (signal) to capture.
+///
+/// `event_seq` and `dispatch_decision` are populated from the request handler
+/// once the per-signal id has been allocated and the dispatch outcome is known.
+/// Until B4 wires the handler-side allocation, callers may leave `event_seq=0`
+/// and `dispatch_decision="PENDING"` and rely on
+/// [`crate::db::Db::update_oracle_event_decision`] to overwrite the decision
+/// after strategy classifies the signal (NORMAL / WAIT / AUGMENT / …).
 #[derive(Debug, Clone)]
 pub struct OracleEvent {
-    pub signal: String,      // "4", "6", "W", "IO", "MO"
-    pub source: String,      // "telegram", "ui"
+    pub signal: String,             // "4", "6", "W", "IO", "MO"
+    pub source: String,             // "telegram", "ui"
     pub innings: u8,
     pub batting: String,
     pub bowling: String,
+    pub ts_ist: String,             // "HH:MM:SS" in IST, computed at capture time
+    pub event_seq: u64,             // 0 until B4 plumbs the real value
+    pub dispatch_decision: String,  // "PENDING" until decided
 }
 
 /// Spawn the background oracle event writer.
