@@ -52,3 +52,6 @@ polymarket-taker/telegram-bot/config.json
 # Runtime / generated state
 scripts/schedule/upcoming_matches.json
 scripts/schedule/__pycache__/
+
+# Temp analysis
+.tmp/
