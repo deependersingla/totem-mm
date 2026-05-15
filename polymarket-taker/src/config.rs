@@ -101,6 +101,11 @@ pub struct SavedSettings {
     /// moved by ≥ 2× the revert edge, i.e. the move is already past where
     /// the directional thesis would have profited.
     pub move_threshold_multiplier: Option<f64>,
+    /// When true, skip the trade entirely if the book already moved in the
+    /// news direction on *either* leg over `move_lookback_ms` — the "signal
+    /// arrived late, edge is gone" guard. Default true. See
+    /// `strategy::premove_blocks_entry`.
+    pub skip_on_premove: Option<bool>,
     pub order_min_size: Option<String>,
     pub fill_ws_timeout_ms: Option<u64>,
     pub breakeven_timeout_ms: Option<u64>,
@@ -180,6 +185,7 @@ impl SavedSettings {
             breakeven_timeout_ms: Some(config.breakeven_timeout_ms),
             move_lookback_ms: Some(config.move_lookback_ms),
             move_threshold_multiplier: Some(config.move_threshold_multiplier),
+            skip_on_premove: Some(config.skip_on_premove),
             maker: Some(config.maker_config.clone()),
             builder_code: Some(config.builder_code.clone()).filter(|s| !s.is_empty()),
         }
@@ -285,6 +291,12 @@ pub struct Config {
     /// threshold (in price units). Default 2.0.
     pub move_threshold_multiplier: f64,
 
+    /// When true, skip a trade-triggering signal entirely if the book already
+    /// moved in the news direction on *either* leg over `move_lookback_ms`
+    /// (the "signal arrived late" guard). Default true. When false, the old
+    /// directional/reverse behaviour applies. See `strategy::premove_blocks_entry`.
+    pub skip_on_premove: bool,
+
     pub maker_config: MakerConfig,
 
     /// V2 builderCode — 32-byte hex (0x-prefixed). Empty string means no
@@ -389,6 +401,7 @@ impl Config {
                 .unwrap_or_else(|| env_or("BREAKEVEN_TIMEOUT_MS", "10000").parse().unwrap_or(10000)),
             move_lookback_ms: saved.move_lookback_ms.unwrap_or(3_000),
             move_threshold_multiplier: saved.move_threshold_multiplier.unwrap_or(2.0),
+            skip_on_premove: saved.skip_on_premove.unwrap_or(true),
             maker_config: saved.maker.unwrap_or_default(),
 
             builder_code: saved.builder_code

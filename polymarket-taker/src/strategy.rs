@@ -266,9 +266,20 @@ pub async fn run(
                 // Decide directional vs reverse entry based on pre-signal
                 // book move. WICKET legs default to SELL batting + BUY bowling;
                 // reverse swaps to BUY batting + SELL bowling.
-                let direction = resolve_entry_direction_for(
+                let direction = match resolve_entry_plan_for(
                     &app, &config, LegPair::SellBattingBuyBowling, "WICKET", batting, &books,
-                );
+                ) {
+                    EntryPlan::SkipDelayed => {
+                        let msg = "WICKET: DELAYED — market pre-moved before signal — trade skipped".to_string();
+                        tracing::warn!("{msg}");
+                        app.push_event("skip", &msg);
+                        if let Some(ref db) = *app.db.read().unwrap() {
+                            db.update_oracle_event_decision(event_seq, "DELAYED_SKIP");
+                        }
+                        continue;
+                    }
+                    EntryPlan::Trade(d) => d,
+                };
                 if let Some(ref db) = *app.db.read().unwrap() {
                     db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
                 }
@@ -337,9 +348,20 @@ pub async fn run(
                     } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
                         let label = format!("RUN{r}");
-                        let direction = resolve_entry_direction_for(
+                        let direction = match resolve_entry_plan_for(
                             &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
-                        );
+                        ) {
+                            EntryPlan::SkipDelayed => {
+                                let msg = format!("{label}: DELAYED — market pre-moved before signal — boundary skipped");
+                                tracing::warn!("{msg}");
+                                app.push_event("skip", &msg);
+                                if let Some(ref db) = *app.db.read().unwrap() {
+                                    db.update_oracle_event_decision(event_seq, "DELAYED_SKIP");
+                                }
+                                continue;
+                            }
+                            EntryPlan::Trade(d) => d,
+                        };
                         if let Some(ref db) = *app.db.read().unwrap() {
                             db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
                         }
@@ -364,9 +386,20 @@ pub async fn run(
                     } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
                         let label = format!("WD{r}");
-                        let direction = resolve_entry_direction_for(
+                        let direction = match resolve_entry_plan_for(
                             &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
-                        );
+                        ) {
+                            EntryPlan::SkipDelayed => {
+                                let msg = format!("{label}: DELAYED — market pre-moved before signal — boundary skipped");
+                                tracing::warn!("{msg}");
+                                app.push_event("skip", &msg);
+                                if let Some(ref db) = *app.db.read().unwrap() {
+                                    db.update_oracle_event_decision(event_seq, "DELAYED_SKIP");
+                                }
+                                continue;
+                            }
+                            EntryPlan::Trade(d) => d,
+                        };
                         if let Some(ref db) = *app.db.read().unwrap() {
                             db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
                         }
@@ -391,9 +424,20 @@ pub async fn run(
                     } else if price_in_safe_range(&config, &books) {
                         app.latency.record(LatencyMetric::SignalToDecision, signal_time.elapsed());
                         let label = format!("NB{r}");
-                        let direction = resolve_entry_direction_for(
+                        let direction = match resolve_entry_plan_for(
                             &app, &config, LegPair::SellBowlingBuyBatting, &label, state.batting, &books,
-                        );
+                        ) {
+                            EntryPlan::SkipDelayed => {
+                                let msg = format!("{label}: DELAYED — market pre-moved before signal — boundary skipped");
+                                tracing::warn!("{msg}");
+                                app.push_event("skip", &msg);
+                                if let Some(ref db) = *app.db.read().unwrap() {
+                                    db.update_oracle_event_decision(event_seq, "DELAYED_SKIP");
+                                }
+                                continue;
+                            }
+                            EntryPlan::Trade(d) => d,
+                        };
                         if let Some(ref db) = *app.db.read().unwrap() {
                             db.update_oracle_event_decision(event_seq, dispatch_decision_tag(direction));
                         }
@@ -2238,24 +2282,87 @@ pub fn dispatch_decision_tag(direction: EntryDirection) -> &'static str {
     }
 }
 
-/// Resolve directional vs reverse entry from `AppState` (price history,
-/// tick size) and the current books. Logs the decision with the relevant
-/// touches so post-match review can attribute outcomes.
-pub(crate) fn resolve_entry_direction_for(
+/// True when the book already moved in the news direction by ≥ `threshold`
+/// on *either* leg we'd cross, over the price-history lookback window.
+///
+/// This is the "we're late" detector: if the market reacted before our oracle
+/// delivered the signal, the edge is gone. Unlike `decide_entry_direction`
+/// (which needs *both* sides to have moved before flipping to reverse), this
+/// trips on *either* side — one confirmed leg move is enough to treat the
+/// signal as stale.
+///
+/// Cold start (no past snapshot) and one-sided book gaps return `false`: with
+/// no evidence of a pre-move we keep trading, mirroring
+/// `decide_entry_direction`'s conservative fallback. Only moves in the news
+/// direction count — an adverse/opposite move is book noise, not "we're late".
+pub fn premove_blocks_entry(
+    legs: LegPair,
+    batting: Team,
+    current: TouchSnapshot,
+    past: Option<TouchSnapshot>,
+    threshold: Decimal,
+) -> bool {
+    let past = match past {
+        Some(p) => p,
+        None => return false, // cold start — no pre-move evidence
+    };
+    let (sell_team, buy_team) = match legs {
+        LegPair::SellBattingBuyBowling => (batting, batting.opponent()),
+        LegPair::SellBowlingBuyBatting => (batting.opponent(), batting),
+    };
+    let drop_in_sell_bid = match (past.bid(sell_team), current.bid(sell_team)) {
+        (Some(p), Some(c)) => p - c,
+        _ => return false, // missing data — don't skip on an incomplete book
+    };
+    let rise_in_buy_ask = match (past.ask(buy_team), current.ask(buy_team)) {
+        (Some(p), Some(c)) => c - p,
+        _ => return false,
+    };
+    drop_in_sell_bid >= threshold || rise_in_buy_ask >= threshold
+}
+
+/// What to do with a trade-triggering signal after the pre-signal-move check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryPlan {
+    /// Trade, using this entry direction (directional vs reverse).
+    Trade(EntryDirection),
+    /// Skip entirely — `skip_on_premove` is enabled and the book already moved
+    /// in the news direction on a leg over the lookback window (the signal
+    /// arrived late). No order is placed.
+    SkipDelayed,
+}
+
+/// Resolve the entry plan from `AppState` (price history, tick size) and the
+/// current books. When `skip_on_premove` is enabled and the book already moved
+/// on either leg over the lookback window, returns `SkipDelayed` (we're late —
+/// don't trade). Otherwise returns `Trade` with the directional/reverse
+/// decision. Logs the outcome for post-match review.
+pub(crate) fn resolve_entry_plan_for(
     app: &Arc<AppState>,
     config: &Config,
     legs: LegPair,
     label: &str,
     batting: Team,
     books: &(OrderBook, OrderBook),
-) -> EntryDirection {
+) -> EntryPlan {
     let now = Instant::now();
     let current = TouchSnapshot::from_books(now, books);
     let past = app.price_history.touches_lookback_ago(now);
     let tick_size = app.resolve_tick_size(&config.tick_size);
     let threshold = move_threshold(label, config, tick_size);
-    let direction = decide_entry_direction(legs, batting, current, past, threshold);
 
+    if config.skip_on_premove && premove_blocks_entry(legs, batting, current, past, threshold) {
+        tracing::info!(
+            signal = label,
+            threshold = %threshold,
+            lookback_ms = config.move_lookback_ms,
+            had_past = past.is_some(),
+            "DELAYED — book pre-moved ≥ threshold on a leg; trade skipped"
+        );
+        return EntryPlan::SkipDelayed;
+    }
+
+    let direction = decide_entry_direction(legs, batting, current, past, threshold);
     tracing::info!(
         signal = label,
         direction = ?direction,
@@ -2263,7 +2370,7 @@ pub(crate) fn resolve_entry_direction_for(
         had_past = past.is_some(),
         "entry direction decided"
     );
-    direction
+    EntryPlan::Trade(direction)
 }
 
 /// Compute the price-move threshold for a given signal type.

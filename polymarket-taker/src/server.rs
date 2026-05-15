@@ -326,6 +326,7 @@ async fn get_config(State(state): State<S>) -> Json<serde_json::Value> {
         "fill_poll_interval_ms": config.fill_poll_interval_ms,
         "fill_poll_timeout_ms": config.fill_poll_timeout_ms,
         "signal_gap_secs": config.signal_gap_secs,
+        "skip_on_premove": config.skip_on_premove,
         "dry_run": config.dry_run,
         "signature_type": config.signature_type,
         "neg_risk": config.neg_risk,
@@ -720,6 +721,7 @@ struct LimitsRequest {
     edge_boundary_6: Option<f64>,
     breakeven_timeout_ms: Option<u64>,
     revert_timeout_ms: Option<u64>,
+    skip_on_premove: Option<bool>,
 }
 
 async fn post_limits(
@@ -752,6 +754,7 @@ async fn post_limits(
     if let Some(v) = body.edge_boundary_4 { config.edge_boundary_4 = v; }
     if let Some(v) = body.edge_boundary_6 { config.edge_boundary_6 = v; }
     if let Some(v) = body.breakeven_timeout_ms { config.breakeven_timeout_ms = v; }
+    if let Some(v) = body.skip_on_premove { config.skip_on_premove = v; }
     if let Some(v) = body.revert_timeout_ms { config.revert_timeout_ms = v; }
     config.persist();
     drop(config); // release write lock before acquiring position mutex
