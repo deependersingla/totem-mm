@@ -53,6 +53,7 @@ fn test_config() -> Config {
         breakeven_timeout_ms: 3000,
         move_lookback_ms: 3000,
         move_threshold_multiplier: 2.0,
+        skip_on_premove: false,
         maker_config: crate::config::MakerConfig::default(),
         builder_code: String::new(),
     }

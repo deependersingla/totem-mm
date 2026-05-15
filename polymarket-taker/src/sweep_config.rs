@@ -340,6 +340,7 @@ impl SweepAppConfig {
             breakeven_timeout_ms: 3000,
             move_lookback_ms: 0,           // sweep doesn't use move detection
             move_threshold_multiplier: 0.0,
+            skip_on_premove: false, // sweep does its own freshness checks
             maker_config: crate::config::MakerConfig::default(),
             builder_code: self.builder_code.clone(),
         }

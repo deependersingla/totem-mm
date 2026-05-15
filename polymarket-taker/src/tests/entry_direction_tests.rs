@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use crate::price_history::TouchSnapshot;
-use crate::strategy::{decide_entry_direction, EntryDirection, LegPair};
+use crate::strategy::{decide_entry_direction, premove_blocks_entry, EntryDirection, LegPair};
 use crate::types::Team;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -235,4 +235,114 @@ fn helper_uses_caller_supplied_threshold_not_a_constant() {
     let now = touch(dec!(0.69), dec!(0.70), dec!(0.30), dec!(0.31)); // 1¢ each
     let dir = decide_entry_direction(LegPair::SellBattingBuyBowling, T_A, now, Some(past), small_threshold);
     assert_eq!(dir, EntryDirection::Reverse);
+}
+
+// ── premove_blocks_entry: the "signal arrived late" skip guard ────────────────
+//
+// Unlike decide_entry_direction (REVERSE only when BOTH sides moved), this
+// trips when EITHER leg moved ≥ threshold in the news direction. When it
+// returns true the strategy skips the trade entirely (config.skip_on_premove).
+// Cold start / missing data / adverse moves → false (keep trading).
+
+#[test]
+fn premove_blocks_when_both_sides_moved() {
+    // Superset of the REVERSE case — must also block here.
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.70), dec!(0.71), dec!(0.29), dec!(0.30));
+    let now = touch(dec!(0.63), dec!(0.64), dec!(0.36), dec!(0.37)); // 7¢ each
+    assert!(premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold));
+}
+
+#[test]
+fn premove_blocks_when_only_sell_bid_dropped() {
+    // The key difference vs decide_entry_direction: one leg is enough.
+    // Here decide_entry_direction would say Directional (book stutter).
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.70), dec!(0.71), dec!(0.29), dec!(0.30));
+    // A (sell) bid drops 7¢; B (buy) ask only rises 1¢.
+    let now = touch(dec!(0.63), dec!(0.64), dec!(0.30), dec!(0.31));
+    assert_eq!(
+        decide_entry_direction(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold),
+        EntryDirection::Directional,
+        "sanity: the both-sides rule would still trade here"
+    );
+    assert!(
+        premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold),
+        "either-side rule must block on the single confirmed leg move"
+    );
+}
+
+#[test]
+fn premove_blocks_when_only_buy_ask_rose() {
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.70), dec!(0.71), dec!(0.29), dec!(0.30));
+    // A (sell) bid drops 1¢; B (buy) ask rises 7¢.
+    let now = touch(dec!(0.69), dec!(0.70), dec!(0.36), dec!(0.37));
+    assert!(premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold));
+}
+
+#[test]
+fn premove_blocks_at_exactly_threshold_inclusive() {
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.70), dec!(0.71), dec!(0.29), dec!(0.30));
+    // Sell bid drops exactly 6¢; buy ask flat.
+    let now = touch(dec!(0.64), dec!(0.65), dec!(0.29), dec!(0.30));
+    assert!(
+        premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold),
+        "check is `>=`, not `>`"
+    );
+}
+
+#[test]
+fn premove_does_not_block_just_below_threshold() {
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.70), dec!(0.71), dec!(0.29), dec!(0.30));
+    // 5.9¢ on each side — under threshold, both legs.
+    let now = touch(dec!(0.641), dec!(0.651), dec!(0.349), dec!(0.359));
+    assert!(!premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold));
+}
+
+#[test]
+fn premove_does_not_block_on_cold_start() {
+    let threshold = dec!(0.06);
+    let now = touch(dec!(0.63), dec!(0.64), dec!(0.36), dec!(0.37));
+    assert!(
+        !premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, None, threshold),
+        "no past snapshot → no evidence of a pre-move → keep trading"
+    );
+}
+
+#[test]
+fn premove_does_not_block_on_missing_relevant_side() {
+    let threshold = dec!(0.06);
+    let past = TouchSnapshot {
+        ts: Instant::now(),
+        bid_a: None, // missing past bid for the sell (batting) leg
+        ask_a: Some(dec!(0.71)),
+        bid_b: Some(dec!(0.29)),
+        ask_b: Some(dec!(0.30)),
+    };
+    let now = touch(dec!(0.63), dec!(0.64), dec!(0.36), dec!(0.37));
+    assert!(!premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold));
+}
+
+#[test]
+fn premove_does_not_block_on_adverse_move() {
+    // Book moved the OPPOSITE way pre-signal — not "we're late on this news".
+    let threshold = dec!(0.06);
+    let past = touch(dec!(0.60), dec!(0.61), dec!(0.39), dec!(0.40));
+    // A bid rises 7¢, B ask drops 7¢ (wrong direction for a wicket on A).
+    let now = touch(dec!(0.67), dec!(0.68), dec!(0.32), dec!(0.33));
+    assert!(!premove_blocks_entry(LegPair::SellBattingBuyBowling, T_A, now, Some(past), threshold));
+}
+
+#[test]
+fn premove_blocks_boundary_legpair_on_single_leg() {
+    // Boundary by batting A: directional = SELL bowling(B) + BUY batting(A).
+    // News: B bid ↓, A ask ↑. Only the buy-side (A ask) moves ≥ threshold.
+    let threshold = dec!(0.04);
+    let past = touch(dec!(0.40), dec!(0.41), dec!(0.59), dec!(0.60));
+    // A (buy) ask rises 5¢; B (sell) bid flat.
+    let now = touch(dec!(0.40), dec!(0.46), dec!(0.59), dec!(0.60));
+    assert!(premove_blocks_entry(LegPair::SellBowlingBuyBatting, T_A, now, Some(past), threshold));
 }
